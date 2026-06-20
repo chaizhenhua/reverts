@@ -356,9 +356,9 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
         PlanSupportOptions {
             // Full generated-output mode can afford the costlier structural-bag
             // refinement. Module-only bundle matching is optimized for large
-            // single-file targets, so keep structural bags off there but still
-            // build dependency graph evidence/diagnostics from extracted module
-            // slices.
+            // single-file targets, so keep structural bags and iterative graph
+            // propagation off there but still build graph diagnostics/support
+            // after the initial top-candidate assignment.
             structural_bag: !args.module_only,
             graph_support: !args.module_only,
             graph_structure: true,
@@ -1340,6 +1340,7 @@ fn candidate_delta_json(top: &ModuleMatch, runner_up: &ModuleMatch) -> serde_jso
             - runner_up.statement_window_containment,
         "block_branch_containment": top.block_branch_containment
             - runner_up.block_branch_containment,
+        "structural_score": top.structural_score - runner_up.structural_score,
         "graph_support": top.graph_support as isize - runner_up.graph_support as isize,
         "matched_neighbor_ratio": matched_neighbor_ratio(top) - matched_neighbor_ratio(runner_up),
         "unique_string_anchor_overlap": top.source_score.unique_string_anchor_overlap as isize
@@ -2337,6 +2338,8 @@ const AMBIGUOUS_PROMOTION_NANCHOR_DELTA: f64 = 0.035;
 const AMBIGUOUS_PROMOTION_WEIGHTED_DELTA: f64 = 4.0;
 const AMBIGUOUS_PROMOTION_GRANULAR_DELTA: usize = 8;
 const AMBIGUOUS_PROMOTION_WINDOW_DELTA: usize = 2;
+const AMBIGUOUS_PROMOTION_STRUCTURAL_SCORE: f64 = 0.10;
+const AMBIGUOUS_PROMOTION_STRUCTURAL_DELTA: f64 = 0.06;
 
 type GraphEvidence = GraphNeighborhoodEvidence;
 
@@ -2360,10 +2363,10 @@ pub(crate) struct ModuleMatch {
     pub granular_hash_containment: f64,
     pub statement_window_containment: f64,
     pub block_branch_containment: f64,
-    /// Aggregate structural-bag score produced by the shared package matcher
-    /// scorer. This reuses package matcher matching mechanics for first-party
-    /// source matching instead of maintaining a separate, weaker source-only
-    /// matcher.
+    /// Aggregate normalized structural score. Full-output mode can populate it
+    /// from package matcher's structural-bag scorer; all modes also compute a
+    /// lightweight score from the already-extracted multi-granularity source
+    /// fingerprint axes so module-only matching still has structural evidence.
     pub structural_score: f64,
     /// Count of matched outgoing/incoming neighbor edges between the subject
     /// graph and the reference graph. This is the source-side analogue of
@@ -2482,6 +2485,85 @@ fn containment_ratio(overlap: usize, left_size: usize, right_size: usize) -> f64
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StructuralAxisOverlap {
+    overlap: usize,
+    subject_len: usize,
+    reference_len: usize,
+    weight: f64,
+}
+
+fn normalized_weighted_axis_overlap(axes: &[StructuralAxisOverlap]) -> f64 {
+    let overlap = axes
+        .iter()
+        .map(|axis| axis.overlap as f64 * axis.weight)
+        .sum::<f64>();
+    let subject_mass = axes
+        .iter()
+        .map(|axis| axis.subject_len as f64 * axis.weight)
+        .sum::<f64>();
+    let reference_mass = axes
+        .iter()
+        .map(|axis| axis.reference_len as f64 * axis.weight)
+        .sum::<f64>();
+    if subject_mass <= f64::EPSILON || reference_mass <= f64::EPSILON {
+        0.0
+    } else {
+        (overlap / (subject_mass * reference_mass).sqrt()).clamp(0.0, 1.0)
+    }
+}
+
+fn source_fingerprint_structural_score(
+    subject: &SourceFingerprint,
+    reference: &SourceFingerprint,
+    evidence: MatchEvidence,
+) -> f64 {
+    normalized_weighted_axis_overlap(&[
+        StructuralAxisOverlap {
+            overlap: evidence.top_level_declaration_overlap,
+            subject_len: subject.top_level_declaration_hashes.len(),
+            reference_len: reference.top_level_declaration_hashes.len(),
+            weight: 20.0,
+        },
+        StructuralAxisOverlap {
+            overlap: evidence.import_export_surface_overlap,
+            subject_len: subject.import_export_surface_hashes.len(),
+            reference_len: reference.import_export_surface_hashes.len(),
+            weight: 18.0,
+        },
+        StructuralAxisOverlap {
+            overlap: evidence.class_member_overlap,
+            subject_len: subject.class_member_hashes.len(),
+            reference_len: reference.class_member_hashes.len(),
+            weight: 18.0,
+        },
+        StructuralAxisOverlap {
+            overlap: evidence.statement_window_overlap,
+            subject_len: subject.statement_window_hashes.len(),
+            reference_len: reference.statement_window_hashes.len(),
+            weight: 10.0,
+        },
+        StructuralAxisOverlap {
+            overlap: evidence.block_branch_overlap,
+            subject_len: subject.block_branch_hashes.len(),
+            reference_len: reference.block_branch_hashes.len(),
+            weight: 9.0,
+        },
+        StructuralAxisOverlap {
+            overlap: evidence.pq_gram_overlap,
+            subject_len: subject.pq_gram_hashes.len(),
+            reference_len: reference.pq_gram_hashes.len(),
+            weight: 6.0,
+        },
+        StructuralAxisOverlap {
+            overlap: evidence.wl_overlap,
+            subject_len: subject.wl_hashes.len(),
+            reference_len: reference.wl_hashes.len(),
+            weight: 5.0,
+        },
+    ])
+}
+
 /// Sum of IDF weights over the anchors shared by `subject` and `reference`.
 fn weighted_anchor_overlap(
     subject: &BTreeSet<String>,
@@ -2537,9 +2619,24 @@ fn candidate_relevance(evidence: MatchEvidence) -> f64 {
         + evidence.source_score.function_axis_containment * 60.0
         + evidence.source_score.jsx_react_shape_jaccard * 80.0
         + (evidence.source_score.jsx_react_shape_overlap as f64) * 8.0
-        + evidence.structural_score * 120.0
+        + structural_relevance_score(evidence)
         + (evidence.graph.matched_edges as f64) * 35.0
         + evidence.graph.coverage() * 75.0
+}
+
+fn structural_relevance_score(evidence: MatchEvidence) -> f64 {
+    if evidence.weighted_anchor >= AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR
+        || evidence.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
+        || evidence.source_score.unique_string_anchor_overlap >= 1
+        || evidence.graph.matched_edges >= 1
+        || evidence.top_level_declaration_overlap >= 1
+        || evidence.import_export_surface_overlap >= 1
+        || evidence.class_member_overlap >= 1
+    {
+        evidence.structural_score * 60.0
+    } else {
+        0.0
+    }
 }
 
 fn raw_match_tier(evidence: MatchEvidence) -> MatchTier {
@@ -2684,6 +2781,9 @@ fn guarded_ambiguous_promotion(top: &ModuleMatch, runner_up: &ModuleMatch) -> bo
     if has_clear_region_containment_delta(top, runner_up) {
         return true;
     }
+    if has_clear_structural_delta(top, runner_up) {
+        return true;
+    }
     has_clear_graph_delta(top, runner_up)
 }
 
@@ -2810,6 +2910,22 @@ fn has_clear_region_containment_delta(top: &ModuleMatch, runner_up: &ModuleMatch
             || top.graph_support >= 1)
 }
 
+fn has_clear_structural_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
+    top.structural_score >= AMBIGUOUS_PROMOTION_STRUCTURAL_SCORE
+        && top.structural_score >= runner_up.structural_score + AMBIGUOUS_PROMOTION_STRUCTURAL_DELTA
+        && (top.statement_window_overlap >= 2
+            || top.block_branch_overlap >= 2
+            || top.top_level_declaration_overlap >= 1
+            || top.import_export_surface_overlap >= 1
+            || top.class_member_overlap >= 1)
+        && (top.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
+            || top.weighted_anchor >= AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR
+            || top.source_score.unique_string_anchor_overlap >= 1
+            || (top.source_score.function_axis_overlap >= 4
+                && top.source_score.function_axis_containment >= 0.25)
+            || top.graph_support >= 1)
+}
+
 fn has_clear_graph_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
     if top.graph_known_edges == 0 {
         return false;
@@ -2926,7 +3042,7 @@ fn ranked_module_matches(
             &fingerprint.string_anchors,
             &module.fingerprint.string_anchors,
         );
-        let structural_score = structural_support
+        let structural_bag_score = structural_support
             .and_then(|support| support.get(module.file_path.as_str()).copied())
             .unwrap_or(0.0);
         let graph = graph_support
@@ -2959,14 +3075,14 @@ fn ranked_module_matches(
             && class_member_overlap == 0
             && statement_window_overlap == 0
             && block_branch_overlap == 0
-            && structural_score < 1.0
+            && structural_bag_score < MEDIUM_STRUCTURAL_SCORE
             && graph.matched_edges == 0
             && weighted_anchor < 1.0
         {
             continue;
         }
         let source_score = score_source_evidence(subject, &module.profile, &index.evidence_idf);
-        let evidence = MatchEvidence {
+        let mut evidence = MatchEvidence {
             hash_match,
             asset_overlap,
             export_overlap,
@@ -2979,11 +3095,16 @@ fn ranked_module_matches(
             pq_gram_overlap,
             wl_overlap,
             source_score,
-            structural_score,
+            structural_score: structural_bag_score,
             graph,
             weighted_anchor,
             normalized_anchor,
         };
+        evidence.structural_score = structural_bag_score.max(source_fingerprint_structural_score(
+            fingerprint,
+            &module.fingerprint,
+            evidence,
+        ));
         let tier = raw_match_tier(evidence);
         let relevance = candidate_relevance(evidence);
         ranked.push(RankedModuleMatch {
@@ -3004,7 +3125,7 @@ fn ranked_module_matches(
                 granular_hash_containment,
                 statement_window_containment,
                 block_branch_containment,
-                structural_score,
+                structural_score: evidence.structural_score,
                 graph_support: graph.matched_edges,
                 graph_known_edges: graph.known_edges,
                 graph_structure: GraphStructureEvidence::default(),
@@ -4706,6 +4827,84 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             ..base
         };
         assert_eq!(raw_match_tier(corroborated), MatchTier::Medium);
+    }
+
+    #[test]
+    fn fingerprint_structural_score_uses_multigranularity_axes() {
+        let mut subject = fp(&[]);
+        subject.statement_window_hashes = BTreeSet::from(["stmt-a".to_string()]);
+        subject.block_branch_hashes = BTreeSet::from(["block-a".to_string()]);
+        subject.pq_gram_hashes = BTreeSet::from(["pq-a".to_string()]);
+        subject.wl_hashes = BTreeSet::from(["wl-a".to_string()]);
+
+        let mut reference = fp(&[]);
+        reference.statement_window_hashes = BTreeSet::from(["stmt-a".to_string()]);
+        reference.block_branch_hashes = BTreeSet::from(["block-a".to_string()]);
+        reference.pq_gram_hashes = BTreeSet::from(["pq-a".to_string()]);
+        reference.wl_hashes = BTreeSet::from(["wl-a".to_string()]);
+
+        let evidence = MatchEvidence {
+            hash_match: false,
+            asset_overlap: 0,
+            export_overlap: 0,
+            function_overlap: 0,
+            top_level_declaration_overlap: 0,
+            import_export_surface_overlap: 0,
+            class_member_overlap: 0,
+            statement_window_overlap: 1,
+            block_branch_overlap: 1,
+            pq_gram_overlap: 1,
+            wl_overlap: 1,
+            source_score: SourceEvidenceScore::default(),
+            structural_score: 0.0,
+            graph: GraphEvidence::default(),
+            weighted_anchor: 0.0,
+            normalized_anchor: 0.0,
+        };
+
+        assert_eq!(
+            source_fingerprint_structural_score(&subject, &reference, evidence),
+            1.0,
+            "identical structural axes should normalize to full support"
+        );
+
+        let mut large_reference = reference;
+        large_reference
+            .statement_window_hashes
+            .extend((0..9).map(|index| format!("stmt-ref-only-{index}")));
+        assert!(
+            source_fingerprint_structural_score(&subject, &large_reference, evidence) < 1.0,
+            "normalization should penalize partial coverage of a larger reference"
+        );
+    }
+
+    #[test]
+    fn structural_delta_promotes_only_with_content_corroboration() {
+        let mut top = make_plan(30, "features/structural-top", MatchTier::Low).matched;
+        top.margin = AMBIGUOUS_PROMOTION_MIN_MARGIN;
+        top.structural_score = MEDIUM_STRUCTURAL_SCORE + 0.05;
+        top.statement_window_overlap = 3;
+        top.normalized_anchor = AMBIGUOUS_PROMOTION_MIN_NANCHOR;
+
+        let mut runner_up = make_plan(31, "features/structural-runner", MatchTier::Low).matched;
+        runner_up.structural_score =
+            top.structural_score - AMBIGUOUS_PROMOTION_STRUCTURAL_DELTA - 0.01;
+        runner_up.statement_window_overlap = 3;
+
+        assert!(
+            guarded_ambiguous_promotion(&top, &runner_up),
+            "clear structural separation plus content should recover ambiguous near matches"
+        );
+
+        let mut no_content = top.clone();
+        no_content.normalized_anchor = 0.0;
+        no_content.weighted_anchor = 0.0;
+        no_content.source_score = SourceEvidenceScore::default();
+        no_content.graph_support = 0;
+        assert!(
+            !guarded_ambiguous_promotion(&no_content, &runner_up),
+            "structural shape alone is too generic to promote"
+        );
     }
 
     fn make_plan(module_id: u32, name: &str, tier: MatchTier) -> ModulePlan {
