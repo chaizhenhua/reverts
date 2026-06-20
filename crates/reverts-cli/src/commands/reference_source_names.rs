@@ -4095,6 +4095,12 @@ fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction>
     out
 }
 
+/// Minimum statement count for the corroboration-free (globally-unique composite)
+/// accept pass. Below this, a unique composite signature is too low-entropy to
+/// imply identity on its own, so trivial functions must earn acceptance through
+/// module corroboration instead. See ACCEPT pass 0.
+const MIN_CORROBORATION_FREE_STATEMENTS: u32 = 2;
+
 /// Match subject functions to reference functions across the whole corpus.
 ///
 /// Two independent signals must agree to **auto-accept** a rename: (1) the
@@ -4159,6 +4165,19 @@ fn match_function_lists(
     // with no module match, so it names functions in unmatched modules too.
     for (subject_index, subject) in subject_fns.iter().enumerate() {
         let _ = subject_index;
+        // Corroboration-free acceptance rests entirely on the composite signature
+        // being one-of-a-kind in both corpora. A trivial body carries too little
+        // structural entropy for that global uniqueness to imply identity:
+        // single-statement helpers with the same shape recur across semantically
+        // unrelated functions, so a "unique" trivial match is usually coincidence
+        // (e.g. `globChars` -> `sdkCompatToolName`, placed in a file unrelated to
+        // its own module's best candidate). Require a minimum body size here; below
+        // it, the function can still be accepted via the module-corroborated pass
+        // (where the matched-file constraint supplies the missing evidence) or fall
+        // through to a proposal.
+        if subject.fingerprint.statement_count < MIN_CORROBORATION_FREE_STATEMENTS {
+            continue;
+        }
         let Some(sig) = function_composites(&subject.fingerprint)
             .into_iter()
             .find(|sig| {
@@ -6620,13 +6639,20 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
     fn function_match_accepts_unique_composite_without_corroboration() {
         // Identical across every structural axis AND one-of-a-kind in both
         // corpora -> the multi-axis composite pass accepts even with NO module
-        // match, naming functions in otherwise-unmatched modules.
+        // match, naming functions in otherwise-unmatched modules. The body is
+        // non-trivial (>= MIN_CORROBORATION_FREE_STATEMENTS statements): a unique
+        // composite of a trivial single-statement body is too low-entropy to accept
+        // corroboration-free, so the fixture must clear that floor to exercise this
+        // path.
         let subjects = subject_fn(
             99,
             "modules/unmatched.ts",
-            "function aB(x) { return x + 1; }",
+            "function aB(x) { let y = x + 1; return y; }",
         );
-        let references = reference_fn("util/inc.ts", "function increment(x) { return x + 1; }");
+        let references = reference_fn(
+            "util/inc.ts",
+            "function increment(x) { let y = x + 1; return y; }",
+        );
         let rows = match_function_lists(&subjects, &references, &BTreeMap::new());
         assert!(
             rows.iter()
