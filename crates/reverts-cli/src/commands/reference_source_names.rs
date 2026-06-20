@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use clap::{Args, ValueEnum};
 use reverts_graph::{
-    FunctionExtractor, IdentifierStreams, extract_import_specifiers, function_names,
-    function_string_literals, identifier_streams,
+    FunctionExtractor, IdentifierStreams, extract_import_specifiers, function_anchor_tokens,
+    function_names, identifier_streams,
 };
 use reverts_input::sqlite::{load_project_rows_from_connection, load_project_rows_from_sqlite};
 use reverts_input::{InputBundle, InputRows, ModuleDependencyTarget, PackageAttributionStatus};
@@ -4135,7 +4135,7 @@ fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFun
             .into_iter()
             .filter(|(_, name)| is_specific_reference_name(name))
             .collect();
-        let mut literals = function_string_literals(module.source.as_str());
+        let mut literals = function_anchor_tokens(module.source.as_str());
         for fingerprint in
             FunctionExtractor::fingerprint_primary(ModuleId(0), module.source.as_str())
         {
@@ -4158,7 +4158,7 @@ fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction>
     let mut out = Vec::new();
     for subject in subjects {
         let names = function_names(subject.source.as_str());
-        let mut literals = function_string_literals(subject.source.as_str());
+        let mut literals = function_anchor_tokens(subject.source.as_str());
         for fingerprint in FunctionExtractor::fingerprint_primary(
             ModuleId(subject.module_id),
             subject.source.as_str(),
@@ -5240,7 +5240,7 @@ fn reference_functions_from_source(file: &str, source: &str) -> Vec<ReferenceFun
         .into_iter()
         .filter(|(_, name)| is_specific_reference_name(name))
         .collect();
-    let mut literals = function_string_literals(source);
+    let mut literals = function_anchor_tokens(source);
     let mut out = Vec::new();
     for fingerprint in FunctionExtractor::fingerprint_primary(ModuleId(0), source) {
         if let Some(name) = names.get(&fingerprint.id.span) {
@@ -7136,7 +7136,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
 
     fn subject_fn(module_id: u32, path: &str, source: &str) -> Vec<SubjectFunction> {
         let names = function_names(source);
-        let mut lits = function_string_literals(source);
+        let mut lits = function_anchor_tokens(source);
         FunctionExtractor::fingerprint(ModuleId(module_id), source)
             .into_iter()
             .filter_map(|f| {
@@ -7156,7 +7156,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             .into_iter()
             .filter(|(_, name)| is_specific_reference_name(name))
             .collect();
-        let mut lits = function_string_literals(source);
+        let mut lits = function_anchor_tokens(source);
         FunctionExtractor::fingerprint(ModuleId(0), source)
             .into_iter()
             .filter_map(|f| {

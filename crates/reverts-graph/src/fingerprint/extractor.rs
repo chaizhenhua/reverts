@@ -2,9 +2,9 @@ use oxc_allocator::Allocator;
 use oxc_ast::Visit;
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingIdentifier,
-    BindingPatternKind, Expression, FormalParameters, Function, FunctionBody, IdentifierReference,
-    MethodDefinition, ObjectProperty, Program, PropertyDefinition, PropertyKey, StringLiteral,
-    VariableDeclarator,
+    BindingPatternKind, CallExpression, Expression, FormalParameters, Function, FunctionBody,
+    IdentifierReference, MethodDefinition, ObjectProperty, Program, PropertyDefinition,
+    PropertyKey, StaticMemberExpression, StringLiteral, VariableDeclarator,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
@@ -394,6 +394,152 @@ impl<'a> Visit<'a> for FunctionLiteralExtractor {
                     .insert(value.to_string());
             }
         }
+    }
+}
+
+/// Minimum length for a member/callee name to count as a distinctive anchor.
+const MIN_ANCHOR_NAME_LEN: usize = 5;
+
+/// Common JS/DOM/Promise member and callee names that recur across unrelated
+/// functions. Including them would inflate anchor overlap between functions that
+/// merely both call `.forEach`/`.toString`, so they are excluded — anchors must
+/// be distinctive to imply identity.
+fn is_noise_anchor_name(name: &str) -> bool {
+    matches!(
+        name,
+        "length"
+            | "toString"
+            | "valueOf"
+            | "forEach"
+            | "filter"
+            | "reduce"
+            | "concat"
+            | "slice"
+            | "splice"
+            | "indexOf"
+            | "lastIndexOf"
+            | "includes"
+            | "entries"
+            | "values"
+            | "prototype"
+            | "constructor"
+            | "hasOwnProperty"
+            | "charCodeAt"
+            | "charAt"
+            | "substring"
+            | "substr"
+            | "replace"
+            | "split"
+            | "resolve"
+            | "reject"
+            | "finally"
+            | "apply"
+            | "props"
+            | "state"
+            | "children"
+            | "current"
+            | "default"
+            | "target"
+            | "message"
+            | "status"
+            | "value"
+            | "label"
+            | "title"
+            | "style"
+            | "width"
+            | "height"
+            | "color"
+            | "console"
+            | "window"
+            | "global"
+            | "process"
+            | "require"
+            | "module"
+            | "exports"
+    )
+}
+
+/// Per-function distinctive anchor tokens: string literals plus the names of the
+/// methods/functions a function calls (`c:name`, `m:method`) and the distinctive
+/// properties it accesses (`p:name`). A superset of [`function_string_literals`].
+///
+/// Minified bundle code keeps the names of imported/global/method callees
+/// (`JSON.stringify`, `setTimeout`, `.createElement`) even when local helper
+/// names are mangled and the AST has drifted — so these names are strong
+/// cross-build anchors for functions that carry few or no string literals. Keyed
+/// by the same span as [`FunctionExtractor::fingerprint`].
+#[must_use]
+pub fn function_anchor_tokens(
+    source: &str,
+) -> std::collections::BTreeMap<ByteRange, std::collections::BTreeSet<String>> {
+    let source = strip_outer_block_braces(source);
+    let alloc = Allocator::default();
+    let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+    let parsed = Parser::new(&alloc, source, source_type)
+        .with_options(parse_options_for(source_type))
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return std::collections::BTreeMap::new();
+    }
+    let mut extractor = FunctionAnchorExtractor {
+        stack: Vec::new(),
+        tokens: std::collections::BTreeMap::new(),
+    };
+    extractor.visit_program(&parsed.program);
+    extractor.tokens
+}
+
+struct FunctionAnchorExtractor {
+    stack: Vec<ByteRange>,
+    tokens: std::collections::BTreeMap<ByteRange, std::collections::BTreeSet<String>>,
+}
+
+impl FunctionAnchorExtractor {
+    fn record(&mut self, token: String) {
+        if let Some(&top) = self.stack.last() {
+            self.tokens.entry(top).or_default().insert(token);
+        }
+    }
+}
+
+impl<'a> Visit<'a> for FunctionAnchorExtractor {
+    fn visit_function(&mut self, func: &Function<'a>, flags: ScopeFlags) {
+        let span = func.span();
+        self.stack.push(ByteRange::new(span.start, span.end));
+        oxc_ast::visit::walk::walk_function(self, func, flags);
+        self.stack.pop();
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        let span = arrow.span();
+        self.stack.push(ByteRange::new(span.start, span.end));
+        oxc_ast::visit::walk::walk_arrow_function_expression(self, arrow);
+        self.stack.pop();
+    }
+
+    fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
+        let value = literal.value.as_str();
+        if value.len() >= MIN_LITERAL_LEN {
+            self.record(format!("s:{value}"));
+        }
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if let Expression::Identifier(identifier) = &call.callee {
+            let name = identifier.name.as_str();
+            if name.len() >= MIN_ANCHOR_NAME_LEN && !is_noise_anchor_name(name) {
+                self.record(format!("c:{name}"));
+            }
+        }
+        oxc_ast::visit::walk::walk_call_expression(self, call);
+    }
+
+    fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
+        let name = member.property.name.as_str();
+        if name.len() >= MIN_ANCHOR_NAME_LEN && !is_noise_anchor_name(name) {
+            self.record(format!("m:{name}"));
+        }
+        oxc_ast::visit::walk::walk_static_member_expression(self, member);
     }
 }
 
@@ -1162,6 +1308,36 @@ mod tests {
     use oxc_parser::Parser;
     use oxc_span::SourceType;
     use reverts_ir::ModuleId;
+
+    #[test]
+    fn anchor_tokens_capture_callees_members_and_strings_excluding_noise() {
+        let source = "function f(a){ return JSON.stringify(a.serializeConfig) + computeHash('payload-marker'); }";
+        let tokens = function_anchor_tokens(source);
+        let set = tokens.values().next().expect("one function");
+        // distinctive callee, member, and string anchors are captured
+        assert!(set.contains("c:computeHash"), "callee: {set:?}");
+        assert!(set.contains("m:stringify"), "member: {set:?}");
+        assert!(set.contains("m:serializeConfig"), "member: {set:?}");
+        assert!(set.contains("s:payload-marker"), "string: {set:?}");
+        // noise members/short names are excluded
+        assert!(!set.iter().any(|t| t == "m:length" || t == "c:JSON"));
+    }
+
+    #[test]
+    fn anchor_tokens_is_superset_of_string_literals() {
+        let source = "function g(){ obj.distinctiveMethod(); return 'a-long-literal'; }";
+        let strings = function_string_literals(source);
+        let anchors = function_anchor_tokens(source);
+        for (span, lits) in &strings {
+            let a = anchors.get(span).expect("same span present");
+            for lit in lits {
+                assert!(
+                    a.contains(&format!("s:{lit}")),
+                    "missing string anchor {lit}"
+                );
+            }
+        }
+    }
 
     fn extract(source: &str) -> Vec<ExtractedFunction> {
         let alloc = Allocator::default();
