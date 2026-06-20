@@ -4242,15 +4242,22 @@ fn end_to_end_planner_keeps_lazy_thunk_when_export_or_side_effect_blocks_delazif
         .expect("entry file should be planned");
     let entry_source = entry.body.join("\n");
 
-    // `entry` is exported — delazifying would change cross-module
-    // semantics. Stays a lazy thunk, but the CommonJS memoizer is local.
+    // `entry` is the exported CommonJS module wrapper — its memoizer is local
+    // and it is NOT a `_$esm`-shaped value thunk, so it stays wrapped.
     assert!(entry_source.contains("var entry = (() => {"));
     assert!(!entry_source.contains("lazyModule("));
-    // `init` body is `entry();` (side effect, no return). Can't
-    // hoist to module load time. Stays as a lazy thunk, now with a
-    // module-local memoizer instead of a runtime lazyValue import.
-    assert!(entry_source.contains("var _$l"), "{entry_source}");
-    assert!(entry_source.contains("var init = _$l(() => {"));
+    // `init`'s body is `entry();` (no top-level return, so the thunk yields
+    // `undefined`) and `init` is invoked in this acyclic single module. The
+    // global de-lazify post-pass therefore hoists the body to eager module-eval
+    // and replaces the thunk with a no-op stub (observationally identical: the
+    // stub also returns `undefined`); the now-dead local `_$l` memoizer is
+    // dropped. See `delazify_init_chains`.
+    assert!(!entry_source.contains("_$l"), "{entry_source}");
+    assert!(entry_source.contains("entry();"), "{entry_source}");
+    assert!(
+        entry_source.contains("function init() {}"),
+        "{entry_source}"
+    );
     assert!(!entry_source.contains("= lazyValue("));
     assert!(
         planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
@@ -5274,9 +5281,16 @@ fn enriched_program_lowers_runtime_helpers_from_arbitrary_binding_names() {
     // so its tiny memoization temps live in the recovered module instead
     // of requiring shared runtime lazyModule/lazyValue imports.
     assert!(module_source.contains("_$cached"));
-    assert!(module_source.contains("var _$l"), "{module_source}");
-    assert!(module_source.contains("var init = _$l(() => {"));
     assert!(module_source.contains("_$module"));
+    // `init` (an `_$esm` value thunk whose body has no top-level return, and
+    // which is invoked here) is hoisted to eager module-eval and stubbed by the
+    // global de-lazify post-pass; its dead local `_$l` memoizer is dropped.
+    assert!(!module_source.contains("_$l"), "{module_source}");
+    assert!(module_source.contains("entry();"), "{module_source}");
+    assert!(
+        module_source.contains("function init() {}"),
+        "{module_source}"
+    );
 }
 
 #[test]
@@ -8034,9 +8048,16 @@ fn self_contained_lazy_writer_stays_local_and_eliminates_runtime_setter() {
         "{writer_source}"
     );
     assert!(writer_source.contains("var shared;"), "{writer_source}");
-    assert!(writer_source.contains("var _$l"), "{writer_source}");
+    // The writer stays LOCAL (no shared runtime helper) and the cross-module
+    // setter is eliminated — its primary guarantees. Additionally, the global
+    // de-lazify post-pass hoists `initShared` (body `shared = 'ok';`, no
+    // top-level return, and invoked by the consumer) to eager module-eval and
+    // stubs it; `var value = initShared()` was already `undefined` and stays so.
+    // The dead local `_$l` memoizer is dropped.
+    assert!(!writer_source.contains("_$l"), "{writer_source}");
+    assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
     assert!(
-        writer_source.contains("var initShared = _$l(() => {\n\tshared = 'ok';\n});"),
+        writer_source.contains("function initShared() {}"),
         "{writer_source}"
     );
     assert!(!writer_source.contains("lazyValue("), "{writer_source}");
@@ -12165,9 +12186,14 @@ fn reader_cluster_runtime_var_migration_allows_folded_reader_use_when_writer_laz
         "{writer_source}"
     );
     assert!(writer_source.contains("var shared;"), "{writer_source}");
-    assert!(writer_source.contains("var _$l"), "{writer_source}");
+    // Writer stays local; the global de-lazify post-pass then eagerifies
+    // `writerInit` (body `shared = 'ok';`, no top-level return, invoked here) to
+    // a no-op stub. `readShared` reads `shared` AFTER its eager init runs at
+    // module-eval, so it still observes 'ok'. Dead local `_$l` memoizer dropped.
+    assert!(!writer_source.contains("_$l"), "{writer_source}");
+    assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
     assert!(
-        writer_source.contains("var writerInit = _$l(() => {\n\tshared = 'ok';\n});"),
+        writer_source.contains("function writerInit() {}"),
         "{writer_source}"
     );
     assert!(!writer_source.contains("lazyValue("), "{writer_source}");
@@ -12254,9 +12280,13 @@ fn folded_non_snippet_runtime_read_migration_allows_writer_lazy_localization() {
         "{writer_source}"
     );
     assert!(writer_source.contains("var shared;"), "{writer_source}");
-    assert!(writer_source.contains("var _$l"), "{writer_source}");
+    // Writer localizes (no setter); the global de-lazify post-pass then
+    // eagerifies `writerInit` (body `shared = 'ok';`, no top-level return,
+    // invoked here) to a no-op stub. Dead local `_$l` memoizer dropped.
+    assert!(!writer_source.contains("_$l"), "{writer_source}");
+    assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
     assert!(
-        writer_source.contains("var writerInit = _$l(() => {\n\tshared = 'ok';\n});"),
+        writer_source.contains("function writerInit() {}"),
         "{writer_source}"
     );
     assert!(!writer_source.contains("lazyValue("), "{writer_source}");
