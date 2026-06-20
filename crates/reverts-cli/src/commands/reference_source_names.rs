@@ -570,9 +570,14 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
 
     // Symbol propagation: name the module-level symbols that matched functions
     // reference, by lockstep-aligning each accepted isomorphic function pair.
+    let reference_source: BTreeMap<&str, &str> = index
+        .modules
+        .iter()
+        .map(|m| (m.file_path.as_str(), m.source.as_str()))
+        .collect();
     let propagated = propagate_symbols(
         &subjects,
-        &index,
+        &reference_source,
         &subject_fns,
         &reference_fns,
         &binding_rows,
@@ -3948,6 +3953,14 @@ fn is_specific_reference_name(name: &str) -> bool {
     {
         return false;
     }
+    // Decompiler path-derived placeholders for never-named symbols, e.g.
+    // `app_bootstrap_agent_config_bX5`, `init_install_command_wrapper_MK7`,
+    // `app_runtime_environment_detection_DQ_1177`. When the reference tree is
+    // itself a reconstruction, these synthetic names pass the generic-word
+    // filter but carry no meaning — propagating them is pure noise.
+    if is_synthetic_path_derived_name(name) {
+        return false;
+    }
     !matches!(
         name,
         "get"
@@ -3970,6 +3983,60 @@ fn is_specific_reference_name(name: &str) -> bool {
             | "handler"
             | "fn"
     )
+}
+
+/// Whether a short token looks like an esbuild-minified identifier (`bX5`, `MK7`,
+/// `DQ`, `al2`, `eQ3`): 2–4 alphanumerics that mix case or include a digit, or a
+/// short all-caps run. Pure short lowercase words (`api`, `cli`) are NOT minified.
+fn looks_like_minified_token(token: &str) -> bool {
+    let len = token.chars().count();
+    if !(2..=4).contains(&len) || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let has_upper = token.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = token.chars().any(|c| c.is_ascii_lowercase());
+    let has_digit = token.chars().any(|c| c.is_ascii_digit());
+    (has_upper && has_lower) || (has_digit && (has_upper || has_lower)) || (has_upper && !has_lower)
+}
+
+/// Whether a name is a decompiler path-derived placeholder for a never-named
+/// symbol: lowercase path words joined by `_` with a trailing minified-token
+/// segment (optionally followed by a numeric disambiguator), e.g.
+/// `app_bootstrap_agent_config_bX5`, `app_runtime_environment_detection_DQ_1177`.
+///
+/// Real `UPPER_SNAKE` constants (`ALGORITHM_IDENTIFIER_V4A`) and camelCase names
+/// keep their case in the path words, so the all-lowercase-prefix requirement
+/// leaves them untouched.
+fn is_synthetic_path_derived_name(name: &str) -> bool {
+    let mut segments: Vec<&str> = name.split('_').filter(|s| !s.is_empty()).collect();
+    // Strip a trailing pure-digit disambiguator (`..._DQ_1177`).
+    if segments.len() >= 2
+        && segments
+            .last()
+            .is_some_and(|s| s.chars().all(|c| c.is_ascii_digit()))
+    {
+        segments.pop();
+    }
+    if segments.len() < 3 {
+        return false; // needs at least two path words plus the minified token
+    }
+    let Some(token) = segments.pop() else {
+        return false;
+    };
+    if !looks_like_minified_token(token) {
+        return false;
+    }
+    // Remaining segments must be path words: lowercase letters or numeric
+    // disambiguators only (any uppercase => an UPPER_SNAKE constant, not
+    // synthetic), with at least one genuine lowercase word.
+    let no_uppercase = segments.iter().all(|word| {
+        word.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    });
+    let has_real_word = segments
+        .iter()
+        .any(|word| word.len() >= 2 && word.chars().all(|c| c.is_ascii_lowercase()));
+    no_uppercase && has_real_word
 }
 
 /// The set of α-rename-invariant AST hashes a function carries (primary +
@@ -4607,7 +4674,7 @@ fn span_uses_and_bound(
 /// (consts, classes, imported bindings) that matched functions reference.
 fn propagate_symbols(
     subjects: &[SubjectModule],
-    index: &ReferenceSourceIndex,
+    reference_source: &BTreeMap<&str, &str>,
     subject_fns: &[SubjectFunction],
     reference_fns: &[ReferenceFunction],
     binding_rows: &[BindingNameRow],
@@ -4629,11 +4696,6 @@ fn propagate_symbols(
     let subject_path: BTreeMap<u32, &str> = subjects
         .iter()
         .map(|s| (s.module_id, s.file_path.as_str()))
-        .collect();
-    let reference_source: BTreeMap<&str, &str> = index
-        .modules
-        .iter()
-        .map(|m| (m.file_path.as_str(), m.source.as_str()))
         .collect();
 
     let mut subject_streams: BTreeMap<u32, IdentifierStreams> = BTreeMap::new();
@@ -5331,7 +5393,14 @@ type ResolvedPackageVersions = BTreeMap<(String, String), String>;
 fn load_ownership_reference_corpus(
     cache: &Connection,
     owned: &[OwnershipMatch],
-) -> Result<(Vec<ReferenceFunction>, ResolvedPackageVersions), CliRunError> {
+) -> Result<
+    (
+        Vec<ReferenceFunction>,
+        BTreeMap<String, String>,
+        ResolvedPackageVersions,
+    ),
+    CliRunError,
+> {
     let mut requested: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for owner in owned {
         requested
@@ -5341,6 +5410,7 @@ fn load_ownership_reference_corpus(
     }
 
     let mut reference_fns = Vec::new();
+    let mut source_by_file: BTreeMap<String, String> = BTreeMap::new();
     let mut resolved_by_request: ResolvedPackageVersions = BTreeMap::new();
     let mut loaded: BTreeSet<(String, String)> = BTreeSet::new();
 
@@ -5377,10 +5447,11 @@ fn load_ownership_reference_corpus(
                 }
                 let file_key = format!("{package_name}@{resolved_raw}/{entry_path}");
                 reference_fns.extend(reference_functions_from_source(&file_key, &source));
+                source_by_file.insert(file_key, source);
             }
         }
     }
-    Ok((reference_fns, resolved_by_request))
+    Ok((reference_fns, source_by_file, resolved_by_request))
 }
 
 pub(crate) fn run_ownership_source_names(
@@ -5409,7 +5480,8 @@ pub(crate) fn run_ownership_source_names(
             request.cache_db.display()
         ))
     })?;
-    let (reference_fns, resolved_by_request) = load_ownership_reference_corpus(&cache, &owned)?;
+    let (reference_fns, source_by_file, resolved_by_request) =
+        load_ownership_reference_corpus(&cache, &owned)?;
 
     // Constrain the high-precision module-corroborated / within-pair passes to the
     // specific source file the matcher pinned (using the resolved cache version);
@@ -5435,7 +5507,24 @@ pub(crate) fn run_ownership_source_names(
     let subjects =
         generate_subject_modules(bundle, |module_id| target_modules.contains(&module_id))?;
     let subject_fns = collect_subject_functions(&subjects);
-    let binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
+    let mut binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
+
+    // Symbol propagation: for each accepted isomorphic function pair, lockstep-
+    // align the bundle function's identifiers with the package-source function's
+    // and carry the real names onto the module-level internal symbols they bind.
+    // This extends naming from the function track to internal symbols.
+    let reference_source: BTreeMap<&str, &str> = source_by_file
+        .iter()
+        .map(|(file, source)| (file.as_str(), source.as_str()))
+        .collect();
+    let propagated = propagate_symbols(
+        &subjects,
+        &reference_source,
+        &subject_fns,
+        &reference_fns,
+        &binding_rows,
+    );
+    binding_rows.extend(propagated);
 
     let accepted = binding_rows.iter().filter(|row| row.accepted).count();
     let proposed = binding_rows.len() - accepted;
@@ -7171,7 +7260,18 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             score: 2.0,
         };
         let rows = vec![binding(1, "aB", "readA"), binding(1, "cD", "readB")];
-        let propagated = propagate_symbols(&subjects, &index, &subject_fns, &reference_fns, &rows);
+        let reference_source: BTreeMap<&str, &str> = index
+            .modules
+            .iter()
+            .map(|m| (m.file_path.as_str(), m.source.as_str()))
+            .collect();
+        let propagated = propagate_symbols(
+            &subjects,
+            &reference_source,
+            &subject_fns,
+            &reference_fns,
+            &rows,
+        );
         let qz = propagated.iter().find(|r| r.original_name == "qZ");
         assert!(qz.is_some(), "qZ should be propagated: {propagated:?}");
         let qz = qz.unwrap();
@@ -7389,5 +7489,45 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             NamingGateMode::LocalBinding,
         )
         .expect("non-automated package-source origin must accept a domain function name");
+    }
+
+    #[test]
+    fn rejects_decompiler_path_derived_synthetic_names() {
+        for synthetic in [
+            "app_bootstrap_agent_config_bX5",
+            "init_install_command_wrapper_MK7",
+            "app_runtime_environment_detection_DQ_1177",
+            "app_bootstrap_btw_prefix_pattern_al2",
+            "app_bootstrap_image_processing_init_eQ3",
+            "init_state_setup_2_nt8",
+            "init_lodash_env_deps_sT0",
+            "aws_sdk_imports_cjs_zG3",
+        ] {
+            assert!(
+                is_synthetic_path_derived_name(synthetic),
+                "should detect synthetic {synthetic}"
+            );
+            assert!(
+                !is_specific_reference_name(synthetic),
+                "synthetic name must not propagate: {synthetic}"
+            );
+        }
+        // Real names must survive: UPPER_SNAKE constants, camelCase, plain words.
+        for good in [
+            "ALGORITHM_IDENTIFIER_V4A",
+            "API_VERSION",
+            "ApplyGuardrailCommand",
+            "detectRuntimeEnvironment",
+            "loadAgentConfig",
+        ] {
+            assert!(
+                !is_synthetic_path_derived_name(good),
+                "real name wrongly flagged synthetic: {good}"
+            );
+            assert!(
+                is_specific_reference_name(good),
+                "real name must propagate: {good}"
+            );
+        }
     }
 }
