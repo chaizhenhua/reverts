@@ -766,6 +766,8 @@ fn write_match_diagnostics_if_requested(
             low_boundary_row_json(plan, reason, *closeness, &collision_groups)
         })
         .collect::<Vec<_>>();
+    let ambiguous_report = ambiguous_runner_up_report_json(&low_rows);
+    let anchor_quality_report = anchor_quality_report_json(&low_rows);
     let summary = serde_json::json!({
         "subject_modules": subject_count,
         "planned_matches": plans.len(),
@@ -794,6 +796,8 @@ fn write_match_diagnostics_if_requested(
             "medium_content_normalized_floor": MEDIUM_CONTENT_NORMALIZED_FLOOR,
         },
         "reason_counts": reason_counts_json,
+        "ambiguous_runner_up_report": ambiguous_report,
+        "anchor_quality_report": anchor_quality_report,
         "low_matches_by_closeness": low_details,
     });
     if let Some(parent) = path.parent()
@@ -880,6 +884,270 @@ fn low_boundary_row_json(
             "margin": positive_shortfall(MEDIUM_SCORE_MARGIN, matched.margin),
         },
     })
+}
+
+fn ambiguous_runner_up_report_json(
+    low_rows: &[(f64, &'static str, &ModulePlan)],
+) -> serde_json::Value {
+    let ambiguous_rows = low_rows
+        .iter()
+        .filter(|(_closeness, reason, _plan)| *reason == "ambiguous_runner_up_or_weak_content")
+        .collect::<Vec<_>>();
+    let mut reference_families = BTreeMap::<String, usize>::new();
+    let mut runner_up_families = BTreeMap::<String, usize>::new();
+    let mut family_pairs = BTreeMap::<(String, String), usize>::new();
+    let mut exact_references = BTreeMap::<String, usize>::new();
+    let mut same_family_runner_up = 0usize;
+    let mut promising = Vec::new();
+    for (_closeness, _reason, plan) in &ambiguous_rows {
+        let reference_family = diagnostic_path_family(&plan.matched.file_path);
+        let runner_up_reference = plan
+            .runner_up
+            .as_ref()
+            .map(|runner_up| runner_up.matched.file_path.as_str())
+            .unwrap_or("<none>");
+        let runner_up_family = diagnostic_path_family(runner_up_reference);
+        if reference_family == runner_up_family {
+            same_family_runner_up += 1;
+        }
+        *reference_families
+            .entry(reference_family.clone())
+            .or_default() += 1;
+        *runner_up_families
+            .entry(runner_up_family.clone())
+            .or_default() += 1;
+        *family_pairs
+            .entry((reference_family, runner_up_family))
+            .or_default() += 1;
+        *exact_references
+            .entry(plan.matched.file_path.clone())
+            .or_default() += 1;
+        if is_promising_ambiguous_diagnostic(plan) {
+            promising.push(*plan);
+        }
+    }
+    promising.sort_by(|left, right| {
+        right
+            .matched
+            .source_score
+            .unique_string_anchor_overlap
+            .cmp(&left.matched.source_score.unique_string_anchor_overlap)
+            .then_with(|| {
+                right
+                    .matched
+                    .source_score
+                    .function_axis_jaccard
+                    .total_cmp(&left.matched.source_score.function_axis_jaccard)
+            })
+            .then_with(|| right.matched.margin.total_cmp(&left.matched.margin))
+    });
+    serde_json::json!({
+        "count": ambiguous_rows.len(),
+        "same_family_runner_up_count": same_family_runner_up,
+        "reference_families": sorted_count_map_json(&reference_families, "family"),
+        "runner_up_families": sorted_count_map_json(&runner_up_families, "family"),
+        "family_pairs": sorted_pair_count_map_json(&family_pairs),
+        "exact_references": sorted_count_map_json(&exact_references, "reference_file"),
+        "promising_review_candidates": promising
+            .into_iter()
+            .take(50)
+            .map(promising_ambiguous_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn anchor_quality_report_json(low_rows: &[(f64, &'static str, &ModulePlan)]) -> serde_json::Value {
+    let global_rows = low_rows
+        .iter()
+        .filter(|(_closeness, reason, _plan)| reason.starts_with("global_uniqueness_demoted"))
+        .collect::<Vec<_>>();
+    let mut anchor_counts = BTreeMap::<String, usize>::new();
+    let mut weak_only_rows = 0usize;
+    let mut strongish_rows = 0usize;
+    let mut no_anchor_rows = 0usize;
+    for (_closeness, _reason, plan) in &global_rows {
+        if plan.shared_string_anchors.is_empty() {
+            no_anchor_rows += 1;
+        } else if plan
+            .shared_string_anchors
+            .iter()
+            .all(|anchor| is_weak_diagnostic_anchor(anchor))
+        {
+            weak_only_rows += 1;
+        } else {
+            strongish_rows += 1;
+        }
+        for anchor in &plan.shared_string_anchors {
+            *anchor_counts.entry(anchor.clone()).or_default() += 1;
+        }
+    }
+    let mut top_anchors = anchor_counts.into_iter().collect::<Vec<_>>();
+    top_anchors.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    serde_json::json!({
+        "global_demoted_count": global_rows.len(),
+        "weak_only_rows": weak_only_rows,
+        "strongish_rows": strongish_rows,
+        "no_anchor_rows": no_anchor_rows,
+        "top_shared_anchors": top_anchors
+            .into_iter()
+            .take(100)
+            .map(|(anchor, count)| {
+                serde_json::json!({
+                    "anchor": anchor,
+                    "count": count,
+                    "weak": is_weak_diagnostic_anchor(&anchor),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn sorted_count_map_json(map: &BTreeMap<String, usize>, label: &str) -> Vec<serde_json::Value> {
+    let mut rows = map.iter().collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.1.cmp(left.1).then_with(|| left.0.cmp(right.0)));
+    rows.into_iter()
+        .map(|(key, count)| {
+            let mut object = serde_json::Map::new();
+            object.insert(label.to_string(), serde_json::json!(key));
+            object.insert("count".to_string(), serde_json::json!(count));
+            serde_json::Value::Object(object)
+        })
+        .collect()
+}
+
+fn sorted_pair_count_map_json(map: &BTreeMap<(String, String), usize>) -> Vec<serde_json::Value> {
+    let mut rows = map.iter().collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.1.cmp(left.1).then_with(|| left.0.cmp(right.0)));
+    rows.into_iter()
+        .map(|((reference_family, runner_up_family), count)| {
+            serde_json::json!({
+                "reference_family": reference_family,
+                "runner_up_family": runner_up_family,
+                "count": count,
+            })
+        })
+        .collect()
+}
+
+fn promising_ambiguous_json(plan: &ModulePlan) -> serde_json::Value {
+    serde_json::json!({
+        "module_id": plan.module_id,
+        "reference_file": plan.matched.file_path,
+        "runner_up_reference": plan
+            .runner_up
+            .as_ref()
+            .map(|runner_up| runner_up.matched.file_path.as_str()),
+        "margin": plan.matched.margin,
+        "normalized_anchor": plan.matched.normalized_anchor,
+        "weighted_anchor": plan.matched.weighted_anchor,
+        "source_score": source_score_json(plan.matched.source_score),
+        "shared_anchors": shared_anchor_statistics_json(plan),
+    })
+}
+
+fn is_promising_ambiguous_diagnostic(plan: &ModulePlan) -> bool {
+    let score = plan.matched.source_score;
+    (score.function_axis_jaccard >= 0.10
+        && score.function_axis_containment >= 0.30
+        && plan.matched.margin >= 0.10)
+        || score.unique_string_anchor_overlap >= 2
+        || score.jsx_react_shape_jaccard >= 0.20
+}
+
+fn diagnostic_path_family(path: &str) -> String {
+    let mut parts = path.split('/');
+    let first = parts.next().unwrap_or(path);
+    if first == "<none>" {
+        return first.to_string();
+    }
+    match parts.next() {
+        Some(second) => format!("{first}/{second}"),
+        None => first.to_string(),
+    }
+}
+
+fn is_weak_diagnostic_anchor(anchor: &str) -> bool {
+    let anchor = anchor.trim();
+    let generic = anchor
+        .strip_prefix("object-key:")
+        .or_else(|| anchor.strip_prefix("class-method:instance:method:"))
+        .or_else(|| anchor.strip_prefix("class-method:static:method:"))
+        .or_else(|| anchor.strip_prefix("class-method:instance:get:"))
+        .unwrap_or(anchor);
+    generic.len() <= 3
+        || matches!(
+            generic,
+            "function"
+                | "data"
+                | "error"
+                | "buffer"
+                | "base64"
+                | "config"
+                | "stats"
+                | "stream"
+                | "message"
+                | "request"
+                | "response"
+                | "content"
+                | "value"
+                | "string"
+                | "number"
+                | "object"
+                | "array"
+                | "result"
+                | "event"
+                | "input"
+                | "output"
+                | "type"
+                | "name"
+                | "path"
+                | "file"
+                | "files"
+                | "start"
+                | "end"
+                | "line"
+                | "token"
+                | "status"
+                | "command"
+                | "model"
+                | "tool"
+                | "tools"
+                | "user"
+                | "system"
+                | "true"
+                | "false"
+                | "get"
+                | "set"
+                | "load"
+                | "size"
+                | "description"
+                | "required"
+                | "dependencies"
+                | "stub"
+                | "local"
+                | "util"
+                | "class"
+                | "interface"
+                | "namespace"
+                | "const"
+                | "boolean"
+                | "symbol"
+                | "left"
+                | "right"
+                | "&amp;"
+                | "&gt;"
+                | "&lt;"
+                | "&quot;"
+                | "─"
+                | "│"
+                | "┌"
+                | "┐"
+                | "└"
+                | "┘"
+                | "├"
+                | "┤"
+                | "┼"
+        )
 }
 
 fn candidate_diagnostic_json(relevance: f64, matched: &ModuleMatch) -> serde_json::Value {
@@ -3739,6 +4007,19 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             MatchTier::Low,
             "reciprocal near misses without source corroboration remain Low"
         );
+    }
+
+    #[test]
+    fn diagnostics_classify_path_families_and_weak_anchors() {
+        assert_eq!(
+            diagnostic_path_family("services/mcp/client.ts"),
+            "services/mcp"
+        );
+        assert_eq!(diagnostic_path_family("utils/env.ts"), "utils/env.ts");
+        assert_eq!(diagnostic_path_family("<none>"), "<none>");
+        assert!(is_weak_diagnostic_anchor("function"));
+        assert!(is_weak_diagnostic_anchor("object-key:type"));
+        assert!(!is_weak_diagnostic_anchor("object-key:access_token"));
     }
 
     fn high_plan(id: u32, name: &str) -> ModulePlan {
