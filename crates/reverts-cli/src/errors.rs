@@ -56,6 +56,10 @@ pub enum MatchPackagesError {
         path: PathBuf,
         source: io::Error,
     },
+    WriteSyntheticSource {
+        path: PathBuf,
+        source: io::Error,
+    },
     InvalidPackageMetadata {
         path: PathBuf,
         source: serde_json::Error,
@@ -136,6 +140,13 @@ impl fmt::Display for MatchPackagesError {
                 write!(
                     formatter,
                     "failed to read package source root {}: {source}",
+                    path.display()
+                )
+            }
+            Self::WriteSyntheticSource { path, source } => {
+                write!(
+                    formatter,
+                    "failed to write synthetic source {}: {source}",
                     path.display()
                 )
             }
@@ -283,7 +294,8 @@ impl Error for MatchPackagesError {
             | Self::WritePackageSurface(source) => Some(source),
             Self::ReadPackageSurfaceDecisionBatch(source) => Some(source),
             Self::NormalizePackageSource { source, .. } => Some(source),
-            Self::ReadPackageSourceRoot { source, .. } => Some(source),
+            Self::ReadPackageSourceRoot { source, .. }
+            | Self::WriteSyntheticSource { source, .. } => Some(source),
             Self::InvalidPackageMetadata { source, .. } => Some(source),
             Self::LoadInput(source) => Some(source),
             Self::MissingTable(_)

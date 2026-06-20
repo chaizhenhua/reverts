@@ -73,7 +73,12 @@ impl MatchPackagePersistence for SqliteMatchPackagePersistence<'_> {
         function_attributions: &[PackageAttributionInput],
     ) -> Result<MatchPackagePersistenceOutcome, MatchPackagesError> {
         // Persist synthetic modules first so FKs from attribution tables resolve.
-        synthetic_modules::persist_synthetic_modules(self.connection, synthetic_modules)?;
+        synthetic_modules::persist_prepared_synthetic_inputs(
+            self.connection,
+            rows.project.id,
+            rows,
+            synthetic_modules,
+        )?;
         persist_module_dependencies(self.connection, rows)?;
 
         // Some synthetic module inserts may be ignored due to legacy uniqueness
@@ -108,7 +113,7 @@ impl MatchPackagePersistence for SqliteMatchPackagePersistence<'_> {
     }
 }
 
-fn persist_module_dependencies(
+pub(crate) fn persist_module_dependencies(
     connection: &mut Connection,
     rows: &InputRows,
 ) -> Result<(), MatchPackagesError> {

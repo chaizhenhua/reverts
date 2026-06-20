@@ -14,7 +14,7 @@ use reverts_ir::ModuleKind;
 use reverts_js::{ParseGoal, parse_options_for, source_type_candidates};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 
-use super::{SourceFingerprint, fingerprint_source};
+use super::SourceFingerprint;
 use crate::package_helpers::{
     normalize_hint_text, package_semantic_path_prefixes, path_hint_tokens,
     strip_package_prefix_from_semantic_path, strip_source_extension,
@@ -23,7 +23,8 @@ use crate::scoring::{compare_versions, score_version};
 use crate::{
     BestVersionMatch, ModuleMatchFingerprint, ModulePackageMatch, PackageModuleSourceQuality,
     PackageSource, PackageSourceFingerprint, PackageVersionCandidate, VersionMatchScore,
-    VersionedPackageMatcherConfig, has_accepted_attribution,
+    VersionedPackageMatcherConfig, build_source_evidence_profile,
+    build_source_evidence_profile_with_fingerprint, has_accepted_attribution,
 };
 
 #[derive(Debug)]
@@ -296,7 +297,8 @@ pub(crate) fn module_match_fingerprint(
     path: &str,
     source: &str,
 ) -> Result<ModuleMatchFingerprint, String> {
-    let source_fingerprint = fingerprint_source(path, source)?;
+    let profile = build_source_evidence_profile(path, source)?;
+    let source_fingerprint = profile.fingerprint;
     Ok(ModuleMatchFingerprint {
         module_id: module.id,
         package_name: module.package_name.clone(),
@@ -305,6 +307,8 @@ pub(crate) fn module_match_fingerprint(
         normalized_source_hashes: source_fingerprint.normalized_source_hashes,
         function_signature_hashes: source_fingerprint.function_signature_hashes,
         string_anchors: source_fingerprint.string_anchors,
+        function_axis_anchors: profile.function_axis_anchors,
+        jsx_react_shape_anchors: profile.jsx_react_shape_anchors,
     })
 }
 
@@ -315,21 +319,36 @@ pub(crate) fn package_source_fingerprint<'a>(
     // sources are immutable per (package, version, path), so this skips the
     // expensive parse + normalize + signature extraction on warm runs.
     if let Some(cached) = &source.fingerprint {
+        let profile = build_source_evidence_profile_with_fingerprint(
+            source.source_path.as_str(),
+            source.source.as_str(),
+            cached.clone(),
+        );
         return Ok(PackageSourceFingerprint {
             source,
             normalized_source_hash: cached.normalized_source_hash.clone(),
             normalized_source_hashes: cached.normalized_source_hashes.clone(),
             function_signature_hashes: cached.function_signature_hashes.clone(),
             string_anchors: cached.string_anchors.clone(),
+            function_axis_anchors: profile.function_axis_anchors,
+            jsx_react_shape_anchors: profile.jsx_react_shape_anchors,
         });
     }
-    let fingerprint = fingerprint_source(source.source_path.as_str(), source.source.as_str())?;
-    Ok(package_source_fingerprint_from_source(source, fingerprint))
+    let profile =
+        build_source_evidence_profile(source.source_path.as_str(), source.source.as_str())?;
+    Ok(package_source_fingerprint_from_source(
+        source,
+        profile.fingerprint,
+        profile.function_axis_anchors,
+        profile.jsx_react_shape_anchors,
+    ))
 }
 
 pub(crate) fn package_source_fingerprint_from_source<'a>(
     source: &'a PackageSource,
     fingerprint: SourceFingerprint,
+    function_axis_anchors: BTreeSet<String>,
+    jsx_react_shape_anchors: BTreeSet<String>,
 ) -> PackageSourceFingerprint<'a> {
     PackageSourceFingerprint {
         source,
@@ -337,6 +356,8 @@ pub(crate) fn package_source_fingerprint_from_source<'a>(
         normalized_source_hashes: fingerprint.normalized_source_hashes,
         function_signature_hashes: fingerprint.function_signature_hashes,
         string_anchors: fingerprint.string_anchors,
+        function_axis_anchors,
+        jsx_react_shape_anchors,
     }
 }
 

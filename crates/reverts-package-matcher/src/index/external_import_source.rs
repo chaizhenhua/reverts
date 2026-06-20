@@ -11,7 +11,10 @@ use crate::source::package_refs::{
     package_source_dependency_entries, package_source_entry_path_from_source_path,
     source_entry_paths_match,
 };
-use crate::{PackageSource, PackageSourceFingerprint, normalize_source};
+use crate::{
+    PackageSource, PackageSourceFingerprint, build_source_evidence_profile_with_fingerprint,
+    normalize_source,
+};
 
 #[derive(Debug, Default)]
 pub(crate) struct ExternalImportSourceIndex<'a> {
@@ -206,14 +209,14 @@ impl<'a> ExternalImportSourceIndex<'a> {
         if let Some(fingerprint) = self.fingerprints_by_source_path.borrow().get(&key) {
             return fingerprint
                 .clone()
-                .map(|fingerprint| package_source_fingerprint_from_source(source, fingerprint));
+                .map(|fingerprint| package_source_fingerprint_with_profile(source, fingerprint));
         }
         let fingerprint =
             fingerprint_source(source.source_path.as_str(), source.source.as_str()).ok();
         self.fingerprints_by_source_path
             .borrow_mut()
             .insert(key, fingerprint.clone());
-        fingerprint.map(|fingerprint| package_source_fingerprint_from_source(source, fingerprint))
+        fingerprint.map(|fingerprint| package_source_fingerprint_with_profile(source, fingerprint))
     }
 
     pub(crate) fn dependency_entries(&self, source: &PackageSource) -> BTreeSet<String> {
@@ -281,6 +284,23 @@ impl<'a> ExternalImportSourceIndex<'a> {
             .filter(|source| source.external_importable)
             .collect()
     }
+}
+
+fn package_source_fingerprint_with_profile<'a>(
+    source: &'a PackageSource,
+    fingerprint: SourceFingerprint,
+) -> PackageSourceFingerprint<'a> {
+    let profile = build_source_evidence_profile_with_fingerprint(
+        source.source_path.as_str(),
+        source.source.as_str(),
+        fingerprint,
+    );
+    package_source_fingerprint_from_source(
+        source,
+        profile.fingerprint,
+        profile.function_axis_anchors,
+        profile.jsx_react_shape_anchors,
+    )
 }
 
 fn sort_external_sources(sources: &mut [&PackageSource]) {

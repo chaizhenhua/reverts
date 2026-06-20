@@ -22,6 +22,10 @@ pub struct ModuleMatchFingerprint {
     pub function_signature_hashes: BTreeSet<String>,
     /// string literal anchors collected from the AST.
     pub string_anchors: BTreeSet<String>,
+    /// Multi-axis function structure anchors shared by package and cross-version matching.
+    pub function_axis_anchors: BTreeSet<String>,
+    /// JSX/React shape anchors extracted from raw TSX or lowered JSX-runtime calls.
+    pub jsx_react_shape_anchors: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +42,10 @@ pub struct PackageSourceFingerprint<'a> {
     pub function_signature_hashes: BTreeSet<String>,
     /// string literal anchors collected from the AST.
     pub string_anchors: BTreeSet<String>,
+    /// Multi-axis function structure anchors shared by package and cross-version matching.
+    pub function_axis_anchors: BTreeSet<String>,
+    /// JSX/React shape anchors extracted from raw TSX or lowered JSX-runtime calls.
+    pub jsx_react_shape_anchors: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

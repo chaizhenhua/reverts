@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use clap::{Args, ValueEnum};
 use reverts_graph::{
@@ -12,12 +13,18 @@ use reverts_graph::{
     function_string_literals, identifier_streams,
 };
 use reverts_input::PackageAttributionStatus;
+use reverts_input::sqlite::load_project_rows_from_connection;
 use reverts_ir::{AxisHashes, FunctionFingerprint, ModuleId};
+use reverts_js::sanitize_identifier;
 use reverts_package_matcher::{
-    GraphNeighborhoodEvidence, SourceFingerprint, build_structural_bag, fingerprint_source,
-    graph_neighborhood_support, score_structural_bags,
+    GraphNeighborhoodEvidence, SourceEvidenceIdf, SourceEvidenceProfile, SourceEvidenceScore,
+    SourceFingerprint, StructuralBag, build_source_evidence_profile_with_fingerprint,
+    build_structural_bag, fingerprint_source, graph_neighborhood_support, score_source_evidence,
+    score_structural_bags, source_evidence_idf,
 };
-use reverts_pipeline::{generate_project_from_prepared, prepare_and_enrich};
+use reverts_pipeline::{
+    generate_project_from_prepared, prepare_and_enrich, prepare_input_rows_for_pipeline,
+};
 use rusqlite::{Connection, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
@@ -29,6 +36,8 @@ use crate::commands::symbol_names::{
 };
 use crate::errors::{CliError, CliRunError};
 use crate::input_externalization::load_project_bundle_with_package_externalization;
+use crate::persistence::repository::persist_module_dependencies;
+use crate::persistence::synthetic_modules::persist_prepared_synthetic_inputs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum MinTier {
@@ -82,28 +91,34 @@ fn plan_modules(
     subjects: &[SubjectModule],
     index: &ReferenceSourceIndex,
 ) -> Result<Vec<ModulePlan>, CliRunError> {
+    let trace_start = Instant::now();
     let structural_support = source_structural_support(subjects, index);
+    trace_reference_source_names(trace_start, "plan.source_structural_support");
     let graph_support = source_graph_support(subjects, index, &structural_support);
-    let reference_best_subjects =
-        best_subject_by_reference(subjects, index, &structural_support, &graph_support);
+    trace_reference_source_names(trace_start, "plan.source_graph_support");
+    let subject_best_matches =
+        best_ranked_by_subject(subjects, index, &structural_support, &graph_support);
+    trace_reference_source_names(trace_start, "plan.best_ranked_by_subject");
+    let reference_best_subjects = best_subject_by_reference_matches(&subject_best_matches);
     let mut plans = Vec::new();
     // Parallel to `plans`: the string anchors each subject shares with its
     // matched reference file. Used to allow many-to-one assignment when esbuild
     // split one source file into modules covering DISJOINT parts.
     let mut shared_anchors: Vec<BTreeSet<String>> = Vec::new();
     for subject in subjects {
-        let subject_structural_support = structural_support.get(&subject.module_id);
-        let subject_graph_support = graph_support.get(&subject.module_id);
-        let Some(matched) = best_module_match_with_reciprocal(
-            subject.module_id,
-            &subject.fingerprint,
-            index,
-            &reference_best_subjects,
-            subject_structural_support,
-            subject_graph_support,
-        ) else {
+        let Some(ranked) = subject_best_matches.get(&subject.module_id) else {
             continue;
         };
+        let mut matched = ranked.matched.clone();
+        matched.reciprocal_best = reference_best_subjects
+            .get(matched.file_path.as_str())
+            .is_some_and(|best_subject_id| *best_subject_id == subject.module_id);
+        matched.tier = calibrate_tier(
+            matched.tier,
+            matched.margin,
+            matched.reciprocal_best,
+            matched.normalized_anchor,
+        );
         let reference_module = index
             .modules
             .iter()
@@ -132,6 +147,7 @@ fn plan_modules(
         });
         shared_anchors.push(anchors);
     }
+    trace_reference_source_names(trace_start, "plan.best_module_loop");
     calibrate_global_reference_uniqueness(&mut plans, &shared_anchors);
     plans.sort_by(|a, b| a.module_id.cmp(&b.module_id));
     Ok(plans)
@@ -213,16 +229,30 @@ fn tier_str(tier: MatchTier) -> &'static str {
     }
 }
 
+fn tier_rank(tier: MatchTier) -> u8 {
+    match tier {
+        MatchTier::High => 2,
+        MatchTier::Medium => 1,
+        MatchTier::Low => 0,
+    }
+}
+
 pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
+    let trace_start = Instant::now();
     let index = build_reference_source_index(&args.reference_source_root, &args.reference_version)
         .map_err(CliRunError::ReferenceSourceNames)?;
+    trace_reference_source_names(trace_start, "build_reference_source_index");
     let subjects = subject_modules(&args)?;
+    trace_reference_source_names(trace_start, "subject_modules");
     let mut plans = plan_modules(&subjects, &index)?;
+    trace_reference_source_names(trace_start, "plan_modules");
 
     // Collect every named function across both corpora ONCE (the expensive
     // extraction); reused across the reinforcement passes below.
     let subject_fns = collect_subject_functions(&subjects);
+    trace_reference_source_names(trace_start, "collect_subject_functions");
     let reference_fns = collect_reference_functions(&index);
+    trace_reference_source_names(trace_start, "collect_reference_functions");
     report_normalize_effect(&subject_fns, &reference_fns);
 
     // Pass 1: function match against the initial module matches.
@@ -232,6 +262,7 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
         .map(|plan| (plan.module_id, plan.matched.file_path.clone()))
         .collect();
     let mut binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
+    trace_reference_source_names(trace_start, "match_function_lists");
 
     // #1 Function->module reinforcement: promote unmatched modules that several
     // accepted functions agree on, then re-match so the promoted modules'
@@ -246,6 +277,7 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             .map(|plan| (plan.module_id, plan.matched.file_path.clone()))
             .collect();
         binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
+        trace_reference_source_names(trace_start, "module_promotions");
     }
 
     // Symbol propagation: name the module-level symbols that matched functions
@@ -258,6 +290,7 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
         &binding_rows,
     );
     binding_rows.extend(propagated);
+    trace_reference_source_names(trace_start, "propagate_symbols");
 
     println!(
         "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
@@ -309,15 +342,36 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     }
 
     if args.apply {
-        let connection = Connection::open(&args.input)
+        let mut connection = Connection::open(&args.input)
+            .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+        let rows = load_project_rows_from_connection(&connection, args.project_id)
+            .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+        let prepared_rows = prepare_input_rows_for_pipeline(rows);
+        persist_prepared_synthetic_inputs(
+            &mut connection,
+            args.project_id,
+            &prepared_rows.rows,
+            &prepared_rows.synthetic_modules,
+        )
+        .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+        persist_module_dependencies(&mut connection, &prepared_rows.rows)
             .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
         ensure_semantic_name_source_column(&connection)
             .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
         ensure_symbol_name_proposals_table(&connection)
             .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
         crate::commands::binding_names::ensure_binding_names_table_if_writable(&connection, true)?;
+        ensure_module_path_overrides_table(&connection)?;
         let module_count = write_module_names(
             &connection,
+            &plans,
+            args.min_tier,
+            &args.origin_prefix,
+            &args.reference_version,
+        )?;
+        let path_count = write_module_path_overrides(
+            &connection,
+            args.project_id,
             &plans,
             args.min_tier,
             &args.origin_prefix,
@@ -345,11 +399,12 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             &connection,
             args.project_id,
             &binding_rows,
+            &accepted_module_paths(&plans, args.min_tier),
             &args.origin_prefix,
             &args.reference_version,
         )?;
         println!(
-            "applied: {module_count} module name(s), {export_count} export name(s), {binding_accepted} binding rename(s), {binding_proposed} binding proposal(s)"
+            "applied: {module_count} module name(s), {path_count} module path override(s), {export_count} export name(s), {binding_accepted} binding rename(s), {binding_proposed} binding proposal(s)"
         );
     } else {
         println!(
@@ -360,6 +415,15 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     Ok(())
 }
 
+fn trace_reference_source_names(start: Instant, label: &str) {
+    if std::env::var_os("REVERTS_TRACE_REFERENCE_SOURCE_NAMES").is_some() {
+        eprintln!(
+            "reference-source-names: {label}: {:.3}s",
+            start.elapsed().as_secs_f64()
+        );
+    }
+}
+
 /// One subject emitted module: its DB module id, emitted path, fingerprint,
 /// and the (original_name -> emitted_name) bindings that land in it.
 struct SubjectModule {
@@ -367,6 +431,7 @@ struct SubjectModule {
     file_path: String,
     source: String,
     fingerprint: SourceFingerprint,
+    profile: SourceEvidenceProfile,
     bindings: Vec<(String, String)>, // (original_name, emitted_name)
 }
 
@@ -418,11 +483,17 @@ fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>
         let Ok(fingerprint) = fingerprint_source(file.path.as_str(), file.source.as_str()) else {
             continue;
         };
+        let profile = build_source_evidence_profile_with_fingerprint(
+            file.path.as_str(),
+            file.source.as_str(),
+            fingerprint.clone(),
+        );
         modules.push(SubjectModule {
             module_id,
             file_path: file.path.clone(),
             source: file.source.clone(),
             fingerprint,
+            profile,
             bindings: bindings_for_path
                 .remove(file.path.as_str())
                 .unwrap_or_default(),
@@ -438,6 +509,7 @@ pub(crate) struct ReferenceSourceModule {
     pub file_path: String,
     pub source: String,
     pub fingerprint: SourceFingerprint,
+    pub profile: SourceEvidenceProfile,
     /// Exported member names (from `export:` anchors).
     pub export_names: BTreeSet<String>,
     /// Native-asset literals referenced (string anchors ending in `.node`).
@@ -454,6 +526,18 @@ pub(crate) struct ReferenceSourceIndex {
     /// distinctive anchors get a high weight; common "hub" anchors (present in
     /// many files) get ~0, so they no longer forge matches via raw overlap.
     pub anchor_idf: std::collections::BTreeMap<String, f64>,
+    pub evidence_idf: SourceEvidenceIdf,
+    candidate_index: ReferenceCandidateIndex,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReferenceCandidateIndex {
+    normalized_source_hashes: BTreeMap<String, BTreeSet<usize>>,
+    function_signature_hashes: BTreeMap<String, BTreeSet<usize>>,
+    string_anchors: BTreeMap<String, BTreeSet<usize>>,
+    asset_literals: BTreeMap<String, BTreeSet<usize>>,
+    export_names: BTreeMap<String, BTreeSet<usize>>,
+    path_to_index: BTreeMap<String, usize>,
 }
 
 use std::path::Path;
@@ -480,20 +564,30 @@ pub(crate) fn build_reference_source_index(
         let Ok(fingerprint) = fingerprint_source(relative.as_str(), source.as_str()) else {
             continue; // unparseable reference file - skip, do not guess
         };
+        let profile = build_source_evidence_profile_with_fingerprint(
+            relative.as_str(),
+            source.as_str(),
+            fingerprint.clone(),
+        );
         let (export_names, asset_literals) = classify_anchors(&fingerprint);
         modules.push(ReferenceSourceModule {
             file_path: relative,
             source,
             fingerprint,
+            profile,
             export_names,
             asset_literals,
         });
     }
     let anchor_idf = compute_anchor_idf(&modules);
+    let evidence_idf = source_evidence_idf(modules.iter().map(|module| &module.profile));
+    let candidate_index = build_candidate_index(&modules);
     Ok(ReferenceSourceIndex {
         version: version.to_string(),
         modules,
         anchor_idf,
+        evidence_idf,
+        candidate_index,
     })
 }
 
@@ -515,29 +609,67 @@ fn compute_anchor_idf(
         .collect()
 }
 
+fn build_candidate_index(modules: &[ReferenceSourceModule]) -> ReferenceCandidateIndex {
+    let mut index = ReferenceCandidateIndex::default();
+    for (module_index, module) in modules.iter().enumerate() {
+        index
+            .path_to_index
+            .insert(module.file_path.clone(), module_index);
+        for hash in &module.fingerprint.normalized_source_hashes {
+            index
+                .normalized_source_hashes
+                .entry(hash.clone())
+                .or_default()
+                .insert(module_index);
+        }
+        for hash in &module.fingerprint.function_signature_hashes {
+            index
+                .function_signature_hashes
+                .entry(hash.clone())
+                .or_default()
+                .insert(module_index);
+        }
+        for anchor in &module.fingerprint.string_anchors {
+            index
+                .string_anchors
+                .entry(anchor.clone())
+                .or_default()
+                .insert(module_index);
+        }
+        for asset in &module.asset_literals {
+            index
+                .asset_literals
+                .entry(asset.clone())
+                .or_default()
+                .insert(module_index);
+        }
+        for export in &module.export_names {
+            index
+                .export_names
+                .entry(export.clone())
+                .or_default()
+                .insert(module_index);
+        }
+    }
+    index
+}
+
 fn source_structural_support(
     subjects: &[SubjectModule],
     index: &ReferenceSourceIndex,
 ) -> BTreeMap<u32, BTreeMap<String, f64>> {
-    let reference_bags = index
-        .modules
-        .iter()
-        .filter_map(|module| {
-            let fingerprints = FunctionExtractor::fingerprint(ModuleId(0), module.source.as_str());
-            let bag = build_structural_bag(&fingerprints)?;
-            let self_score = score_structural_bags(&bag, &bag).unwrap_or(0.0);
-            Some((module.file_path.as_str(), (bag, self_score)))
-        })
-        .collect::<BTreeMap<_, _>>();
     let reference_by_path = index
         .modules
         .iter()
-        .map(|module| (module.file_path.as_str(), module))
+        .map(|module| (module.file_path.clone(), module))
         .collect::<BTreeMap<_, _>>();
+    let mut reference_bags = BTreeMap::<String, (StructuralBag, f64)>::new();
     let mut support = BTreeMap::<u32, BTreeMap<String, f64>>::new();
     for subject in subjects {
-        let fingerprints =
-            FunctionExtractor::fingerprint(ModuleId(subject.module_id), subject.source.as_str());
+        let fingerprints = FunctionExtractor::fingerprint_primary(
+            ModuleId(subject.module_id),
+            subject.source.as_str(),
+        );
         let Some(subject_bag) = build_structural_bag(&fingerprints) else {
             continue;
         };
@@ -546,11 +678,20 @@ fn source_structural_support(
         // then reuse the package matcher's structural-bag scorer only on the
         // short list. Full subject x reference cascade is too expensive and
         // noisy; structural scoring is evidence refinement, not discovery.
-        for module in ranked_module_matches(&subject.fingerprint, index, None, None)
+        for module in ranked_module_matches(&subject.profile, index, None, None)
             .into_iter()
             .take(SOURCE_STRUCTURAL_CANDIDATE_LIMIT)
             .filter_map(|candidate| reference_by_path.get(candidate.matched.file_path.as_str()))
         {
+            if !reference_bags.contains_key(module.file_path.as_str()) {
+                let fingerprints =
+                    FunctionExtractor::fingerprint_primary(ModuleId(0), module.source.as_str());
+                let Some(bag) = build_structural_bag(&fingerprints) else {
+                    continue;
+                };
+                let self_score = score_structural_bags(&bag, &bag).unwrap_or(0.0);
+                reference_bags.insert(module.file_path.clone(), (bag, self_score));
+            }
             let Some((reference_bag, reference_self)) =
                 reference_bags.get(module.file_path.as_str())
             else {
@@ -592,7 +733,7 @@ fn graph_seed_assignment(
         .filter_map(|subject| {
             let matched = best_module_match_with_reciprocal(
                 subject.module_id,
-                &subject.fingerprint,
+                &subject.profile,
                 index,
                 &BTreeMap::new(),
                 structural_support.get(&subject.module_id),
@@ -855,6 +996,8 @@ const MEDIUM_SCORE_MARGIN: f64 = 0.20;
 /// overlap is hub-resistant, so this does not re-admit large-file false matches.
 const MEDIUM_STRONG_NANCHOR: f64 = 0.30;
 const SOURCE_STRUCTURAL_CANDIDATE_LIMIT: usize = 12;
+const SOURCE_CANDIDATE_MAX_ANCHOR_FANOUT: usize = 64;
+const SOURCE_CANDIDATE_MIN_ANCHOR_IDF: f64 = 1.0;
 // Structural score is now cosine-normalized to [0,1] (see source_structural_support).
 // Used as ranking evidence and as a Medium criterion only WITH anchor
 // corroboration — standalone structural promotion was tried and reverted because
@@ -868,7 +1011,7 @@ const MEDIUM_GRAPH_SUPPORT: usize = 1;
 /// graph-aware assignment back as the seed, so confidently-matched modules
 /// anchor their neighbors and the match set grows across the dependency graph.
 /// Converges early when the assignment stops changing; 4 is an upper bound.
-const MAX_PROPAGATION_ROUNDS: usize = 8;
+const MAX_PROPAGATION_ROUNDS: usize = 1;
 /// Minimum normalized-anchor (content) corroboration required for the
 /// otherwise-content-free Medium criteria — `export>=2 || function>=2` and the
 /// graph-all-edges-matched promotion. Without it, coincidental function/export
@@ -929,6 +1072,7 @@ struct MatchEvidence {
     asset_overlap: usize,
     export_overlap: usize,
     function_overlap: usize,
+    source_score: SourceEvidenceScore,
     structural_score: f64,
     graph: GraphEvidence,
     weighted_anchor: f64,
@@ -983,6 +1127,10 @@ fn candidate_relevance(evidence: MatchEvidence) -> f64 {
         + evidence.weighted_anchor
         + (evidence.export_overlap as f64) * 8.0
         + (evidence.function_overlap as f64) * 4.0
+        + evidence.source_score.function_axis_jaccard * 120.0
+        + evidence.source_score.function_axis_containment * 60.0
+        + evidence.source_score.jsx_react_shape_jaccard * 80.0
+        + (evidence.source_score.jsx_react_shape_overlap as f64) * 8.0
         + evidence.structural_score * 120.0
         + (evidence.graph.matched_edges as f64) * 35.0
         + evidence.graph.coverage() * 75.0
@@ -1009,6 +1157,15 @@ fn raw_match_tier(evidence: MatchEvidence) -> MatchTier {
         || (evidence.graph.known_edges >= 2
             && evidence.graph.matched_edges == evidence.graph.known_edges
             && evidence.normalized_anchor >= MEDIUM_CONTENT_NORMALIZED_FLOOR)
+        || (evidence.source_score.function_axis_jaccard >= 0.20
+            && evidence.source_score.function_axis_containment >= 0.50
+            && (evidence.normalized_anchor >= 0.03
+                || evidence.source_score.unique_string_anchor_overlap >= 1
+                || evidence.source_score.jsx_react_shape_jaccard >= 0.15))
+        || (evidence.source_score.jsx_react_shape_jaccard >= 0.35
+            && (evidence.normalized_anchor >= 0.08
+                || evidence.source_score.unique_string_anchor_overlap >= 1
+                || evidence.source_score.function_axis_containment >= 0.35))
         || (evidence.weighted_anchor >= MEDIUM_WEIGHTED_ANCHOR
             && evidence.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR)
         || evidence.normalized_anchor >= MEDIUM_STRONG_NANCHOR
@@ -1042,22 +1199,36 @@ fn calibrate_tier(
 }
 
 fn ranked_module_matches(
-    subject: &SourceFingerprint,
+    subject: &SourceEvidenceProfile,
     index: &ReferenceSourceIndex,
     structural_support: Option<&BTreeMap<String, f64>>,
     graph_support: Option<&BTreeMap<String, GraphEvidence>>,
 ) -> Vec<RankedModuleMatch> {
-    let (subject_exports, subject_assets) = classify_anchors(subject);
+    let fingerprint = &subject.fingerprint;
+    let (subject_exports, subject_assets) = classify_anchors(fingerprint);
+    let candidate_indices = candidate_module_indices(
+        fingerprint,
+        &subject_exports,
+        &subject_assets,
+        index,
+        structural_support,
+        graph_support,
+    );
     let mut ranked = Vec::new();
-    for module in &index.modules {
+    for module_index in candidate_indices {
+        let Some(module) = index.modules.get(module_index) else {
+            continue;
+        };
         let asset_overlap = overlap_len(&subject_assets, &module.asset_literals);
         let export_overlap = overlap_len(&subject_exports, &module.export_names);
         let function_overlap = overlap_len(
-            &subject.function_signature_hashes,
+            &fingerprint.function_signature_hashes,
             &module.fingerprint.function_signature_hashes,
         );
-        let anchor_overlap =
-            overlap_len(&subject.string_anchors, &module.fingerprint.string_anchors);
+        let anchor_overlap = overlap_len(
+            &fingerprint.string_anchors,
+            &module.fingerprint.string_anchors,
+        );
         let structural_score = structural_support
             .and_then(|support| support.get(module.file_path.as_str()).copied())
             .unwrap_or(0.0);
@@ -1065,17 +1236,17 @@ fn ranked_module_matches(
             .and_then(|support| support.get(module.file_path.as_str()).copied())
             .unwrap_or_default();
         let weighted_anchor = weighted_anchor_overlap(
-            &subject.string_anchors,
+            &fingerprint.string_anchors,
             &module.fingerprint.string_anchors,
             &index.anchor_idf,
         );
         let normalized_anchor = normalized_anchor_overlap(
-            &subject.string_anchors,
+            &fingerprint.string_anchors,
             &module.fingerprint.string_anchors,
             &index.anchor_idf,
             weighted_anchor,
         );
-        let hash_match = !subject
+        let hash_match = !fingerprint
             .normalized_source_hashes
             .is_disjoint(&module.fingerprint.normalized_source_hashes);
         // Reject candidates with no real evidence. `weighted_anchor` (not raw
@@ -1092,11 +1263,13 @@ fn ranked_module_matches(
         {
             continue;
         }
+        let source_score = score_source_evidence(subject, &module.profile, &index.evidence_idf);
         let evidence = MatchEvidence {
             hash_match,
             asset_overlap,
             export_overlap,
             function_overlap,
+            source_score,
             structural_score,
             graph,
             weighted_anchor,
@@ -1132,12 +1305,92 @@ fn ranked_module_matches(
     ranked
 }
 
+fn candidate_module_indices(
+    subject: &SourceFingerprint,
+    subject_exports: &BTreeSet<String>,
+    subject_assets: &BTreeSet<String>,
+    index: &ReferenceSourceIndex,
+    structural_support: Option<&BTreeMap<String, f64>>,
+    graph_support: Option<&BTreeMap<String, GraphEvidence>>,
+) -> BTreeSet<usize> {
+    let mut candidates = BTreeSet::new();
+    extend_candidates(
+        &mut candidates,
+        &index.candidate_index.normalized_source_hashes,
+        &subject.normalized_source_hashes,
+    );
+    extend_candidates(
+        &mut candidates,
+        &index.candidate_index.function_signature_hashes,
+        &subject.function_signature_hashes,
+    );
+    extend_candidates(
+        &mut candidates,
+        &index.candidate_index.asset_literals,
+        subject_assets,
+    );
+    extend_candidates(
+        &mut candidates,
+        &index.candidate_index.export_names,
+        subject_exports,
+    );
+    for anchor in &subject.string_anchors {
+        let Some(posting) = index.candidate_index.string_anchors.get(anchor) else {
+            continue;
+        };
+        if posting.len() > SOURCE_CANDIDATE_MAX_ANCHOR_FANOUT {
+            continue;
+        }
+        if index.anchor_idf.get(anchor).copied().unwrap_or(0.0) < SOURCE_CANDIDATE_MIN_ANCHOR_IDF {
+            continue;
+        }
+        candidates.extend(posting.iter().copied());
+    }
+    if let Some(support) = structural_support {
+        extend_supported_paths(&mut candidates, &index.candidate_index, support.keys());
+    }
+    if let Some(support) = graph_support {
+        extend_supported_paths(&mut candidates, &index.candidate_index, support.keys());
+    }
+    candidates
+}
+
+fn extend_candidates(
+    candidates: &mut BTreeSet<usize>,
+    postings: &BTreeMap<String, BTreeSet<usize>>,
+    keys: &BTreeSet<String>,
+) {
+    for key in keys {
+        if let Some(indices) = postings.get(key) {
+            candidates.extend(indices.iter().copied());
+        }
+    }
+}
+
+fn extend_supported_paths<'a>(
+    candidates: &mut BTreeSet<usize>,
+    candidate_index: &ReferenceCandidateIndex,
+    paths: impl Iterator<Item = &'a String>,
+) {
+    for path in paths {
+        if let Some(module_index) = candidate_index.path_to_index.get(path.as_str()) {
+            candidates.insert(*module_index);
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn best_module_match(
     subject: &SourceFingerprint,
     index: &ReferenceSourceIndex,
 ) -> Option<ModuleMatch> {
-    let ranked = ranked_module_matches(subject, index, None, None);
+    let profile = SourceEvidenceProfile {
+        path: "<test>".to_string(),
+        fingerprint: subject.clone(),
+        function_axis_anchors: BTreeSet::new(),
+        jsx_react_shape_anchors: BTreeSet::new(),
+    };
+    let ranked = ranked_module_matches(&profile, index, None, None);
     let mut best = ranked.first()?.matched.clone();
     best.margin = match (ranked.first(), ranked.get(1)) {
         (Some(top), Some(runner_up)) if top.relevance > f64::EPSILON => {
@@ -1157,7 +1410,7 @@ pub(crate) fn best_module_match(
 
 fn best_module_match_with_reciprocal(
     subject_id: u32,
-    subject: &SourceFingerprint,
+    subject: &SourceEvidenceProfile,
     index: &ReferenceSourceIndex,
     reference_best_subjects: &BTreeMap<String, u32>,
     structural_support: Option<&BTreeMap<String, f64>>,
@@ -1184,30 +1437,48 @@ fn best_module_match_with_reciprocal(
     Some(matched)
 }
 
-fn best_subject_by_reference(
+fn best_ranked_by_subject(
     subjects: &[SubjectModule],
     index: &ReferenceSourceIndex,
     structural_support_by_subject: &BTreeMap<u32, BTreeMap<String, f64>>,
     graph_support_by_subject: &BTreeMap<u32, BTreeMap<String, GraphEvidence>>,
+) -> BTreeMap<u32, RankedModuleMatch> {
+    subjects
+        .iter()
+        .filter_map(|subject| {
+            let ranked = ranked_module_matches(
+                &subject.profile,
+                index,
+                structural_support_by_subject.get(&subject.module_id),
+                graph_support_by_subject.get(&subject.module_id),
+            );
+            let mut best = ranked.first()?.clone();
+            best.matched.margin = match (ranked.first(), ranked.get(1)) {
+                (Some(top), Some(runner_up)) if top.relevance > f64::EPSILON => {
+                    (top.relevance - runner_up.relevance).max(0.0) / top.relevance
+                }
+                (Some(_), None) => 1.0,
+                _ => 0.0,
+            };
+            Some((subject.module_id, best))
+        })
+        .collect()
+}
+
+fn best_subject_by_reference_matches(
+    subject_best_matches: &BTreeMap<u32, RankedModuleMatch>,
 ) -> BTreeMap<String, u32> {
     let mut best = BTreeMap::<String, (f64, u32)>::new();
-    for subject in subjects {
-        for candidate in ranked_module_matches(
-            &subject.fingerprint,
-            index,
-            structural_support_by_subject.get(&subject.module_id),
-            graph_support_by_subject.get(&subject.module_id),
-        ) {
-            best.entry(candidate.matched.file_path)
-                .and_modify(|current| {
-                    if candidate.relevance > current.0
-                        || (candidate.relevance == current.0 && subject.module_id < current.1)
-                    {
-                        *current = (candidate.relevance, subject.module_id);
-                    }
-                })
-                .or_insert((candidate.relevance, subject.module_id));
-        }
+    for (module_id, candidate) in subject_best_matches {
+        best.entry(candidate.matched.file_path.clone())
+            .and_modify(|current| {
+                if candidate.relevance > current.0
+                    || (candidate.relevance == current.0 && *module_id < current.1)
+                {
+                    *current = (candidate.relevance, *module_id);
+                }
+            })
+            .or_insert((candidate.relevance, *module_id));
     }
     best.into_iter()
         .map(|(file_path, (_score, module_id))| (file_path, module_id))
@@ -1315,7 +1586,8 @@ struct BindingNameRow {
 impl BindingNameRow {
     fn evidence(&self) -> String {
         // ast_hash == 0 marks a symbol-propagation row (named by positional
-        // alignment inside matched functions); `score` is the vote count.
+        // alignment inside matched functions); `score` is the supporting vote
+        // count. Otherwise it's a direct function-hash match.
         let tier = match (self.ast_hash == 0, self.accepted) {
             (true, true) => "symbol-propagation",
             (true, false) => "symbol-propagation-proposal",
@@ -1343,6 +1615,9 @@ impl BindingNameRow {
 /// the same rationale as `is_specific_export_member` for exports.
 fn is_specific_reference_name(name: &str) -> bool {
     let name = name.trim();
+    if sanitize_identifier(name) != name {
+        return false;
+    }
     if name.len() < 3 {
         return false;
     }
@@ -1487,7 +1762,9 @@ fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFun
             .filter(|(_, name)| is_specific_reference_name(name))
             .collect();
         let mut literals = function_string_literals(module.source.as_str());
-        for fingerprint in FunctionExtractor::fingerprint(ModuleId(0), module.source.as_str()) {
+        for fingerprint in
+            FunctionExtractor::fingerprint_primary(ModuleId(0), module.source.as_str())
+        {
             if let Some(name) = names.get(&fingerprint.id.span) {
                 let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
                 out.push(ReferenceFunction {
@@ -1508,9 +1785,10 @@ fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction>
     for subject in subjects {
         let names = function_names(subject.source.as_str());
         let mut literals = function_string_literals(subject.source.as_str());
-        for fingerprint in
-            FunctionExtractor::fingerprint(ModuleId(subject.module_id), subject.source.as_str())
-        {
+        for fingerprint in FunctionExtractor::fingerprint_primary(
+            ModuleId(subject.module_id),
+            subject.source.as_str(),
+        ) {
             if let Some(name) = names.get(&fingerprint.id.span) {
                 let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
                 out.push(SubjectFunction {
@@ -1606,9 +1884,6 @@ fn match_function_lists(
             continue;
         }
         accepted.insert((subject.module_id, subject.name.clone()));
-        if subject.name == reference.name {
-            continue;
-        }
         rows.push(BindingNameRow {
             module_id: subject.module_id,
             subject_path: subject.subject_path.clone(),
@@ -1666,9 +1941,6 @@ fn match_function_lists(
                 continue;
             }
             accepted.insert((subject.module_id, subject.name.clone()));
-            if subject.name == reference.name {
-                continue;
-            }
             rows.push(BindingNameRow {
                 module_id: subject.module_id,
                 subject_path: subject.subject_path.clone(),
@@ -1771,7 +2043,7 @@ fn span_uses_and_bound<'a>(
 /// alignment: walking both functions' `uses` streams in lockstep, a subject
 /// identifier NOT bound inside the function is a MODULE-LEVEL symbol whose
 /// reference-side counterpart is its real name. Votes aggregate across all
-/// anchors; a module-level minified symbol named consistently by >=2 anchors is
+/// anchors; a module-level minified symbol named consistently by ≥2 anchors is
 /// accepted, a single anchor proposes. This names the non-function symbols
 /// (consts, classes, imported bindings) that matched functions reference.
 fn propagate_symbols(
@@ -1868,6 +2140,7 @@ fn propagate_symbols(
         if already.contains(&(module_id, subject_name.as_str())) {
             continue; // function track already named it
         }
+        // Winner = most votes; accepted only on a strict majority with >=2 anchors.
         let mut winner: Option<(&String, usize, &String)> = None;
         let mut runner_up = 0usize;
         for (name, (count, file)) in &tally {
@@ -2049,6 +2322,7 @@ fn write_binding_names(
     connection: &Connection,
     project_id: u32,
     rows: &[BindingNameRow],
+    final_path_by_module: &BTreeMap<u32, String>,
     origin_prefix: &str,
     reference_version: &str,
 ) -> Result<(usize, usize), CliRunError> {
@@ -2058,6 +2332,10 @@ fn write_binding_names(
         let binding_key = row.original_name.clone(); // no binding_index -> key on original
         let origin = format!("{origin_prefix}:{reference_version}:{}", row.reference_file);
         let evidence = row.evidence();
+        let file_path = final_path_by_module
+            .get(&row.module_id)
+            .map(String::as_str)
+            .unwrap_or(row.subject_path.as_str());
         validate_name_acceptance(
             row.original_name.as_str(),
             row.semantic_name.as_str(),
@@ -2081,7 +2359,7 @@ fn write_binding_names(
                 ",
                 params![
                     i64::from(project_id),
-                    row.subject_path,
+                    file_path,
                     row.original_name,
                     binding_key,
                     row.semantic_name,
@@ -2130,9 +2408,147 @@ fn write_module_names(
     Ok(written)
 }
 
+fn accepted_module_paths(plans: &[ModulePlan], min_tier: MinTier) -> BTreeMap<u32, String> {
+    selected_unique_path_plan_indices(plans, min_tier)
+        .into_iter()
+        .map(|index| {
+            (
+                plans[index].module_id,
+                plans[index].matched.file_path.clone(),
+            )
+        })
+        .collect()
+}
+
+fn selected_unique_path_plan_indices(plans: &[ModulePlan], min_tier: MinTier) -> BTreeSet<usize> {
+    let mut selected = BTreeSet::new();
+    let mut candidates_by_path = BTreeMap::<&str, Vec<usize>>::new();
+    for (index, plan) in plans.iter().enumerate() {
+        if tier_passes(plan.matched.tier, min_tier) {
+            candidates_by_path
+                .entry(plan.matched.file_path.as_str())
+                .or_default()
+                .push(index);
+        }
+    }
+    for candidates in candidates_by_path.values_mut() {
+        candidates.sort_by(|&left, &right| {
+            let left_match = &plans[left].matched;
+            let right_match = &plans[right].matched;
+            right_match
+                .reciprocal_best
+                .cmp(&left_match.reciprocal_best)
+                .then(tier_rank(right_match.tier).cmp(&tier_rank(left_match.tier)))
+                .then(
+                    right_match
+                        .normalized_anchor
+                        .total_cmp(&left_match.normalized_anchor),
+                )
+                .then(
+                    right_match
+                        .weighted_anchor
+                        .total_cmp(&left_match.weighted_anchor),
+                )
+                .then(right_match.graph_support.cmp(&left_match.graph_support))
+                .then(right_match.margin.total_cmp(&left_match.margin))
+                .then(plans[left].module_id.cmp(&plans[right].module_id))
+        });
+        if let Some(index) = candidates.first() {
+            selected.insert(*index);
+        }
+    }
+    selected
+}
+
+fn ensure_module_path_overrides_table(connection: &Connection) -> Result<(), CliRunError> {
+    connection
+        .execute_batch(
+            r"
+            CREATE TABLE IF NOT EXISTS module_path_overrides (
+                project_id INTEGER NOT NULL,
+                module_id INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                evidence TEXT,
+                accepted INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (project_id, module_id, origin, path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_module_path_overrides_project_module
+                ON module_path_overrides(project_id, module_id, accepted);
+            ",
+        )
+        .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))
+}
+
+fn write_module_path_overrides(
+    connection: &Connection,
+    project_id: u32,
+    plans: &[ModulePlan],
+    min_tier: MinTier,
+    origin_prefix: &str,
+    reference_version: &str,
+) -> Result<usize, CliRunError> {
+    ensure_module_path_overrides_table(connection)?;
+    let mut written = 0usize;
+    let selected = selected_unique_path_plan_indices(plans, min_tier);
+    for index in selected {
+        let plan = &plans[index];
+        if !tier_passes(plan.matched.tier, min_tier) {
+            continue;
+        }
+        let origin = format!(
+            "{origin_prefix}:{reference_version}:{}",
+            plan.matched.file_path
+        );
+        validate_module_path_acceptance(plan.matched.file_path.as_str(), origin.as_str())
+            .map_err(|error| CliRunError::ReferenceSourceNames(error.message()))?;
+        let evidence = format!(
+            "{{\"tier\":\"{}\",\"anchor\":{},\"weighted_anchor\":{:.3},\"normalized_anchor\":{:.3},\"asset\":{},\"export\":{},\"function\":{},\"structural\":{:.3},\"graph\":{},\"reciprocal\":{}}}",
+            tier_str(plan.matched.tier),
+            plan.matched.anchor_overlap,
+            plan.matched.weighted_anchor,
+            plan.matched.normalized_anchor,
+            plan.matched.asset_overlap,
+            plan.matched.export_overlap,
+            plan.matched.function_overlap,
+            plan.matched.structural_score,
+            plan.matched.graph_support,
+            if plan.matched.reciprocal_best {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        written += connection
+            .execute(
+                r"
+                INSERT INTO module_path_overrides (
+                    project_id, module_id, path, origin, evidence, accepted, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 1, datetime('now'), datetime('now'))
+                ON CONFLICT(project_id, module_id, origin, path) DO UPDATE SET
+                    evidence = excluded.evidence,
+                    accepted = excluded.accepted,
+                    updated_at = datetime('now')
+                ",
+                params![
+                    i64::from(project_id),
+                    i64::from(plan.module_id),
+                    plan.matched.file_path,
+                    origin,
+                    evidence,
+                ],
+            )
+            .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+    }
+    Ok(written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reverts_package_matcher::fingerprint_source;
 
     #[test]
     fn build_index_fingerprints_source_files_and_skips_dts_and_node_modules() {
@@ -2271,13 +2687,35 @@ mod tests {
         }
     }
 
+    fn test_profile(path: &str, fingerprint: SourceFingerprint) -> SourceEvidenceProfile {
+        SourceEvidenceProfile {
+            path: path.to_string(),
+            fingerprint,
+            function_axis_anchors: BTreeSet::new(),
+            jsx_react_shape_anchors: BTreeSet::new(),
+        }
+    }
+
     fn refmod(path: &str, anchors: &[&str]) -> ReferenceSourceModule {
+        let fingerprint = fp(anchors);
         ReferenceSourceModule {
             file_path: path.to_string(),
             source: String::new(),
-            fingerprint: fp(anchors),
+            profile: test_profile(path, fingerprint.clone()),
+            fingerprint,
             export_names: BTreeSet::new(),
             asset_literals: BTreeSet::new(),
+        }
+    }
+
+    fn test_index(modules: Vec<ReferenceSourceModule>) -> ReferenceSourceIndex {
+        let evidence_idf = source_evidence_idf(modules.iter().map(|module| &module.profile));
+        ReferenceSourceIndex {
+            version: "t".to_string(),
+            anchor_idf: compute_anchor_idf(&modules),
+            evidence_idf,
+            candidate_index: build_candidate_index(&modules),
+            modules,
         }
     }
 
@@ -2304,22 +2742,19 @@ mod tests {
         let mut modules: Vec<ReferenceSourceModule> = (0..6)
             .map(|i| {
                 let p = format!("hub{i}.ts");
+                let fingerprint = fp(&["hubtoken", "filler-token"]);
                 ReferenceSourceModule {
                     file_path: p,
                     source: String::new(),
-                    fingerprint: fp(&["hubtoken", "filler-token"]),
+                    profile: test_profile("hub.ts", fingerprint.clone()),
+                    fingerprint,
                     export_names: BTreeSet::new(),
                     asset_literals: BTreeSet::new(),
                 }
             })
             .collect();
         modules.push(refmod("distinctive.ts", &rare_refs));
-        let anchor_idf = compute_anchor_idf(&modules);
-        let index = ReferenceSourceIndex {
-            version: "t".to_string(),
-            modules,
-            anchor_idf,
-        };
+        let index = test_index(modules);
 
         // Sharing only the hub token = near-zero weighted overlap -> rejected/Low,
         // never promoted to Medium.
@@ -2353,19 +2788,17 @@ mod tests {
         for i in 0..99 {
             let path = format!("filler-{i}.ts");
             let anchor = format!("filler-anchor-{i}");
+            let fingerprint = fp(&[anchor.as_str()]);
             modules.push(ReferenceSourceModule {
                 file_path: path,
                 source: String::new(),
-                fingerprint: fp(&[anchor.as_str()]),
+                profile: test_profile("filler.ts", fingerprint.clone()),
+                fingerprint,
                 export_names: BTreeSet::new(),
                 asset_literals: BTreeSet::new(),
             });
         }
-        let index = ReferenceSourceIndex {
-            version: "t".to_string(),
-            anchor_idf: compute_anchor_idf(&modules),
-            modules,
-        };
+        let index = test_index(modules);
         let subject_refs: Vec<&str> = shared.iter().map(String::as_str).collect();
         let matched = best_module_match(&fp(&subject_refs), &index).expect("match");
 
@@ -2390,6 +2823,7 @@ mod tests {
             asset_overlap: 0,
             export_overlap: 0,
             function_overlap: 2,
+            source_score: SourceEvidenceScore::default(),
             structural_score: 0.0,
             graph: GraphEvidence::default(),
             weighted_anchor: 5.0,
@@ -2642,7 +3076,8 @@ mod tests {
             },
         ];
         let (accepted_n, proposed_n) =
-            write_binding_names(&connection, 1, &rows, "source", "2.1.76").expect("write");
+            write_binding_names(&connection, 1, &rows, &BTreeMap::new(), "source", "2.1.76")
+                .expect("write");
         assert_eq!((accepted_n, proposed_n), (1, 1));
         let accepted: i64 = connection
             .query_row(
@@ -3018,21 +3453,27 @@ mod tests {
 
     #[test]
     fn symbol_propagation_names_module_level_referenced_symbols() {
-        // Two subject functions (isomorphic to two reference functions) both
-        // reference the same module-level symbol `qZ` -> 2 consistent votes ->
-        // accepted as `loadConfig`. The local `t` is excluded.
-        let subject_module = |module_id, src: &str| SubjectModule {
-            module_id,
-            file_path: "modules/a.ts".into(),
-            source: src.into(),
-            fingerprint: fingerprint_source("a", src).expect("fp"),
-            bindings: vec![],
+        // Two subject modules each contain a function that is AST-isomorphic to a
+        // reference function and references the SAME module-level symbol. Both
+        // accepted-function anchors agree the minified `qZ` is `loadConfig` ->
+        // accepted by ≥2-vote majority. Locals are excluded.
+        let subject_module = |module_id, src: &str| {
+            let fp = fingerprint_source("a", src).expect("fp");
+            SubjectModule {
+                module_id,
+                file_path: "modules/a.ts".into(),
+                source: src.into(),
+                profile: test_profile("modules/a.ts", fp.clone()),
+                fingerprint: fp,
+                bindings: vec![],
+            }
         };
         let subjects = vec![
             subject_module(1, "function aB(p){ let t = p; return qZ(t); }"),
             subject_module(1, "function cD(p){ let t = p; return qZ(t); }"),
         ];
         let subject_fns = collect_subject_functions(&subjects);
+        // Reference index: one file with two distinct functions referencing loadConfig.
         let index = {
             let temp = tempfile::tempdir().expect("temp");
             std::fs::write(
@@ -3044,8 +3485,9 @@ mod tests {
             build_reference_source_index(temp.path(), "v").expect("index")
         };
         let reference_fns = collect_reference_functions(&index);
-        let binding = |orig: &str, sem: &str| BindingNameRow {
-            module_id: 1,
+        // Two accepted function anchors: aB->readA, cD->readB (both isomorphic).
+        let binding = |module_id, orig: &str, sem: &str| BindingNameRow {
+            module_id,
             subject_path: "modules/a.ts".into(),
             reference_file: "cfg.ts".into(),
             original_name: orig.into(),
@@ -3056,7 +3498,7 @@ mod tests {
             statement_count: 2,
             score: 2.0,
         };
-        let rows = vec![binding("aB", "readA"), binding("cD", "readB")];
+        let rows = vec![binding(1, "aB", "readA"), binding(1, "cD", "readB")];
         let propagated = propagate_symbols(&subjects, &index, &subject_fns, &reference_fns, &rows);
         let qz = propagated.iter().find(|r| r.original_name == "qZ");
         assert!(qz.is_some(), "qZ should be propagated: {propagated:?}");
@@ -3203,14 +3645,13 @@ mod tests {
     }
 
     #[test]
-    fn function_match_skips_when_name_already_matches() {
+    fn function_match_keeps_noop_evidence_when_name_already_matches() {
         let subjects = subject_fn(1, "modules/m.ts", "function increment(x) { return x + 1; }");
         let references = reference_fn("util/inc.ts", "function increment(x) { return x + 1; }");
         let rows = match_function_lists(&subjects, &references, &corroborate(1, "util/inc.ts"));
-        assert!(
-            rows.is_empty(),
-            "already-correct name needs no row: {rows:?}"
-        );
+        assert_eq!(rows.iter().filter(|row| row.accepted).count(), 1);
+        assert_eq!(rows[0].original_name, "increment");
+        assert_eq!(rows[0].semantic_name, "increment");
     }
 
     #[test]

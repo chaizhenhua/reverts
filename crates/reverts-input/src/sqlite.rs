@@ -122,7 +122,23 @@ fn load_modules(
     connection: &Connection,
     project_id: u32,
 ) -> Result<Vec<ModuleRow>, SqliteInputError> {
-    let mut statement = connection.prepare(
+    let module_path_override_expr = if table_exists(connection, "module_path_overrides")? {
+        r"
+            (
+                SELECT mpo.path
+                FROM module_path_overrides mpo
+                WHERE mpo.project_id = ?1
+                  AND mpo.module_id = m.id
+                  AND mpo.accepted = 1
+                  AND TRIM(mpo.path) != ''
+                ORDER BY mpo.updated_at DESC, mpo.origin DESC, mpo.path
+                LIMIT 1
+            )
+        "
+    } else {
+        "NULL"
+    };
+    let sql = format!(
         r"
         SELECT
             m.id,
@@ -133,18 +149,26 @@ fn load_modules(
             m.package_name,
             m.package_version,
             m.byte_start,
-            m.byte_end
+            m.byte_end,
+            {module_path_override_expr} AS module_path_override
         FROM modules m
         JOIN project_files pf ON pf.file_id = m.file_id
         WHERE pf.project_id = ?1
         ORDER BY m.id
-        ",
-    )?;
+        "
+    );
+    let mut statement = connection.prepare(sql.as_str())?;
     let rows = statement.query_map(params![i64::from(project_id)], |row| {
         let id = row.get::<_, i64>(0)?;
         let original_name = row.get::<_, String>(2)?;
         let semantic_name = row.get::<_, Option<String>>(3)?;
-        let semantic_path = module_semantic_path(id, semantic_name.as_deref(), &original_name);
+        let module_path_override = row.get::<_, Option<String>>(9)?;
+        let semantic_path = module_path_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| module_semantic_path(id, semantic_name.as_deref(), &original_name));
         let category = row.get::<_, Option<String>>(4)?;
 
         Ok(ModuleRow {
@@ -1268,5 +1292,54 @@ mod tests {
         connection
             .execute_batch(sql.as_str())
             .expect("fixture rows should be inserted");
+    }
+
+    #[test]
+    fn load_modules_prefers_accepted_module_path_override() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source_path = temp.path().join("entry.js");
+        fs::write(source_path.as_path(), "console.log('fixture module');")
+            .expect("source should be written");
+        let connection = Connection::open_in_memory().expect("db");
+        create_schema(&connection);
+        insert_fixture_project(&connection, source_path.to_str().expect("utf8 path"));
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE module_path_overrides (
+                    project_id INTEGER NOT NULL,
+                    module_id INTEGER NOT NULL,
+                    path TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    evidence TEXT,
+                    accepted INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, module_id, origin, path)
+                );
+                INSERT INTO module_path_overrides (
+                    project_id, module_id, path, origin, evidence, accepted, created_at, updated_at
+                ) VALUES (
+                    7, 10, 'tools/MCPTool/classifyForCollapse.tsx',
+                    'source:2.1.89:tools/MCPTool/classifyForCollapse.tsx',
+                    '{}', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                );
+                ",
+            )
+            .expect("override schema");
+
+        let rows = load_project_rows_from_connection(&connection, 7).expect("rows");
+        let app = rows
+            .modules
+            .iter()
+            .find(|module| module.id.0 == 10)
+            .expect("app module");
+        let package = rows
+            .modules
+            .iter()
+            .find(|module| module.id.0 == 11)
+            .expect("package module");
+        assert_eq!(app.semantic_path, "tools/MCPTool/classifyForCollapse.tsx");
+        assert_eq!(package.semantic_path, "modules/11-lodash/map.ts");
     }
 }

@@ -10,6 +10,7 @@ mod pipeline;
 mod proof;
 mod scoring;
 mod source;
+mod source_evidence;
 mod strategy;
 
 pub use api::{
@@ -86,6 +87,11 @@ pub use source::source_imports::{
     package_import_names_from_sources, package_import_sites_from_sources,
 };
 pub(crate) use source::source_text::normalize_source;
+pub use source_evidence::{
+    SourceEvidenceIdf, SourceEvidenceProfile, SourceEvidenceScore, build_source_evidence_profile,
+    build_source_evidence_profile_with_fingerprint, function_axis_anchors, jsx_react_shape_anchors,
+    score_source_evidence, source_evidence_idf,
+};
 pub use strategy::{
     CascadeMatchReport, CascadeOwnershipMatch, GlobalAssignment, StructuralBag,
     StructuralBagMatchReport, assign_globally, build_structural_bag, cascade_candidates,

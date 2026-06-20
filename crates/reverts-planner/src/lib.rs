@@ -7962,7 +7962,7 @@ pub(crate) fn normalized_module_output_path(module_id: ModuleId, raw_path: &str)
 }
 
 fn is_safe_typescript_module_path(path: &str) -> bool {
-    if !path.ends_with(".ts") {
+    if !path.ends_with(".ts") && !path.ends_with(".tsx") {
         return false;
     }
     path.split('/').all(|segment| {

@@ -21,6 +21,8 @@ const SOURCE_HASH_WEIGHT: u32 = 10_000;
 const MODULE_MATCH_WEIGHT: u32 = 1_000;
 const FUNCTION_SIGNATURE_WEIGHT: u32 = 10;
 const STRING_ANCHOR_WEIGHT: u32 = 1;
+const FUNCTION_AXIS_MATCH_FLOOR: usize = 4;
+const JSX_REACT_SHAPE_MATCH_FLOOR: usize = 3;
 
 pub(crate) fn score_version<'a>(
     version: &PackageVersionCandidate<'a>,
@@ -117,6 +119,14 @@ pub(crate) fn best_source_match(
                 .string_anchors
                 .intersection(&module.string_anchors)
                 .count();
+            let function_axis_matches = source
+                .function_axis_anchors
+                .intersection(&module.function_axis_anchors)
+                .count();
+            let jsx_react_shape_matches = source
+                .jsx_react_shape_anchors
+                .intersection(&module.jsx_react_shape_anchors)
+                .count();
             let property_shape_matches =
                 property_shape_anchor_matches(&source.string_anchors, &module.string_anchors);
             let property_anchor_matches =
@@ -136,11 +146,18 @@ pub(crate) fn best_source_match(
             let is_function_string_match = function_signature_matches
                 >= config.min_function_signature_matches
                 && string_anchor_matches >= config.min_string_anchor_matches;
+            let is_function_axis_match = function_axis_matches >= FUNCTION_AXIS_MATCH_FLOOR
+                && string_anchor_matches >= config.min_string_anchor_matches;
+            let is_jsx_react_shape_match = jsx_react_shape_matches >= JSX_REACT_SHAPE_MATCH_FLOOR
+                && (string_anchor_matches >= config.min_string_anchor_matches
+                    || function_axis_matches >= FUNCTION_AXIS_MATCH_FLOOR);
             let is_property_shape_match = property_shape_matches >= 1 && string_anchor_matches >= 4;
             let is_object_shape_match = object_shape_matches >= 1 && string_anchor_matches >= 5;
             let is_class_shape_match = class_shape_matches >= 1 && string_anchor_matches >= 4;
             let is_switch_shape_match = switch_shape_matches >= 1 && string_anchor_matches >= 4;
             if is_function_string_match
+                || is_function_axis_match
+                || is_jsx_react_shape_match
                 || is_property_shape_match
                 || is_object_shape_match
                 || is_class_shape_match
@@ -149,12 +166,17 @@ pub(crate) fn best_source_match(
                 Some((
                     source,
                     function_signature_matches
+                        .max(function_axis_matches)
+                        .max(jsx_react_shape_matches)
                         .max(property_anchor_matches)
                         .max(object_anchor_matches)
                         .max(class_anchor_matches)
                         .max(switch_anchor_matches),
                     string_anchor_matches,
-                    if is_function_string_match {
+                    if is_function_string_match
+                        || is_function_axis_match
+                        || is_jsx_react_shape_match
+                    {
                         ModuleMatchStrategy::FunctionSignatureAndStringAnchors
                     } else if is_property_shape_match {
                         ModuleMatchStrategy::PropertyShapeAndStringAnchors
@@ -263,17 +285,23 @@ fn best_aggregate_match(
     config: &VersionedPackageMatcherConfig,
 ) -> Option<ModulePackageMatch> {
     let mut function_signature_hashes = BTreeSet::new();
+    let mut function_axis_anchors = BTreeSet::new();
     let mut string_anchors = BTreeSet::new();
     for source in &version.sources {
         function_signature_hashes.extend(source.function_signature_hashes.iter().cloned());
+        function_axis_anchors.extend(source.function_axis_anchors.iter().cloned());
         string_anchors.extend(source.string_anchors.iter().cloned());
     }
     let function_signature_matches = function_signature_hashes
         .intersection(&module.function_signature_hashes)
         .count();
+    let function_axis_matches = function_axis_anchors
+        .intersection(&module.function_axis_anchors)
+        .count();
     let string_anchor_matches = string_anchors.intersection(&module.string_anchors).count();
     let min_function_matches = config.min_function_signature_matches.max(3);
-    if function_signature_matches < min_function_matches
+    let structural_matches = function_signature_matches.max(function_axis_matches);
+    if structural_matches < min_function_matches
         || string_anchor_matches < config.min_string_anchor_matches
     {
         return None;
@@ -281,7 +309,7 @@ fn best_aggregate_match(
     Some(module_package_aggregate_match(
         module,
         version,
-        function_signature_matches,
+        structural_matches,
         string_anchor_matches,
     ))
 }

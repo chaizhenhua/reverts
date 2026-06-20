@@ -90,6 +90,48 @@ impl FunctionExtractor {
         Self::new(module_id).extract(&parsed.program).len()
     }
 
+    /// Computes primary per-function fingerprints without alternate
+    /// normalization passes. This is the fast path for coarse source-evidence
+    /// candidate generation: it still includes all primary axes (AST, CFG,
+    /// literals, callees, binding pattern, etc.) but avoids running every
+    /// stable normalization pass for every corpus file.
+    ///
+    /// Bundle-extracted module bodies arrive here as `{ stmt; stmt; }` —
+    /// the braces are the original arrow-function body delimiters. OXC
+    /// parses such input as a top-level `BlockStatement`, and the default
+    /// `Visit` walker does NOT descend into block-nested
+    /// `FunctionDeclaration`s the same way it descends into program-level
+    /// ones. To keep the extractor blind to this packaging detail, we
+    /// strip a single pair of outer braces before parsing.
+    #[must_use]
+    pub fn fingerprint_primary(module_id: ModuleId, source: &str) -> Vec<FunctionFingerprint> {
+        let source = strip_outer_block_braces(source);
+        let alloc = Allocator::default();
+        let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+        let parsed = Parser::new(&alloc, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if parsed.panicked || !parsed.errors.is_empty() {
+            return Vec::new();
+        }
+        let primary_extracts = Self::new(module_id).extract(&parsed.program);
+        let primary_locals = collect_universal_renamable_bindings(&parsed.program);
+
+        primary_extracts
+            .iter()
+            .filter_map(|f| {
+                let (params, body) = locate_function(&parsed.program, f.id.span)?;
+                Some(FunctionFingerprint {
+                    id: f.id,
+                    param_count: f.param_count,
+                    statement_count: f.statement_count,
+                    primary: compute_axes(params, body, &primary_locals),
+                    alternates: Vec::new(),
+                })
+            })
+            .collect()
+    }
+
     /// Computes per-function fingerprints with primary axes plus one alternate
     /// per normalization pass. Returns empty if the source fails to parse.
     ///
@@ -1216,6 +1258,10 @@ function outer() {
 
     #[test]
     fn identifier_streams_align_positionally_across_alpha_renamed_functions() {
+        // Two α-renamed copies of the same function have identical primary.ast
+        // and equal-length `uses` streams whose i-th elements correspond. Local
+        // bindings are recorded so the matcher can exclude them; module-level
+        // free identifiers (here `helper`, `CONFIG`) line up for naming.
         let subject = "function f(a){ let b = a + 1; return helper(b, CONFIG); }";
         let reference = "function g(x){ let y = x + 1; return loadHelper(y, SETTINGS); }";
         let s = identifier_streams(subject);
@@ -1227,6 +1273,7 @@ function outer() {
         );
         let s_bound: std::collections::BTreeSet<&str> =
             s.bindings.iter().map(|(_, _, n)| n.as_str()).collect();
+        // Pair module-level (unbound) uses positionally.
         let mut pairs = Vec::new();
         for ((_, sn), (_, rn)) in s.uses.iter().zip(r.uses.iter()) {
             if !s_bound.contains(sn.as_str()) {
@@ -1235,6 +1282,7 @@ function outer() {
         }
         assert!(pairs.contains(&("helper", "loadHelper")), "{pairs:?}");
         assert!(pairs.contains(&("CONFIG", "SETTINGS")), "{pairs:?}");
+        // `a`/`b` are local -> excluded.
         assert!(
             !pairs.iter().any(|(s, _)| *s == "a" || *s == "b"),
             "{pairs:?}"
