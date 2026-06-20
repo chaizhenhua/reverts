@@ -546,8 +546,8 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     let index = build_reference_source_index(&args.reference_source_root, &args.reference_version)
         .map_err(CliRunError::ReferenceSourceNames)?;
     trace_reference_source_names(trace_start, "build_reference_source_index");
-    let subjects = if args.module_only {
-        subject_modules_from_extracted_input(&args)?
+    let (subjects, island_source) = if args.module_only {
+        (subject_modules_from_extracted_input(&args)?, None)
     } else {
         subject_modules(&args)?
     };
@@ -619,6 +619,24 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
         trace_reference_source_names(trace_start, "module_graph_propagation");
     }
     drop_real_name_remaps(&mut binding_rows);
+
+    // Entrypoint-island functions: matched in ISOLATION with an empty
+    // `module_matched_file` so only the module-INDEPENDENT accept passes
+    // (0/3/4/5/6) fire — the island aggregates functions from across the app and
+    // has no single owner reference file. This recovers names for the thousands of
+    // root-scope first-party functions that carry no model ModuleId and so never
+    // enter the per-module subject set. Kept separate from the per-module flow so
+    // it never perturbs module promotion / graph propagation above.
+    if let Some(island_source) = island_source.as_deref() {
+        let island_fns = collect_island_functions(island_source);
+        let mut island_rows =
+            match_function_lists_inner(&island_fns, &reference_fns, &BTreeMap::new(), true);
+        // Keep only committed accepts; island proposals carry no value downstream.
+        island_rows.retain(|row| row.accepted);
+        drop_real_name_remaps(&mut island_rows);
+        binding_rows.extend(island_rows);
+        trace_reference_source_names(trace_start, "island_function_matching");
+    }
 
     write_match_summary_if_requested(&args, subjects.len(), &plans)?;
     write_match_diagnostics_if_requested(&args, subjects.len(), &plans)?;
@@ -838,7 +856,9 @@ struct SubjectModule {
     bindings: Vec<(String, String)>, // (original_name, emitted_name)
 }
 
-fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>, CliRunError> {
+fn subject_modules(
+    args: &ReferenceSourceNamesArgs,
+) -> Result<(Vec<SubjectModule>, Option<String>), CliRunError> {
     let bundle = load_project_bundle_with_package_externalization(&args.input, args.project_id)
         .map_err(|error| CliRunError::ReferenceSourceNames(format!("load input: {error}")))?;
     // Exclude only EXTERNALIZED package modules (`Accepted` → emitted as a runtime
@@ -871,7 +891,7 @@ fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>
 fn generate_subject_modules(
     bundle: InputBundle,
     include_module: impl Fn(u32) -> bool,
-) -> Result<Vec<SubjectModule>, CliRunError> {
+) -> Result<(Vec<SubjectModule>, Option<String>), CliRunError> {
     // Subject module dependency edges (module_id -> imported module_ids), captured
     // before the bundle is consumed, for graph-based module-match propagation.
     let mut dependency_map: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
@@ -913,8 +933,16 @@ fn generate_subject_modules(
         .collect::<BTreeMap<_, _>>();
 
     let mut modules = Vec::new();
+    // The entrypoint island aggregates thousands of root-scope first-party
+    // functions but is not a model module (no `ModuleId`), so it is absent from
+    // `module_for_path` and would otherwise be silently dropped. Capture its
+    // source so its functions can be matched as synthetic-module subjects.
+    let mut island_source = None;
     for file in &run.project.files {
         let Some(&module_id) = module_for_path.get(file.path.as_str()) else {
+            if file.path == ENTRYPOINT_ISLAND_PATH {
+                island_source = Some(file.source.clone());
+            }
             continue; // scaffold/runtime file with no owning module
         };
         let Ok(fingerprint) = fingerprint_source(file.path.as_str(), file.source.as_str()) else {
@@ -937,7 +965,7 @@ fn generate_subject_modules(
                 .unwrap_or_default(),
         });
     }
-    Ok(modules)
+    Ok((modules, island_source))
 }
 
 fn subject_modules_from_extracted_input(
@@ -4291,36 +4319,79 @@ fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFun
     out
 }
 
+/// Synthetic module id for entrypoint-island functions. Real module ids are small
+/// u32s; `u32::MAX` never collides and is absent from every `module_matched_file`,
+/// so island functions are eligible ONLY for the module-INDEPENDENT accept passes
+/// (0/3/4/5/6) and never the module-pair passes (1/2/2b). That is exactly the
+/// global per-function matching the island requires (it has no single owner file).
+const ISLAND_MODULE_ID: u32 = u32::MAX;
+
+/// Fixed synthetic emit path of the entrypoint island (mirrors reverts-planner's
+/// `ENTRYPOINT_ISLAND_PATH`). The island is not a model module, so it never reaches
+/// the per-module subject set; this path keys its recovered binding names so the
+/// planner applies them to the emitted `modules/entrypoint.ts`.
+const ENTRYPOINT_ISLAND_PATH: &str = "modules/entrypoint.ts";
+
 /// Every named function across all subject (emitted) modules.
 fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction> {
     let mut out = Vec::new();
     for subject in subjects {
-        let names = function_names(subject.source.as_str());
-        let mut literals = function_anchor_tokens(subject.source.as_str());
-        let mut callees = function_callee_names(subject.source.as_str());
-        let mut references = function_referenced_names(subject.source.as_str());
-        for fingerprint in FunctionExtractor::fingerprint_primary(
-            ModuleId(subject.module_id),
+        push_subject_functions_from_source(
+            &mut out,
+            subject.module_id,
+            subject.file_path.as_str(),
             subject.source.as_str(),
-        ) {
-            if let Some(name) = names.get(&fingerprint.id.span) {
-                let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
-                let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
-                let function_references =
-                    references.remove(&fingerprint.id.span).unwrap_or_default();
-                out.push(SubjectFunction {
-                    module_id: subject.module_id,
-                    subject_path: subject.file_path.clone(),
-                    name: name.clone(),
-                    fingerprint,
-                    literals: function_literals,
-                    callees: function_callees,
-                    references: function_references,
-                });
-            }
-        }
+        );
     }
     out
+}
+
+/// Entrypoint-island functions as subjects under a synthetic module id. The island
+/// is a single emitted file aggregating thousands of root-scope first-party
+/// functions that carry no model `ModuleId`, so they never enter the per-module
+/// subject set. Matched with an empty `module_matched_file` they earn names only
+/// from the module-independent (precision-gated) passes.
+fn collect_island_functions(island_source: &str) -> Vec<SubjectFunction> {
+    let mut out = Vec::new();
+    push_subject_functions_from_source(
+        &mut out,
+        ISLAND_MODULE_ID,
+        ENTRYPOINT_ISLAND_PATH,
+        island_source,
+    );
+    out
+}
+
+/// Extract every named function from one emitted `source`, pushing a
+/// [`SubjectFunction`] per function. Shared by the per-module subject collection
+/// and the entrypoint-island collection so both use identical fingerprint/anchor
+/// extraction.
+fn push_subject_functions_from_source(
+    out: &mut Vec<SubjectFunction>,
+    module_id: u32,
+    subject_path: &str,
+    source: &str,
+) {
+    let names = function_names(source);
+    let mut literals = function_anchor_tokens(source);
+    let mut callees = function_callee_names(source);
+    let mut references = function_referenced_names(source);
+    for fingerprint in FunctionExtractor::fingerprint_primary(ModuleId(module_id), source) {
+        if let Some(name) = names.get(&fingerprint.id.span) {
+            let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
+            let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
+            let function_references = references.remove(&fingerprint.id.span).unwrap_or_default();
+            out.push(SubjectFunction {
+                module_id,
+                subject_path: subject_path.to_string(),
+                name: name.clone(),
+                fingerprint,
+                literals: function_literals,
+                callees: function_callees,
+                references: function_references,
+            });
+        }
+    }
 }
 
 /// Minimum statement count for the corroboration-free (globally-unique composite)
@@ -4500,6 +4571,23 @@ fn match_function_lists(
     reference_fns: &[ReferenceFunction],
     module_matched_file: &BTreeMap<u32, String>,
 ) -> Vec<BindingNameRow> {
+    match_function_lists_inner(subject_fns, reference_fns, module_matched_file, false)
+}
+
+/// Core matcher. `precise_anchor_only` restricts acceptance to the passes that
+/// require DISTINCTIVE-ANCHOR evidence (pass 3 anchor-set uniqueness, pass 4
+/// AST×rare-anchor joint) and disables the structural/topology passes (0 composite,
+/// 5 global within-pair, 6 call-graph). Those weaker passes are safe inside a
+/// confirmed module pair but over-fire on low-entropy functions (getters,
+/// `cleanup`, `constructor`) when run GLOBALLY with no module constraint — which is
+/// exactly the entrypoint-island case. Anchor-gated only holds the ~0-FP guarantee
+/// there. The per-module flow keeps `false` (full pass set).
+fn match_function_lists_inner(
+    subject_fns: &[SubjectFunction],
+    reference_fns: &[ReferenceFunction],
+    module_matched_file: &BTreeMap<u32, String>,
+    precise_anchor_only: bool,
+) -> Vec<BindingNameRow> {
     let mut ref_by_file: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     let mut ref_by_any: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     // Distinctive in-body string literal -> reference functions containing it.
@@ -4551,6 +4639,9 @@ fn match_function_lists(
     // with no module match, so it names functions in unmatched modules too.
     for (subject_index, subject) in subject_fns.iter().enumerate() {
         let _ = subject_index;
+        if precise_anchor_only {
+            continue; // composite/structural pass — disabled for global island matching
+        }
         // Corroboration-free acceptance rests entirely on the composite signature
         // being one-of-a-kind in both corpora. A trivial body carries too little
         // structural entropy for that global uniqueness to imply identity:
@@ -4995,7 +5086,8 @@ fn match_function_lists(
     // the same function.
     const PASS5_MIN_STATEMENTS: u32 = 3;
     for subject in subject_fns {
-        if accepted.contains(&(subject.module_id, subject.name.clone()))
+        if precise_anchor_only
+            || accepted.contains(&(subject.module_id, subject.name.clone()))
             || subject.fingerprint.statement_count < PASS5_MIN_STATEMENTS
         {
             continue;
@@ -5076,7 +5168,12 @@ fn match_function_lists(
                 .push(index);
         }
     }
-    for _round in 0..PROPAGATE_MAX_ROUNDS {
+    let propagate_rounds = if precise_anchor_only {
+        0 // call-graph topology pass — disabled for global island matching
+    } else {
+        PROPAGATE_MAX_ROUNDS
+    };
+    for _round in 0..propagate_rounds {
         // subject minified name -> reference name, from everything accepted so far.
         let name_map: BTreeMap<String, String> = rows
             .iter()
@@ -6263,7 +6360,7 @@ pub(crate) fn run_ownership_source_names(
     let bundle =
         load_project_bundle_with_package_externalization(&request.input, request.project_id)
             .map_err(|error| CliRunError::ReferenceSourceNames(format!("load input: {error}")))?;
-    let subjects =
+    let (subjects, _island_source) =
         generate_subject_modules(bundle, |module_id| target_modules.contains(&module_id))?;
     let subject_fns = collect_subject_functions(&subjects);
     let mut binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
@@ -8115,6 +8212,61 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             rows.iter()
                 .any(|r| r.accepted && r.semantic_name == "increment"),
             "unique composite should accept without corroboration: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn island_precise_anchor_only_accepts_distinctive_anchor_match() {
+        // Entrypoint-island case: a function with no module match (empty
+        // module_matched_file) but a distinctive 4-anchor set that overlaps exactly
+        // one reference function is accepted by the anchor-set-uniqueness pass.
+        let body = r#"{ return ["alpha_marker_xyz","beta_marker_xyz","gamma_marker_xyz","delta_marker_xyz"][x]; }"#;
+        let subjects = subject_fn(
+            ISLAND_MODULE_ID,
+            ENTRYPOINT_ISLAND_PATH,
+            &format!("function aB(x) {body}"),
+        );
+        let references = reference_fn(
+            "utils/markers.ts",
+            &format!("function pickMarker(x) {body}"),
+        );
+        let rows = match_function_lists_inner(&subjects, &references, &BTreeMap::new(), true);
+        let accept = rows.iter().find(|r| r.accepted);
+        assert!(
+            accept.is_some_and(|r| r.semantic_name == "pickMarker"),
+            "distinctive anchor set should accept island function: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn island_precise_anchor_only_rejects_low_entropy_structural_match() {
+        // The composite/structural passes (0/5/6) accept this unique-composite body
+        // in normal matching, but it has NO distinctive anchors. Under
+        // precise_anchor_only they are disabled, so a globally-applied island match
+        // must NOT accept it — this is the low-entropy FP class (getters, `cleanup`)
+        // the gating exists to suppress.
+        let subjects = subject_fn(
+            ISLAND_MODULE_ID,
+            ENTRYPOINT_ISLAND_PATH,
+            "function aB(x) { let y = x + 1; return y; }",
+        );
+        let references = reference_fn(
+            "util/inc.ts",
+            "function increment(x) { let y = x + 1; return y; }",
+        );
+        // Sanity: the full pass set DOES accept it (composite pass 0).
+        assert!(
+            match_function_lists(&subjects, &references, &BTreeMap::new())
+                .iter()
+                .any(|r| r.accepted),
+            "full pass set should accept the unique composite"
+        );
+        // Anchor-gated island matching must NOT.
+        assert!(
+            !match_function_lists_inner(&subjects, &references, &BTreeMap::new(), true)
+                .iter()
+                .any(|r| r.accepted),
+            "anchor-gated island matching must reject anchorless low-entropy match"
         );
     }
 
