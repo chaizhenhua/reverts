@@ -234,9 +234,124 @@ fn plan_modules(
         shared_anchors.push(anchors);
     }
     trace_reference_source_names(trace_start, "plan.best_module_loop");
+    apply_split_module_cluster_promotions(&mut plans, &shared_anchors);
     calibrate_global_reference_uniqueness(&mut plans, &shared_anchors);
     plans.sort_by(|a, b| a.module_id.cmp(&b.module_id));
     Ok(plans)
+}
+
+/// Promote Low candidates that look like additional esbuild slices of a
+/// reference file that already has at least one Medium seed. This is deliberately
+/// cluster-local: a candidate must point at the same reference as a seed, cover a
+/// distinct source region (by anchors or structural region evidence), and carry
+/// independent content/source/graph corroboration. It never uses cluster
+/// evidence as standalone proof.
+fn apply_split_module_cluster_promotions(
+    plans: &mut [ModulePlan],
+    shared_anchors: &[BTreeSet<String>],
+) {
+    let mut indices_by_reference = BTreeMap::<String, Vec<usize>>::new();
+    for (index, plan) in plans.iter().enumerate() {
+        indices_by_reference
+            .entry(plan.matched.file_path.clone())
+            .or_default()
+            .push(index);
+    }
+    for indices in indices_by_reference.values() {
+        let mut kept_anchor_sets = indices
+            .iter()
+            .filter(|&&index| plans[index].matched.tier == MatchTier::Medium)
+            .map(|&index| shared_anchors[index].clone())
+            .collect::<Vec<_>>();
+        if kept_anchor_sets.is_empty() {
+            continue;
+        }
+        let mut low_indices = indices
+            .iter()
+            .copied()
+            .filter(|&index| plans[index].matched.tier == MatchTier::Low)
+            .collect::<Vec<_>>();
+        low_indices.sort_by(|&left, &right| {
+            let left_match = &plans[left].matched;
+            let right_match = &plans[right].matched;
+            right_match
+                .structural_score
+                .total_cmp(&left_match.structural_score)
+                .then(
+                    right_match
+                        .normalized_anchor
+                        .total_cmp(&left_match.normalized_anchor),
+                )
+                .then(
+                    right_match
+                        .weighted_anchor
+                        .total_cmp(&left_match.weighted_anchor),
+                )
+                .then(right_match.graph_support.cmp(&left_match.graph_support))
+                .then(plans[left].module_id.cmp(&plans[right].module_id))
+        });
+        for index in low_indices {
+            let anchors = &shared_anchors[index];
+            if split_module_cluster_candidate(&plans[index], anchors, &kept_anchor_sets) {
+                plans[index].matched.tier = MatchTier::Medium;
+                kept_anchor_sets.push(anchors.clone());
+            }
+        }
+    }
+}
+
+fn split_module_cluster_candidate(
+    plan: &ModulePlan,
+    anchors: &BTreeSet<String>,
+    kept_anchor_sets: &[BTreeSet<String>],
+) -> bool {
+    let matched = &plan.matched;
+    if matched.margin < SPLIT_CLUSTER_MIN_MARGIN || !has_ambiguous_promotion_content(matched) {
+        return false;
+    }
+    if !has_split_module_cluster_support(matched, anchors) {
+        return false;
+    }
+    let distinct_anchor_region = !anchors.is_empty()
+        && kept_anchor_sets
+            .iter()
+            .all(|kept| anchor_sets_cover_distinct_parts(anchors, kept));
+    let structural_region = has_split_module_structural_region(matched);
+    if !(distinct_anchor_region || structural_region) {
+        return false;
+    }
+    plan.runner_up.as_ref().is_none_or(|runner_up| {
+        has_clear_anchor_delta(matched, &runner_up.matched)
+            || has_clear_source_axis_delta(matched, &runner_up.matched)
+            || has_clear_granular_delta(matched, &runner_up.matched)
+            || has_clear_structural_delta(matched, &runner_up.matched)
+            || has_clear_graph_delta(matched, &runner_up.matched)
+            || (distinct_anchor_region && matched.source_score.unique_string_anchor_overlap >= 1)
+    })
+}
+
+fn has_split_module_cluster_support(matched: &ModuleMatch, anchors: &BTreeSet<String>) -> bool {
+    has_high_unique_anchor_mass(matched)
+        || guarded_graph_placement_promotion(matched)
+        || (matched.weighted_anchor >= AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR
+            && matched.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR)
+        || (matched.source_score.unique_string_anchor_overlap >= 1
+            && (matched.weighted_anchor >= 4.0 || !anchors.is_empty()))
+        || has_split_module_structural_region(matched)
+}
+
+fn has_split_module_structural_region(matched: &ModuleMatch) -> bool {
+    matched.structural_score >= SPLIT_CLUSTER_STRUCTURAL_SCORE
+        && (matched.statement_window_overlap >= 2
+            || matched.block_branch_overlap >= 2
+            || matched.statement_window_containment >= 0.50
+            || matched.block_branch_containment >= 0.25)
+        && (matched.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
+            || matched.weighted_anchor >= AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR
+            || matched.source_score.unique_string_anchor_overlap >= 1
+            || (matched.source_score.function_axis_overlap >= 4
+                && matched.source_score.function_axis_containment >= 0.25)
+            || matched.graph_support >= 1)
 }
 
 /// Near-injective assignment with a many-to-one escape hatch for esbuild
@@ -286,6 +401,7 @@ fn calibrate_global_reference_uniqueness(
             let independently_strong = matched.reciprocal_best
                 || matched.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR
                 || has_high_unique_anchor_mass(matched)
+                || has_split_module_cluster_support(matched, anchors)
                 || guarded_graph_placement_promotion(matched);
             let covers_distinct_part = !anchors.is_empty()
                 && kept_anchors
@@ -2340,6 +2456,8 @@ const AMBIGUOUS_PROMOTION_GRANULAR_DELTA: usize = 8;
 const AMBIGUOUS_PROMOTION_WINDOW_DELTA: usize = 2;
 const AMBIGUOUS_PROMOTION_STRUCTURAL_SCORE: f64 = 0.10;
 const AMBIGUOUS_PROMOTION_STRUCTURAL_DELTA: f64 = 0.06;
+const SPLIT_CLUSTER_MIN_MARGIN: f64 = 0.03;
+const SPLIT_CLUSTER_STRUCTURAL_SCORE: f64 = 0.10;
 
 type GraphEvidence = GraphNeighborhoodEvidence;
 
@@ -5111,6 +5229,44 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
 
         assert!(anchor_sets_cover_distinct_parts(&left, &mostly_distinct));
         assert!(!anchor_sets_cover_distinct_parts(&left, &overlapping));
+    }
+
+    #[test]
+    fn split_module_cluster_promotes_distinct_low_slice_with_content() {
+        let mut seed = make_plan(40, "features/split-source", MatchTier::Medium);
+        seed.matched.file_path = "features/split-source.ts".to_string();
+
+        let mut slice = make_plan(41, "features/split-source", MatchTier::Low);
+        slice.matched.file_path = "features/split-source.ts".to_string();
+        slice.matched.margin = SPLIT_CLUSTER_MIN_MARGIN;
+        slice.matched.weighted_anchor = AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR;
+        slice.matched.normalized_anchor = AMBIGUOUS_PROMOTION_MIN_NANCHOR;
+        slice.matched.source_score.unique_string_anchor_overlap = 1;
+
+        let mut no_content = make_plan(42, "features/split-source", MatchTier::Low);
+        no_content.matched.file_path = "features/split-source.ts".to_string();
+        no_content.matched.margin = SPLIT_CLUSTER_MIN_MARGIN;
+
+        let mut plans = vec![seed, slice, no_content];
+        let shared = vec![
+            BTreeSet::from(["seed-a".to_string(), "seed-b".to_string()]),
+            BTreeSet::from(["slice-a".to_string(), "slice-b".to_string()]),
+            BTreeSet::from(["no-content-a".to_string(), "no-content-b".to_string()]),
+        ];
+
+        apply_split_module_cluster_promotions(&mut plans, &shared);
+        calibrate_global_reference_uniqueness(&mut plans, &shared);
+
+        assert_eq!(
+            plans[1].matched.tier,
+            MatchTier::Medium,
+            "distinct split slice with content should be retained"
+        );
+        assert_eq!(
+            plans[2].matched.tier,
+            MatchTier::Low,
+            "distinct anchors without content/source corroboration must not promote"
+        );
     }
 
     #[test]
