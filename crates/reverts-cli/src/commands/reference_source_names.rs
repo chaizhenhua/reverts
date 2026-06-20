@@ -97,6 +97,9 @@ struct ModulePlan {
     subject_path: String,
     reference_version: String,
     matched: ModuleMatch,
+    top_candidate: RankedModuleMatch,
+    runner_up: Option<RankedModuleMatch>,
+    shared_string_anchors: BTreeSet<String>,
     module_semantic_name: String,
     subject_bindings: Vec<(String, String)>,
     reference_exports: std::collections::BTreeSet<String>,
@@ -133,7 +136,7 @@ fn plan_modules(
         let Some(ranked) = subject_best_matches.get(&subject.module_id) else {
             continue;
         };
-        let mut matched = ranked.matched.clone();
+        let mut matched = ranked.best.matched.clone();
         matched.reciprocal_best = reference_best_subjects
             .get(matched.file_path.as_str())
             .is_some_and(|best_subject_id| *best_subject_id == subject.module_id);
@@ -151,7 +154,7 @@ fn plan_modules(
         let reference_exports = reference_module
             .map(|m| m.export_names.clone())
             .unwrap_or_default();
-        let anchors = reference_module
+        let anchors: BTreeSet<String> = reference_module
             .map(|m| {
                 subject
                     .fingerprint
@@ -166,7 +169,13 @@ fn plan_modules(
             subject_path: subject.file_path.clone(),
             reference_version: index.version.clone(),
             module_semantic_name: strip_source_extension(&matched.file_path),
+            top_candidate: RankedModuleMatch {
+                relevance: ranked.best.relevance,
+                matched: matched.clone(),
+            },
             matched,
+            runner_up: ranked.runner_up.clone(),
+            shared_string_anchors: anchors.clone(),
             subject_bindings: subject.bindings.clone(),
             reference_exports,
         });
@@ -716,6 +725,7 @@ fn write_match_diagnostics_if_requested(
     let Some(path) = &args.diagnostics_json else {
         return Ok(());
     };
+    let collision_groups = reference_collision_groups(plans);
     let mut reason_counts = BTreeMap::<&'static str, usize>::new();
     let mut low_rows = plans
         .iter()
@@ -751,7 +761,9 @@ fn write_match_diagnostics_if_requested(
         .collect::<Vec<_>>();
     let low_details = low_rows
         .iter()
-        .map(|(closeness, reason, plan)| low_boundary_row_json(plan, reason, *closeness))
+        .map(|(closeness, reason, plan)| {
+            low_boundary_row_json(plan, reason, *closeness, &collision_groups)
+        })
         .collect::<Vec<_>>();
     let summary = serde_json::json!({
         "subject_modules": subject_count,
@@ -769,6 +781,7 @@ fn write_match_diagnostics_if_requested(
             "medium_normalized_anchor": MEDIUM_NORMALIZED_ANCHOR,
             "medium_score_margin": MEDIUM_SCORE_MARGIN,
             "medium_strong_normalized_anchor": MEDIUM_STRONG_NANCHOR,
+            "medium_guarded_strong_normalized_anchor": MEDIUM_GUARDED_STRONG_NANCHOR,
             "medium_reciprocal_weighted_anchor": MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR,
             "medium_reciprocal_normalized_anchor": MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR,
             "medium_structural_score": MEDIUM_STRUCTURAL_SCORE,
@@ -798,18 +811,44 @@ fn write_match_diagnostics_if_requested(
     })
 }
 
+fn reference_collision_groups(plans: &[ModulePlan]) -> BTreeMap<&str, Vec<&ModulePlan>> {
+    let mut groups = BTreeMap::<&str, Vec<&ModulePlan>>::new();
+    for plan in plans {
+        groups
+            .entry(plan.matched.file_path.as_str())
+            .or_default()
+            .push(plan);
+    }
+    groups
+}
+
 fn low_boundary_row_json(
     plan: &ModulePlan,
     reason: &'static str,
     closeness: f64,
+    collision_groups: &BTreeMap<&str, Vec<&ModulePlan>>,
 ) -> serde_json::Value {
     let matched = &plan.matched;
+    let collision_group = collision_groups
+        .get(matched.file_path.as_str())
+        .map(|group| collision_group_json(group));
     serde_json::json!({
         "module_id": plan.module_id,
         "subject_path": plan.subject_path,
         "reference_file": matched.file_path,
         "reason": reason,
         "closeness_to_medium": closeness,
+        "top_candidate": candidate_diagnostic_json(
+            plan.top_candidate.relevance,
+            &plan.top_candidate.matched
+        ),
+        "runner_up": plan
+            .runner_up
+            .as_ref()
+            .map(|candidate| candidate_diagnostic_json(candidate.relevance, &candidate.matched)),
+        "collision_group": collision_group,
+        "shared_anchors": shared_anchor_statistics_json(plan),
+        "source_score": source_score_json(matched.source_score),
         "metrics": {
             "margin": matched.margin,
             "reciprocal_best": matched.reciprocal_best,
@@ -825,6 +864,7 @@ fn low_boundary_row_json(
         },
         "shortfalls": {
             "strong_normalized_anchor": positive_shortfall(MEDIUM_STRONG_NANCHOR, matched.normalized_anchor),
+            "guarded_strong_normalized_anchor": positive_shortfall(MEDIUM_GUARDED_STRONG_NANCHOR, matched.normalized_anchor),
             "weighted_anchor": positive_shortfall(MEDIUM_WEIGHTED_ANCHOR, matched.weighted_anchor),
             "normalized_anchor": positive_shortfall(MEDIUM_NORMALIZED_ANCHOR, matched.normalized_anchor),
             "reciprocal_weighted_anchor": positive_shortfall(MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR, matched.weighted_anchor),
@@ -835,9 +875,88 @@ fn low_boundary_row_json(
     })
 }
 
+fn candidate_diagnostic_json(relevance: f64, matched: &ModuleMatch) -> serde_json::Value {
+    serde_json::json!({
+        "reference_file": matched.file_path,
+        "tier": tier_str(matched.tier),
+        "relevance": relevance,
+        "metrics": {
+            "anchor_overlap": matched.anchor_overlap,
+            "weighted_anchor": matched.weighted_anchor,
+            "normalized_anchor": matched.normalized_anchor,
+            "asset_overlap": matched.asset_overlap,
+            "export_overlap": matched.export_overlap,
+            "function_overlap": matched.function_overlap,
+            "structural_score": matched.structural_score,
+            "graph_support": matched.graph_support,
+            "graph_known_edges": matched.graph_known_edges,
+        },
+        "source_score": source_score_json(matched.source_score),
+    })
+}
+
+fn collision_group_json(group: &[&ModulePlan]) -> serde_json::Value {
+    let strongest = group.iter().max_by(|left, right| {
+        left.top_candidate
+            .relevance
+            .total_cmp(&right.top_candidate.relevance)
+    });
+    let medium_module_ids = group
+        .iter()
+        .filter(|plan| plan.matched.tier == MatchTier::Medium)
+        .map(|plan| plan.module_id)
+        .collect::<Vec<_>>();
+    let low_module_ids = group
+        .iter()
+        .filter(|plan| plan.matched.tier == MatchTier::Low)
+        .map(|plan| plan.module_id)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "size": group.len(),
+        "medium_count": medium_module_ids.len(),
+        "low_count": low_module_ids.len(),
+        "strongest_module_id": strongest.map(|plan| plan.module_id),
+        "module_ids_sample": group.iter().map(|plan| plan.module_id).take(20).collect::<Vec<_>>(),
+        "medium_module_ids_sample": medium_module_ids.into_iter().take(20).collect::<Vec<_>>(),
+        "low_module_ids_sample": low_module_ids.into_iter().take(20).collect::<Vec<_>>(),
+    })
+}
+
+fn shared_anchor_statistics_json(plan: &ModulePlan) -> serde_json::Value {
+    serde_json::json!({
+        "count": plan.shared_string_anchors.len(),
+        "weighted_overlap": plan.matched.weighted_anchor,
+        "normalized_overlap": plan.matched.normalized_anchor,
+        "sample": plan
+            .shared_string_anchors
+            .iter()
+            .take(20)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn source_score_json(score: SourceEvidenceScore) -> serde_json::Value {
+    serde_json::json!({
+        "hash_match": score.hash_match,
+        "function_axis_overlap": score.function_axis_overlap,
+        "function_axis_jaccard": score.function_axis_jaccard,
+        "function_axis_containment": score.function_axis_containment,
+        "weighted_string_anchor": score.weighted_string_anchor,
+        "normalized_string_anchor": score.normalized_string_anchor,
+        "unique_string_anchor_overlap": score.unique_string_anchor_overlap,
+        "jsx_react_shape_overlap": score.jsx_react_shape_overlap,
+        "jsx_react_shape_jaccard": score.jsx_react_shape_jaccard,
+    })
+}
+
 fn low_boundary_reason(matched: &ModuleMatch) -> &'static str {
     if matched.normalized_anchor >= MEDIUM_STRONG_NANCHOR {
         return "global_uniqueness_demoted_strong_content";
+    }
+    if matched.normalized_anchor >= MEDIUM_GUARDED_STRONG_NANCHOR
+        && matched.margin >= MEDIUM_SCORE_MARGIN
+    {
+        return "global_uniqueness_demoted_guarded_strong_content";
     }
     if matched.reciprocal_best
         && matched.weighted_anchor >= MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR
@@ -893,6 +1012,8 @@ fn low_boundary_reason(matched: &ModuleMatch) -> &'static str {
 fn low_medium_closeness(matched: &ModuleMatch) -> f64 {
     let anchor_pair = ratio(matched.weighted_anchor, MEDIUM_WEIGHTED_ANCHOR)
         .min(ratio(matched.normalized_anchor, MEDIUM_NORMALIZED_ANCHOR));
+    let guarded_strong_pair = ratio(matched.normalized_anchor, MEDIUM_GUARDED_STRONG_NANCHOR)
+        .min(ratio(matched.margin, MEDIUM_SCORE_MARGIN));
     let reciprocal_pair = if matched.reciprocal_best {
         ratio(matched.weighted_anchor, MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR).min(ratio(
             matched.normalized_anchor,
@@ -920,6 +1041,7 @@ fn low_medium_closeness(matched: &ModuleMatch) -> f64 {
     };
     ratio(matched.normalized_anchor, MEDIUM_STRONG_NANCHOR)
         .max(anchor_pair)
+        .max(guarded_strong_pair)
         .max(reciprocal_pair)
         .max(structural_pair)
         .max(graph_pair)
@@ -1432,6 +1554,11 @@ const MEDIUM_SCORE_MARGIN: f64 = 0.20;
 /// at nanchor=0.5) that the `weighted_anchor >= 30` mass gate misses. Normalized
 /// overlap is hub-resistant, so this does not re-admit large-file false matches.
 const MEDIUM_STRONG_NANCHOR: f64 = 0.30;
+/// A near-strong normalized content overlap may promote when the candidate is
+/// also clearly separated from the runner-up. This is intentionally below the
+/// self-sufficient strong threshold and gated by the normal Medium margin so it
+/// only recovers confident near misses, not ambiguous hub collisions.
+const MEDIUM_GUARDED_STRONG_NANCHOR: f64 = 0.25;
 /// A reciprocal-best assignment that shares a substantial mass of rare string
 /// anchors is strong enough to promote even when the normalized fraction is
 /// below the generic Medium floor. This recovers large first-party files whose
@@ -1487,6 +1614,7 @@ pub(crate) struct ModuleMatch {
     /// therefore could participate in graph-neighborhood evidence.
     pub graph_known_edges: usize,
     pub anchor_overlap: usize,
+    pub source_score: SourceEvidenceScore,
     /// Sum of per-anchor IDF over shared string anchors - the size/hub-robust
     /// similarity signal that drives ranking and the anchor tier promotion.
     pub weighted_anchor: f64,
@@ -1508,6 +1636,12 @@ pub(crate) struct ModuleMatch {
 struct RankedModuleMatch {
     relevance: f64,
     matched: ModuleMatch,
+}
+
+#[derive(Debug, Clone)]
+struct SubjectRankedModuleMatch {
+    best: RankedModuleMatch,
+    runner_up: Option<RankedModuleMatch>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1636,6 +1770,12 @@ fn calibrate_tier(
         {
             MatchTier::Medium
         }
+        MatchTier::Low
+            if normalized_anchor >= MEDIUM_GUARDED_STRONG_NANCHOR
+                && margin >= MEDIUM_SCORE_MARGIN =>
+        {
+            MatchTier::Medium
+        }
         MatchTier::Low => tier,
         // Strong normalized content is self-sufficient: keep it Medium even
         // without reciprocal-best or a wide margin. The margin/reciprocal gate
@@ -1742,6 +1882,7 @@ fn ranked_module_matches(
                 graph_support: graph.matched_edges,
                 graph_known_edges: graph.known_edges,
                 anchor_overlap,
+                source_score,
                 weighted_anchor,
                 normalized_anchor,
                 margin: 0.0,
@@ -1897,7 +2038,7 @@ fn best_ranked_by_subject(
     index: &ReferenceSourceIndex,
     structural_support_by_subject: &BTreeMap<u32, BTreeMap<String, f64>>,
     graph_support_by_subject: &BTreeMap<u32, BTreeMap<String, GraphEvidence>>,
-) -> BTreeMap<u32, RankedModuleMatch> {
+) -> BTreeMap<u32, SubjectRankedModuleMatch> {
     subjects
         .iter()
         .filter_map(|subject| {
@@ -1915,25 +2056,31 @@ fn best_ranked_by_subject(
                 (Some(_), None) => 1.0,
                 _ => 0.0,
             };
-            Some((subject.module_id, best))
+            Some((
+                subject.module_id,
+                SubjectRankedModuleMatch {
+                    best,
+                    runner_up: ranked.get(1).cloned(),
+                },
+            ))
         })
         .collect()
 }
 
 fn best_subject_by_reference_matches(
-    subject_best_matches: &BTreeMap<u32, RankedModuleMatch>,
+    subject_best_matches: &BTreeMap<u32, SubjectRankedModuleMatch>,
 ) -> BTreeMap<String, u32> {
     let mut best = BTreeMap::<String, (f64, u32)>::new();
     for (module_id, candidate) in subject_best_matches {
-        best.entry(candidate.matched.file_path.clone())
+        best.entry(candidate.best.matched.file_path.clone())
             .and_modify(|current| {
-                if candidate.relevance > current.0
-                    || (candidate.relevance == current.0 && *module_id < current.1)
+                if candidate.best.relevance > current.0
+                    || (candidate.best.relevance == current.0 && *module_id < current.1)
                 {
-                    *current = (candidate.relevance, *module_id);
+                    *current = (candidate.best.relevance, *module_id);
                 }
             })
-            .or_insert((candidate.relevance, *module_id));
+            .or_insert((candidate.best.relevance, *module_id));
     }
     best.into_iter()
         .map(|(file_path, (_score, module_id))| (file_path, module_id))
@@ -2699,29 +2846,43 @@ fn apply_module_promotions(
             plan.matched.file_path = file.clone();
             plan.matched.tier = MatchTier::Medium;
             plan.matched.function_overlap = *count;
+            plan.top_candidate = RankedModuleMatch {
+                relevance: *count as f64,
+                matched: plan.matched.clone(),
+            };
+            plan.runner_up = None;
+            plan.shared_string_anchors.clear();
             plan.module_semantic_name = strip_source_extension(file);
             plan.reference_exports = reference_exports;
         } else if let Some(subject) = subjects.iter().find(|s| s.module_id == module_id) {
+            let synthetic_match = ModuleMatch {
+                file_path: file.clone(),
+                tier: MatchTier::Medium,
+                asset_overlap: 0,
+                export_overlap: 0,
+                function_overlap: *count,
+                structural_score: 0.0,
+                graph_support: 0,
+                graph_known_edges: 0,
+                anchor_overlap: 0,
+                source_score: SourceEvidenceScore::default(),
+                weighted_anchor: 0.0,
+                normalized_anchor: 0.0,
+                margin: 0.0,
+                reciprocal_best: false,
+            };
             plans.push(ModulePlan {
                 module_id,
                 subject_path: subject.file_path.clone(),
                 reference_version: index.version.clone(),
                 module_semantic_name: strip_source_extension(file),
-                matched: ModuleMatch {
-                    file_path: file.clone(),
-                    tier: MatchTier::Medium,
-                    asset_overlap: 0,
-                    export_overlap: 0,
-                    function_overlap: *count,
-                    structural_score: 0.0,
-                    graph_support: 0,
-                    graph_known_edges: 0,
-                    anchor_overlap: 0,
-                    weighted_anchor: 0.0,
-                    normalized_anchor: 0.0,
-                    margin: 0.0,
-                    reciprocal_best: false,
+                matched: synthetic_match.clone(),
+                top_candidate: RankedModuleMatch {
+                    relevance: *count as f64,
+                    matched: synthetic_match,
                 },
+                runner_up: None,
+                shared_string_anchors: BTreeSet::new(),
                 subject_bindings: subject.bindings.clone(),
                 reference_exports,
             });
@@ -3344,26 +3505,34 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
     }
 
     fn make_plan(module_id: u32, name: &str, tier: MatchTier) -> ModulePlan {
+        let matched = ModuleMatch {
+            file_path: format!("{name}.ts"),
+            tier,
+            asset_overlap: if tier == MatchTier::High { 1 } else { 0 },
+            export_overlap: 0,
+            function_overlap: 0,
+            structural_score: 0.0,
+            graph_support: 0,
+            graph_known_edges: 0,
+            anchor_overlap: 0,
+            source_score: SourceEvidenceScore::default(),
+            weighted_anchor: 0.0,
+            normalized_anchor: 0.0,
+            margin: 1.0,
+            reciprocal_best: true,
+        };
         ModulePlan {
             module_id,
             subject_path: format!("modules/m{module_id}.ts"),
             reference_version: "2.1.76".to_string(),
             module_semantic_name: name.to_string(),
-            matched: ModuleMatch {
-                file_path: format!("{name}.ts"),
-                tier,
-                asset_overlap: if tier == MatchTier::High { 1 } else { 0 },
-                export_overlap: 0,
-                function_overlap: 0,
-                structural_score: 0.0,
-                graph_support: 0,
-                graph_known_edges: 0,
-                anchor_overlap: 0,
-                weighted_anchor: 0.0,
-                normalized_anchor: 0.0,
-                margin: 1.0,
-                reciprocal_best: true,
+            matched: matched.clone(),
+            top_candidate: RankedModuleMatch {
+                relevance: 1.0,
+                matched,
             },
+            runner_up: None,
+            shared_string_anchors: BTreeSet::new(),
             subject_bindings: Vec::new(),
             reference_exports: std::collections::BTreeSet::new(),
         }
@@ -3393,6 +3562,32 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         assert_eq!(
             low_boundary_reason(&plan.matched),
             "content_floor_shortfall"
+        );
+    }
+
+    #[test]
+    fn guarded_near_strong_content_promotes_only_with_margin() {
+        assert_eq!(
+            calibrate_tier(
+                MatchTier::Low,
+                MEDIUM_SCORE_MARGIN,
+                false,
+                0.0,
+                MEDIUM_GUARDED_STRONG_NANCHOR,
+            ),
+            MatchTier::Medium,
+            "near-strong normalized overlap is accepted when runner-up separation is clear"
+        );
+        assert_eq!(
+            calibrate_tier(
+                MatchTier::Low,
+                MEDIUM_SCORE_MARGIN / 2.0,
+                false,
+                MEDIUM_WEIGHTED_ANCHOR,
+                MEDIUM_GUARDED_STRONG_NANCHOR,
+            ),
+            MatchTier::Low,
+            "near-strong content remains Low when the runner-up is too close"
         );
     }
 
