@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use reverts_pipeline::{
-    GenerateProjectOptions, LocalBindingRename, generate_project_from_input_with_options,
+    FunctionParamRenameRow, GenerateProjectOptions, LocalBindingRename,
+    generate_project_from_input_with_options,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
@@ -49,10 +50,12 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
     let input = load_project_bundle_with_package_externalization(&args.input, args.project_id)
         .map_err(CliRunError::LoadInput)?;
     let local_binding_renames = load_local_binding_renames(&args.input, args.project_id)?;
+    let function_param_renames = load_function_param_renames(&args.input, args.project_id)?;
     let run = generate_project_from_input_with_options(
         input,
         GenerateProjectOptions {
             local_binding_renames: local_binding_renames.clone(),
+            function_param_renames,
         },
     )
     .map_err(CliRunError::Pipeline)?;
@@ -185,6 +188,41 @@ fn load_local_binding_renames(
                 binding_index: row
                     .get::<_, Option<i64>>(2)?
                     .and_then(|value| u32::try_from(value).ok()),
+                semantic_name: row.get(3)?,
+            })
+        })
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    collect_sqlite_rows(rows).map_err(|source| CliRunError::GenerateProject(source.to_string()))
+}
+
+fn load_function_param_renames(
+    input: &Path,
+    project_id: u32,
+) -> Result<Vec<FunctionParamRenameRow>, CliRunError> {
+    let connection = Connection::open_with_flags(input, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    if !sqlite_table_exists(&connection, "semantic_function_param_names")
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+    {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(
+            r"
+            SELECT file_path, function_name, param_index, semantic_name
+            FROM semantic_function_param_names
+            WHERE project_id = ?1
+              AND accepted = 1
+              AND NULLIF(TRIM(semantic_name), '') IS NOT NULL
+            ",
+        )
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let rows = statement
+        .query_map(params![i64::from(project_id)], |row| {
+            Ok(FunctionParamRenameRow {
+                file_path: row.get(0)?,
+                function_name: row.get(1)?,
+                param_index: u32::try_from(row.get::<_, i64>(2)?).unwrap_or(u32::MAX),
                 semantic_name: row.get(3)?,
             })
         })

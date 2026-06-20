@@ -115,6 +115,15 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
             generated
         })
         .collect::<Vec<_>>();
+    let generated_param_renames = file
+        .function_param_renames
+        .iter()
+        .map(|rename| reverts_js::FunctionParamRename {
+            function: rename.function.clone(),
+            param_index: rename.param_index,
+            renamed: rename.renamed.clone(),
+        })
+        .collect::<Vec<_>>();
     let generated_type_annotations = file
         .type_annotations
         .iter()
@@ -155,7 +164,7 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
             generated_imports: &generated_imports,
             generated_exports: &generated_exports,
             readability_renames: &generated_renames,
-            function_param_renames: &[],
+            function_param_renames: &generated_param_renames,
             type_annotations: &generated_type_annotations,
             infer_literal_types: true,
             path_hint: file.source_strategy().path_hint(file.path.as_str()),

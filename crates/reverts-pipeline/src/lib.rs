@@ -79,6 +79,7 @@ pub struct SymbolIndexEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GenerateProjectOptions {
     pub local_binding_renames: Vec<LocalBindingRename>,
+    pub function_param_renames: Vec<FunctionParamRenameRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +87,17 @@ pub struct LocalBindingRename {
     pub file_path: String,
     pub original_name: String,
     pub binding_index: Option<u32>,
+    pub semantic_name: String,
+}
+
+/// One recovered parameter name: rename the `param_index`-th formal parameter of
+/// `function_name` in `file_path` to `semantic_name`. Keyed by function name and
+/// position, applied by the emitter's function-param pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionParamRenameRow {
+    pub file_path: String,
+    pub function_name: String,
+    pub param_index: u32,
     pub semantic_name: String,
 }
 
@@ -390,6 +402,7 @@ pub fn generate_project_from_prepared_with_options(
         .plan_enriched_program(&program)
         .map_err(PipelineError::Plan)?;
     apply_local_binding_renames(&mut plan, &options.local_binding_renames);
+    apply_function_param_renames_to_plan(&mut plan, &options.function_param_renames);
     audit.extend(audit_emit_plan_synthesis(&plan));
     if audit.has_errors() {
         return Ok(OutputRun {
@@ -477,6 +490,34 @@ fn apply_local_binding_renames(
                 reverts_planner::PlannedRename::new_all_scopes(original, semantic)
             };
             file.add_readability_rename(planned);
+        }
+    }
+}
+
+fn apply_function_param_renames_to_plan(
+    plan: &mut reverts_planner::EmitPlan,
+    renames: &[FunctionParamRenameRow],
+) {
+    if renames.is_empty() {
+        return;
+    }
+    let mut by_path = std::collections::BTreeMap::<&str, Vec<&FunctionParamRenameRow>>::new();
+    for rename in renames {
+        by_path
+            .entry(rename.file_path.as_str())
+            .or_default()
+            .push(rename);
+    }
+    for file in &mut plan.files {
+        let Some(file_renames) = by_path.get(file.path.as_str()) else {
+            continue;
+        };
+        for rename in file_renames {
+            file.add_function_param_rename(reverts_planner::PlannedParamRename {
+                function: rename.function_name.clone(),
+                param_index: rename.param_index,
+                renamed: rename.semantic_name.clone(),
+            });
         }
     }
 }
@@ -719,6 +760,7 @@ mod tests {
                         semantic_name: "resultValue".to_string(),
                     },
                 ],
+                function_param_renames: Vec::new(),
             },
         )
         .expect("fixture should emit");

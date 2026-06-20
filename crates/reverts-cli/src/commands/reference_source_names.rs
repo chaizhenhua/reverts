@@ -609,15 +609,6 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
         trace_reference_source_names(trace_start, "module_promotions");
     }
 
-    if !args.module_only {
-        let (fns, params) =
-            measure_param_name_transfer(&binding_rows, &subject_fns, &reference_fns);
-        eprintln!(
-            "param-name-transfer ceiling: {params} minified params across {fns} matched functions could take real reference names"
-        );
-        trace_reference_source_names(trace_start, "measure_param_name_transfer");
-    }
-
     // Module dependency-graph propagation (prior: same app -> near-isomorphic
     // import graph). Expand the confirmed module matches along aligned import
     // edges, then re-run function matching so the precise within-module passes
@@ -715,6 +706,15 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     // to match more functions by reference topology, iterated to a fixpoint.
     propagate_by_reference_topology(&subject_fns, &reference_fns, &mut binding_rows);
     trace_reference_source_names(trace_start, "reference_topology_reinforcement");
+
+    // Parameter-name transfer: matched functions' minified positional params take
+    // the reference's real parameter names (applied at emit by function + index).
+    let param_transfers = if args.module_only {
+        Vec::new()
+    } else {
+        collect_param_name_transfers(&binding_rows, &subject_fns, &reference_fns)
+    };
+    trace_reference_source_names(trace_start, "collect_param_name_transfers");
 
     println!(
         "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\ttop_decl\tsurface\tmember\tstmt_win\tblock_branch\tpq_gram\twl\tgranular\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
@@ -835,13 +835,21 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             &args.origin_prefix,
             &args.reference_version,
         )?;
+        let param_count = write_function_param_names(
+            &connection,
+            args.project_id,
+            &param_transfers,
+            &args.origin_prefix,
+            &args.reference_version,
+        )?;
         println!(
-            "applied: {module_count} module name(s), {path_count} module path override(s), {export_count} export name(s), {binding_accepted} binding rename(s), {binding_proposed} binding proposal(s)"
+            "applied: {module_count} module name(s), {path_count} module path override(s), {export_count} export name(s), {binding_accepted} binding rename(s), {binding_proposed} binding proposal(s), {param_count} parameter name(s)"
         );
     } else {
         println!(
-            "dry-run: {} module match(es); pass --apply to write",
-            plans.len()
+            "dry-run: {} module match(es), {} parameter name(s) transferable; pass --apply to write",
+            plans.len(),
+            param_transfers.len()
         );
     }
     Ok(())
@@ -4355,17 +4363,26 @@ fn is_minified_param_name(name: &str) -> bool {
     name.len() <= 2
 }
 
-/// Upper bound on parameter-name transfer: over every ACCEPTED function match,
-/// count the positions where the subject parameter is a minified identifier and
-/// the matched reference parameter is a specific real name. Returns
-/// `(functions_with_transferable_params, total_transferable_params)`. Pure
-/// measurement — no DB writes — to size the feature before building the
-/// emit-side rename channel.
-fn measure_param_name_transfer(
+/// One recovered parameter name: rename `function_name`'s `param_index`-th
+/// formal parameter in `subject_path` to `semantic_name`.
+struct ParamTransfer {
+    subject_path: String,
+    function_name: String,
+    param_index: u32,
+    semantic_name: String,
+}
+
+/// Over every ACCEPTED function match, pair the subject's minified positional
+/// parameters with the matched reference's real parameter names. A position
+/// transfers only when the subject param is a plain minified identifier and the
+/// reference param is a specific real name (so destructured slots and already-
+/// meaningful names are left alone). The emitter applies these by function name +
+/// position, so they are keyed there — not by a fragile file-global ordinal.
+fn collect_param_name_transfers(
     rows: &[BindingNameRow],
     subject_fns: &[SubjectFunction],
     reference_fns: &[ReferenceFunction],
-) -> (usize, usize) {
+) -> Vec<ParamTransfer> {
     let mut subjects_by_key: BTreeMap<(u32, &str), Vec<&SubjectFunction>> = BTreeMap::new();
     for function in subject_fns {
         subjects_by_key
@@ -4381,8 +4398,7 @@ fn measure_param_name_transfer(
             .push(function);
     }
 
-    let mut functions = 0usize;
-    let mut params = 0usize;
+    let mut transfers = Vec::new();
     for row in rows {
         if !row.accepted {
             continue;
@@ -4407,27 +4423,30 @@ fn measure_param_name_transfer(
         else {
             continue;
         };
-        let transferable = subject
+        for (index, (subject_param, reference_param)) in subject
             .param_names
             .iter()
             .zip(reference.param_names.iter())
-            .filter(
-                |(subject_param, reference_param)| match (subject_param, reference_param) {
-                    (Some(subject_name), Some(reference_name)) => {
-                        subject_name != reference_name
-                            && is_minified_param_name(subject_name)
-                            && is_specific_reference_name(reference_name)
-                    }
-                    _ => false,
-                },
-            )
-            .count();
-        if transferable > 0 {
-            functions += 1;
-            params += transferable;
+            .enumerate()
+        {
+            let (Some(subject_name), Some(reference_name)) = (subject_param, reference_param)
+            else {
+                continue;
+            };
+            if subject_name != reference_name
+                && is_minified_param_name(subject_name)
+                && is_specific_reference_name(reference_name)
+            {
+                transfers.push(ParamTransfer {
+                    subject_path: subject.subject_path.clone(),
+                    function_name: subject.name.clone(),
+                    param_index: index as u32,
+                    semantic_name: reference_name.clone(),
+                });
+            }
         }
     }
-    (functions, params)
+    transfers
 }
 
 /// Synthetic module id for entrypoint-island functions. Real module ids are small
@@ -6107,6 +6126,68 @@ fn write_binding_names(
         }
     }
     Ok((accepted, proposed))
+}
+
+fn ensure_function_param_names_table(connection: &Connection) -> Result<(), CliRunError> {
+    connection
+        .execute_batch(
+            r"
+            CREATE TABLE IF NOT EXISTS semantic_function_param_names (
+                project_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                function_name TEXT NOT NULL,
+                param_index INTEGER NOT NULL,
+                semantic_name TEXT NOT NULL,
+                origin TEXT,
+                accepted INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT,
+                PRIMARY KEY (project_id, file_path, function_name, param_index)
+            )
+            ",
+        )
+        .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))
+}
+
+/// Persist recovered parameter names into `semantic_function_param_names`, keyed
+/// by subject file + (minified) function name + parameter position. The emitter's
+/// function-param pass applies them by that key, so no binding ordinal is stored.
+/// Returns the number of parameter renames written.
+fn write_function_param_names(
+    connection: &Connection,
+    project_id: u32,
+    transfers: &[ParamTransfer],
+    origin_prefix: &str,
+    reference_version: &str,
+) -> Result<usize, CliRunError> {
+    ensure_function_param_names_table(connection)?;
+    let origin = format!("{origin_prefix}:{reference_version}");
+    let mut written = 0;
+    for transfer in transfers {
+        connection
+            .execute(
+                r"
+                INSERT INTO semantic_function_param_names (
+                    project_id, file_path, function_name, param_index, semantic_name,
+                    origin, accepted, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, datetime('now'), datetime('now'))
+                ON CONFLICT(project_id, file_path, function_name, param_index) DO UPDATE SET
+                    semantic_name = excluded.semantic_name, origin = excluded.origin,
+                    accepted = excluded.accepted, updated_at = datetime('now')
+                ",
+                params![
+                    i64::from(project_id),
+                    transfer.subject_path,
+                    transfer.function_name,
+                    transfer.param_index,
+                    transfer.semantic_name,
+                    origin,
+                ],
+            )
+            .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
+        written += 1;
+    }
+    Ok(written)
 }
 
 fn write_module_names(

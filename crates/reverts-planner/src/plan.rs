@@ -167,9 +167,22 @@ pub struct PlannedFile {
     /// final codegen and parse audit, so graph/planner facts stay keyed by
     /// original recovered names.
     pub readability_renames: Vec<PlannedRename>,
+    /// Per-function positional parameter renames recovered from cross-version
+    /// matching. Applied by the emitter before name-scope renames, keyed by
+    /// function name + parameter position (not a file-global binding ordinal).
+    pub function_param_renames: Vec<PlannedParamRename>,
     pub type_annotations: Vec<PlannedTypeAnnotation>,
     pub body: Vec<String>,
     pub compiler_preservation: CompilerPreservationDecision,
+}
+
+/// A request to rename the `param_index`-th formal parameter of the function
+/// named `function` to `renamed`. See [`PlannedFile::function_param_renames`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedParamRename {
+    pub function: String,
+    pub param_index: u32,
+    pub renamed: String,
 }
 
 impl PlannedFile {
@@ -181,6 +194,7 @@ impl PlannedFile {
             bindings: Vec::new(),
             exports: Vec::new(),
             readability_renames: Vec::new(),
+            function_param_renames: Vec::new(),
             type_annotations: Vec::new(),
             body: Vec::new(),
             compiler_preservation: CompilerPreservationDecision::default(),
@@ -228,6 +242,10 @@ impl PlannedFile {
 
     pub fn add_readability_rename(&mut self, rename: PlannedRename) {
         self.readability_renames.push(rename);
+    }
+
+    pub fn add_function_param_rename(&mut self, rename: PlannedParamRename) {
+        self.function_param_renames.push(rename);
     }
 
     pub fn add_type_annotation(&mut self, annotation: PlannedTypeAnnotation) {
