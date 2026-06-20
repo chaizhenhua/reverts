@@ -8,7 +8,8 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 use reverts_graph::{
-    FunctionExtractor, extract_import_specifiers, function_names, function_string_literals,
+    FunctionExtractor, IdentifierStreams, extract_import_specifiers, function_names,
+    function_string_literals, identifier_streams,
 };
 use reverts_input::PackageAttributionStatus;
 use reverts_ir::{AxisHashes, FunctionFingerprint, ModuleId};
@@ -246,6 +247,17 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             .collect();
         binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
     }
+
+    // Symbol propagation: name the module-level symbols that matched functions
+    // reference, by lockstep-aligning each accepted isomorphic function pair.
+    let propagated = propagate_symbols(
+        &subjects,
+        &index,
+        &subject_fns,
+        &reference_fns,
+        &binding_rows,
+    );
+    binding_rows.extend(propagated);
 
     println!(
         "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
@@ -1302,14 +1314,22 @@ struct BindingNameRow {
 
 impl BindingNameRow {
     fn evidence(&self) -> String {
+        // ast_hash == 0 marks a symbol-propagation row (named by positional
+        // alignment inside matched functions); `score` is the vote count.
+        let tier = match (self.ast_hash == 0, self.accepted) {
+            (true, true) => "symbol-propagation",
+            (true, false) => "symbol-propagation-proposal",
+            (false, true) => "fn-hash-unique",
+            (false, false) => "fn-hash-proposal",
+        };
         if self.accepted {
             format!(
-                "{{\"tier\":\"fn-hash-unique\",\"ast\":\"{:016x}\",\"params\":{},\"stmts\":{}}}",
-                self.ast_hash, self.param_count, self.statement_count
+                "{{\"tier\":\"{tier}\",\"ast\":\"{:016x}\",\"params\":{},\"stmts\":{},\"votes\":{:.0}}}",
+                self.ast_hash, self.param_count, self.statement_count, self.score
             )
         } else {
             format!(
-                "{{\"tier\":\"fn-hash-proposal\",\"ast\":\"{:016x}\",\"params\":{},\"stmts\":{},\"score\":{:.1}}}",
+                "{{\"tier\":\"{tier}\",\"ast\":\"{:016x}\",\"params\":{},\"stmts\":{},\"score\":{:.1}}}",
                 self.ast_hash, self.param_count, self.statement_count, self.score
             )
         }
@@ -1721,6 +1741,167 @@ fn match_function_lists(
                 score,
             });
         }
+    }
+    rows
+}
+
+/// Identifier `uses` (in AST order) and the set of names bound anywhere inside a
+/// function span. Module-level symbols are uses not in the bound set.
+fn span_uses_and_bound<'a>(
+    streams: &'a IdentifierStreams,
+    span: reverts_ir::ByteRange,
+) -> (Vec<&'a str>, BTreeSet<&'a str>) {
+    let uses = streams
+        .uses
+        .iter()
+        .filter(|(start, _)| *start >= span.start && *start < span.end)
+        .map(|(_, name)| name.as_str())
+        .collect();
+    let bound = streams
+        .bindings
+        .iter()
+        .filter(|(start, _, _)| *start >= span.start && *start < span.end)
+        .map(|(_, _, name)| name.as_str())
+        .collect();
+    (uses, bound)
+}
+
+/// Symbol propagation (forward references). Each ACCEPTED function match whose
+/// pair is AST-isomorphic (`primary.ast` equal) gives a positional identifier
+/// alignment: walking both functions' `uses` streams in lockstep, a subject
+/// identifier NOT bound inside the function is a MODULE-LEVEL symbol whose
+/// reference-side counterpart is its real name. Votes aggregate across all
+/// anchors; a module-level minified symbol named consistently by >=2 anchors is
+/// accepted, a single anchor proposes. This names the non-function symbols
+/// (consts, classes, imported bindings) that matched functions reference.
+fn propagate_symbols(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+    subject_fns: &[SubjectFunction],
+    reference_fns: &[ReferenceFunction],
+    binding_rows: &[BindingNameRow],
+) -> Vec<BindingNameRow> {
+    let subject_by_module_name: BTreeMap<(u32, &str), usize> = subject_fns
+        .iter()
+        .enumerate()
+        .map(|(i, f)| ((f.module_id, f.name.as_str()), i))
+        .collect();
+    let reference_by_file_name: BTreeMap<(&str, &str), usize> = reference_fns
+        .iter()
+        .enumerate()
+        .map(|(i, f)| ((f.file.as_str(), f.name.as_str()), i))
+        .collect();
+    let subject_source: BTreeMap<u32, &str> = subjects
+        .iter()
+        .map(|s| (s.module_id, s.source.as_str()))
+        .collect();
+    let subject_path: BTreeMap<u32, &str> = subjects
+        .iter()
+        .map(|s| (s.module_id, s.file_path.as_str()))
+        .collect();
+    let reference_source: BTreeMap<&str, &str> = index
+        .modules
+        .iter()
+        .map(|m| (m.file_path.as_str(), m.source.as_str()))
+        .collect();
+
+    let mut subject_streams: BTreeMap<u32, IdentifierStreams> = BTreeMap::new();
+    let mut reference_streams: BTreeMap<String, IdentifierStreams> = BTreeMap::new();
+    // (module_id, subject_name) -> reference_name -> (votes, sample reference file)
+    let mut votes: BTreeMap<(u32, String), BTreeMap<String, (usize, String)>> = BTreeMap::new();
+    // Names the function track already settled: don't re-propose them.
+    let already: BTreeSet<(u32, &str)> = binding_rows
+        .iter()
+        .map(|r| (r.module_id, r.original_name.as_str()))
+        .collect();
+
+    for row in binding_rows.iter().filter(|r| r.accepted) {
+        let (Some(&si), Some(&ri)) = (
+            subject_by_module_name.get(&(row.module_id, row.original_name.as_str())),
+            reference_by_file_name.get(&(row.reference_file.as_str(), row.semantic_name.as_str())),
+        ) else {
+            continue;
+        };
+        let subject = &subject_fns[si];
+        let reference = &reference_fns[ri];
+        if subject.fingerprint.primary.ast != reference.fingerprint.primary.ast {
+            continue; // only lockstep-align truly isomorphic bodies
+        }
+        let (Some(&s_src), Some(&r_src)) = (
+            subject_source.get(&row.module_id),
+            reference_source.get(row.reference_file.as_str()),
+        ) else {
+            continue;
+        };
+        if !subject_streams.contains_key(&row.module_id) {
+            subject_streams.insert(row.module_id, identifier_streams(s_src));
+        }
+        if !reference_streams.contains_key(&row.reference_file) {
+            reference_streams.insert(row.reference_file.clone(), identifier_streams(r_src));
+        }
+        let (s_uses, s_bound) = span_uses_and_bound(
+            &subject_streams[&row.module_id],
+            subject.fingerprint.id.span,
+        );
+        let (r_uses, _) = span_uses_and_bound(
+            &reference_streams[&row.reference_file],
+            reference.fingerprint.id.span,
+        );
+        if s_uses.len() != r_uses.len() {
+            continue; // alignment would be unsafe
+        }
+        for (sn, rn) in s_uses.iter().zip(r_uses.iter()) {
+            if sn == rn || s_bound.contains(sn) || !is_specific_reference_name(rn) {
+                continue;
+            }
+            let entry = votes
+                .entry((row.module_id, (*sn).to_string()))
+                .or_default()
+                .entry((*rn).to_string())
+                .or_insert((0, row.reference_file.clone()));
+            entry.0 += 1;
+        }
+    }
+
+    let mut rows = Vec::new();
+    for ((module_id, subject_name), tally) in votes {
+        if already.contains(&(module_id, subject_name.as_str())) {
+            continue; // function track already named it
+        }
+        let mut winner: Option<(&String, usize, &String)> = None;
+        let mut runner_up = 0usize;
+        for (name, (count, file)) in &tally {
+            match winner {
+                Some((_, best, _)) if best >= *count => {
+                    runner_up = runner_up.max(*count);
+                }
+                _ => {
+                    if let Some((_, best, _)) = winner {
+                        runner_up = runner_up.max(best);
+                    }
+                    winner = Some((name, *count, file));
+                }
+            }
+        }
+        let Some((name, count, file)) = winner else {
+            continue;
+        };
+        let accepted = count >= 2 && count > runner_up;
+        let Some(&path) = subject_path.get(&module_id) else {
+            continue;
+        };
+        rows.push(BindingNameRow {
+            module_id,
+            subject_path: path.to_string(),
+            reference_file: file.clone(),
+            original_name: subject_name,
+            semantic_name: name.clone(),
+            accepted,
+            ast_hash: 0,
+            param_count: 0,
+            statement_count: 0,
+            score: count as f64,
+        });
     }
     rows
 }
@@ -2833,6 +3014,59 @@ mod tests {
         let already = BTreeMap::from([(7u32, "elsewhere.ts".to_string())]);
         let promo = derive_module_promotions(&rows, &already);
         assert!(promo.is_empty(), "matched module must not be re-promoted");
+    }
+
+    #[test]
+    fn symbol_propagation_names_module_level_referenced_symbols() {
+        // Two subject functions (isomorphic to two reference functions) both
+        // reference the same module-level symbol `qZ` -> 2 consistent votes ->
+        // accepted as `loadConfig`. The local `t` is excluded.
+        let subject_module = |module_id, src: &str| SubjectModule {
+            module_id,
+            file_path: "modules/a.ts".into(),
+            source: src.into(),
+            fingerprint: fingerprint_source("a", src).expect("fp"),
+            bindings: vec![],
+        };
+        let subjects = vec![
+            subject_module(1, "function aB(p){ let t = p; return qZ(t); }"),
+            subject_module(1, "function cD(p){ let t = p; return qZ(t); }"),
+        ];
+        let subject_fns = collect_subject_functions(&subjects);
+        let index = {
+            let temp = tempfile::tempdir().expect("temp");
+            std::fs::write(
+                temp.path().join("cfg.ts"),
+                "function readA(p){ let t = p; return loadConfig(t); } \
+                 function readB(p){ let t = p; return loadConfig(t); }",
+            )
+            .expect("write");
+            build_reference_source_index(temp.path(), "v").expect("index")
+        };
+        let reference_fns = collect_reference_functions(&index);
+        let binding = |orig: &str, sem: &str| BindingNameRow {
+            module_id: 1,
+            subject_path: "modules/a.ts".into(),
+            reference_file: "cfg.ts".into(),
+            original_name: orig.into(),
+            semantic_name: sem.into(),
+            accepted: true,
+            ast_hash: 1,
+            param_count: 1,
+            statement_count: 2,
+            score: 2.0,
+        };
+        let rows = vec![binding("aB", "readA"), binding("cD", "readB")];
+        let propagated = propagate_symbols(&subjects, &index, &subject_fns, &reference_fns, &rows);
+        let qz = propagated.iter().find(|r| r.original_name == "qZ");
+        assert!(qz.is_some(), "qZ should be propagated: {propagated:?}");
+        let qz = qz.unwrap();
+        assert_eq!(qz.semantic_name, "loadConfig");
+        assert!(qz.accepted, "2 consistent votes -> accepted");
+        assert!(
+            !propagated.iter().any(|r| r.original_name == "t"),
+            "local 't' must not be propagated"
+        );
     }
 
     #[test]

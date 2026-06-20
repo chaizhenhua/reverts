@@ -1,9 +1,10 @@
 use oxc_allocator::Allocator;
 use oxc_ast::Visit;
 use oxc_ast::ast::{
-    ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPatternKind,
-    Expression, FormalParameters, Function, FunctionBody, MethodDefinition, ObjectProperty,
-    Program, PropertyDefinition, PropertyKey, StringLiteral, VariableDeclarator,
+    ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingIdentifier,
+    BindingPatternKind, Expression, FormalParameters, Function, FunctionBody, IdentifierReference,
+    MethodDefinition, ObjectProperty, Program, PropertyDefinition, PropertyKey, StringLiteral,
+    VariableDeclarator,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
@@ -351,6 +352,59 @@ impl<'a> Visit<'a> for FunctionLiteralExtractor {
                     .insert(value.to_string());
             }
         }
+    }
+}
+
+/// Ordered identifier streams for position-aligned symbol propagation. `uses`
+/// are identifier references in AST pre-order; `bindings` are declaration
+/// identifiers (params, var/let/const, function/class names, catch) as
+/// `(start, end, name)`. Two AST-isomorphic functions (same `primary.ast`)
+/// produce `uses` streams of equal length whose i-th elements correspond, so a
+/// matched function pair yields `subject_minified -> reference_name` votes for
+/// every identifier that is NOT bound inside the function (i.e. a module-level
+/// symbol). All offsets are into the SAME stripped source as
+/// [`FunctionExtractor::fingerprint`], so they line up with [`FunctionId`] spans.
+#[derive(Debug, Default, Clone)]
+pub struct IdentifierStreams {
+    pub uses: Vec<(u32, String)>,
+    pub bindings: Vec<(u32, u32, String)>,
+}
+
+#[must_use]
+pub fn identifier_streams(source: &str) -> IdentifierStreams {
+    let source = strip_outer_block_braces(source);
+    let alloc = Allocator::default();
+    let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+    let parsed = Parser::new(&alloc, source, source_type)
+        .with_options(parse_options_for(source_type))
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return IdentifierStreams::default();
+    }
+    let mut extractor = IdentifierStreamExtractor {
+        streams: IdentifierStreams::default(),
+    };
+    extractor.visit_program(&parsed.program);
+    extractor.streams
+}
+
+struct IdentifierStreamExtractor {
+    streams: IdentifierStreams,
+}
+
+impl<'a> Visit<'a> for IdentifierStreamExtractor {
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        self.streams
+            .uses
+            .push((identifier.span.start, identifier.name.to_string()));
+    }
+
+    fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
+        self.streams.bindings.push((
+            identifier.span.start,
+            identifier.span.end,
+            identifier.name.to_string(),
+        ));
     }
 }
 
@@ -1157,6 +1211,33 @@ function outer() {
         assert!(
             fns.iter().any(|f| lits.contains_key(&f.id.span)),
             "literal spans should match function ids"
+        );
+    }
+
+    #[test]
+    fn identifier_streams_align_positionally_across_alpha_renamed_functions() {
+        let subject = "function f(a){ let b = a + 1; return helper(b, CONFIG); }";
+        let reference = "function g(x){ let y = x + 1; return loadHelper(y, SETTINGS); }";
+        let s = identifier_streams(subject);
+        let r = identifier_streams(reference);
+        assert_eq!(
+            s.uses.len(),
+            r.uses.len(),
+            "isomorphic -> equal use streams"
+        );
+        let s_bound: std::collections::BTreeSet<&str> =
+            s.bindings.iter().map(|(_, _, n)| n.as_str()).collect();
+        let mut pairs = Vec::new();
+        for ((_, sn), (_, rn)) in s.uses.iter().zip(r.uses.iter()) {
+            if !s_bound.contains(sn.as_str()) {
+                pairs.push((sn.as_str(), rn.as_str()));
+            }
+        }
+        assert!(pairs.contains(&("helper", "loadHelper")), "{pairs:?}");
+        assert!(pairs.contains(&("CONFIG", "SETTINGS")), "{pairs:?}");
+        assert!(
+            !pairs.iter().any(|(s, _)| *s == "a" || *s == "b"),
+            "{pairs:?}"
         );
     }
 
