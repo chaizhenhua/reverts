@@ -216,7 +216,37 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     let index = build_reference_source_index(&args.reference_source_root, &args.reference_version)
         .map_err(CliRunError::ReferenceSourceNames)?;
     let subjects = subject_modules(&args)?;
-    let plans = plan_modules(&subjects, &index)?;
+    let mut plans = plan_modules(&subjects, &index)?;
+
+    // Collect every named function across both corpora ONCE (the expensive
+    // extraction); reused across the reinforcement passes below.
+    let subject_fns = collect_subject_functions(&subjects);
+    let reference_fns = collect_reference_functions(&index);
+    report_normalize_effect(&subject_fns, &reference_fns);
+
+    // Pass 1: function match against the initial module matches.
+    let module_matched_file: BTreeMap<u32, String> = plans
+        .iter()
+        .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
+        .map(|plan| (plan.module_id, plan.matched.file_path.clone()))
+        .collect();
+    let mut binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
+
+    // #1 Function->module reinforcement: promote unmatched modules that several
+    // accepted functions agree on, then re-match so the promoted modules'
+    // remaining functions get corroborated accepts (one bidirectional round).
+    let promotions = derive_module_promotions(&binding_rows, &module_matched_file);
+    if !promotions.is_empty() {
+        apply_module_promotions(&mut plans, &promotions, &subjects, &index);
+        plans.sort_by(|a, b| a.module_id.cmp(&b.module_id));
+        let module_matched_file: BTreeMap<u32, String> = plans
+            .iter()
+            .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
+            .map(|plan| (plan.module_id, plan.matched.file_path.clone()))
+            .collect();
+        binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
+    }
+
     println!(
         "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
     );
@@ -246,15 +276,6 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             },
         );
     }
-    // Function-level pass: GLOBAL match over the whole corpus. Auto-accepts are
-    // corroborated by the module match (function's reference file == the file
-    // its module matched); everything else is a global proposal.
-    let module_matched_file: BTreeMap<u32, String> = plans
-        .iter()
-        .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
-        .map(|plan| (plan.module_id, plan.matched.file_path.clone()))
-        .collect();
-    let binding_rows = match_functions_globally(&subjects, &index, &module_matched_file);
     println!("---bindings---");
     println!(
         "module_id\tsubject_path\tref_file\toriginal\tsemantic\tkind\tast\tparams\tstmts\tscore"
@@ -1704,18 +1725,99 @@ fn match_function_lists(
     rows
 }
 
-/// Global function matching over the whole corpus (see [`match_function_lists`]).
-/// `module_matched_file` maps subject module id -> the reference file it matched,
-/// used to corroborate auto-accepts.
-fn match_functions_globally(
+/// Minimum accepted function renames pointing at one reference file for the
+/// function track to *promote* an otherwise-unmatched module to that file.
+const MODULE_PROMOTE_MIN_FUNCTIONS: usize = 2;
+
+/// #1 Function->module reinforcement. A module with ≥
+/// [`MODULE_PROMOTE_MIN_FUNCTIONS`] ACCEPTED function renames all pointing at one
+/// reference file is almost certainly that file, even when module-level content
+/// matching missed it (minified module, few string anchors). Returns the
+/// strongest such file per currently-unmatched module. Accepts are already
+/// high-precision (globally-unique composite or corroborated), so two of them
+/// agreeing on a file is strong, independent evidence.
+fn derive_module_promotions(
+    binding_rows: &[BindingNameRow],
+    module_matched_file: &BTreeMap<u32, String>,
+) -> BTreeMap<u32, (String, usize)> {
+    let mut counts: BTreeMap<(u32, String), usize> = BTreeMap::new();
+    for row in binding_rows {
+        if row.accepted {
+            *counts
+                .entry((row.module_id, row.reference_file.clone()))
+                .or_default() += 1;
+        }
+    }
+    let mut best: BTreeMap<u32, (String, usize)> = BTreeMap::new();
+    for ((module_id, file), count) in counts {
+        if module_matched_file.contains_key(&module_id) {
+            continue; // already matched at module level
+        }
+        match best.get(&module_id) {
+            Some((_, existing)) if *existing >= count => {}
+            _ => {
+                best.insert(module_id, (file, count));
+            }
+        }
+    }
+    best.retain(|_, (_, count)| *count >= MODULE_PROMOTE_MIN_FUNCTIONS);
+    best
+}
+
+/// Apply function-driven module promotions: upgrade an existing Low plan or add
+/// a new Medium plan for each promoted module. The synthetic `ModuleMatch`
+/// records the promotion via `function_overlap` (the supporting function count).
+fn apply_module_promotions(
+    plans: &mut Vec<ModulePlan>,
+    promotions: &BTreeMap<u32, (String, usize)>,
     subjects: &[SubjectModule],
     index: &ReferenceSourceIndex,
-    module_matched_file: &BTreeMap<u32, String>,
-) -> Vec<BindingNameRow> {
-    let reference_fns = collect_reference_functions(index);
-    let subject_fns = collect_subject_functions(subjects);
-    report_normalize_effect(&subject_fns, &reference_fns);
-    match_function_lists(&subject_fns, &reference_fns, module_matched_file)
+) {
+    let existing: BTreeMap<u32, usize> = plans
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.module_id, i))
+        .collect();
+    for (&module_id, (file, count)) in promotions {
+        let reference_exports = index
+            .modules
+            .iter()
+            .find(|m| m.file_path == *file)
+            .map(|m| m.export_names.clone())
+            .unwrap_or_default();
+        if let Some(&idx) = existing.get(&module_id) {
+            let plan = &mut plans[idx];
+            plan.matched.file_path = file.clone();
+            plan.matched.tier = MatchTier::Medium;
+            plan.matched.function_overlap = *count;
+            plan.module_semantic_name = strip_source_extension(file);
+            plan.reference_exports = reference_exports;
+        } else if let Some(subject) = subjects.iter().find(|s| s.module_id == module_id) {
+            plans.push(ModulePlan {
+                module_id,
+                subject_path: subject.file_path.clone(),
+                reference_version: index.version.clone(),
+                module_semantic_name: strip_source_extension(file),
+                matched: ModuleMatch {
+                    file_path: file.clone(),
+                    tier: MatchTier::Medium,
+                    asset_overlap: 0,
+                    export_overlap: 0,
+                    function_overlap: *count,
+                    structural_score: 0.0,
+                    graph_support: 0,
+                    graph_known_edges: 0,
+                    anchor_overlap: 0,
+                    weighted_anchor: 0.0,
+                    normalized_anchor: 0.0,
+                    margin: 0.0,
+                    reciprocal_best: false,
+                },
+                subject_bindings: subject.bindings.clone(),
+                reference_exports,
+            });
+        }
+    }
 }
 
 /// Measure whether the `reverts_js::normalize` passes (which produce the
@@ -2690,6 +2792,47 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    fn accepted_row(module_id: u32, reference_file: &str, semantic: &str) -> BindingNameRow {
+        BindingNameRow {
+            module_id,
+            subject_path: format!("modules/{module_id}.ts"),
+            reference_file: reference_file.to_string(),
+            original_name: format!("orig{semantic}"),
+            semantic_name: semantic.to_string(),
+            accepted: true,
+            ast_hash: 1,
+            param_count: 0,
+            statement_count: 1,
+            score: 2.0,
+        }
+    }
+
+    #[test]
+    fn function_track_promotes_unmatched_module_with_two_accepted_functions() {
+        let rows = vec![
+            accepted_row(7, "util/x.ts", "foo"),
+            accepted_row(7, "util/x.ts", "bar"),
+            accepted_row(8, "util/y.ts", "baz"), // single accept -> no promotion
+        ];
+        let promo = derive_module_promotions(&rows, &BTreeMap::new());
+        assert_eq!(
+            promo.get(&7).map(|(f, c)| (f.as_str(), *c)),
+            Some(("util/x.ts", 2))
+        );
+        assert!(!promo.contains_key(&8), "single accept must not promote");
+    }
+
+    #[test]
+    fn function_track_does_not_promote_already_matched_module() {
+        let rows = vec![
+            accepted_row(7, "util/x.ts", "foo"),
+            accepted_row(7, "util/x.ts", "bar"),
+        ];
+        let already = BTreeMap::from([(7u32, "elsewhere.ts".to_string())]);
+        let promo = derive_module_promotions(&rows, &already);
+        assert!(promo.is_empty(), "matched module must not be re-promoted");
     }
 
     #[test]
