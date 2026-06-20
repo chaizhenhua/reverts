@@ -97,6 +97,17 @@ fn resolve_external_import_target_with_index(
     }
 
     if let Some(package_match) = package_match
+        && let Some(target) = public_export_member_external_package_source(
+            module,
+            package_match,
+            external_source_index,
+            module_source,
+        )
+    {
+        return Some(target);
+    }
+
+    if let Some(package_match) = package_match
         && let Some(target) = dependency_exact_hint_source_match_external_package_source(
             module,
             package_match,
@@ -120,17 +131,6 @@ fn resolve_external_import_target_with_index(
 
     if let Some(package_match) = package_match
         && let Some(target) = canonical_subpath_external_package_source(
-            module,
-            package_match,
-            external_source_index,
-            module_source,
-        )
-    {
-        return Some(target);
-    }
-
-    if let Some(package_match) = package_match
-        && let Some(target) = public_export_member_external_package_source(
             module,
             package_match,
             external_source_index,

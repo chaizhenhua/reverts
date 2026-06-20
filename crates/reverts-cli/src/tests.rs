@@ -3047,7 +3047,7 @@ fn project_writer_emits_typescript_scaffold() {
     assert!(
         fs::read_to_string(tempdir.path().join("tsconfig.json"))
             .expect("tsconfig")
-            .contains("\"modules/**/*.ts\"")
+            .contains("\"**/*.tsx\"")
     );
     assert!(tempdir.path().join("tsconfig.runtime.json").exists());
 }
@@ -3254,7 +3254,7 @@ fn project_writer_exposes_cli_entrypoint_when_planned() {
     assert!(tempdir.path().join("cli.ts").exists());
     assert!(package_json.contains("\"start\": \"node ./dist/cli.js\""));
     assert!(package_json.contains("\"reverts-output\": \"./dist/cli.js\""));
-    assert!(tsconfig.contains("\"cli.ts\""));
+    assert!(tsconfig.contains("\"**/*.ts\""));
 }
 
 #[test]

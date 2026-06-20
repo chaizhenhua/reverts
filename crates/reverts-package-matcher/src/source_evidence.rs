@@ -232,6 +232,7 @@ fn record_axis_hashes(
         AxisKind::StructuralAnchor,
         AxisKind::LiteralShape,
         AxisKind::AccessShape,
+        AxisKind::ExpressionShape,
         AxisKind::CalleeSet,
         AxisKind::BindingPattern,
         AxisKind::ThrowSet,
@@ -259,7 +260,9 @@ const fn axis_strength(axis: AxisKind) -> &'static str {
         | AxisKind::CalleeSet
         | AxisKind::BindingPattern
         | AxisKind::ThrowSet
-        | AxisKind::AccessPattern => "shape",
+        | AxisKind::AccessPattern
+        | AxisKind::NormalizedCfg
+        | AxisKind::ExpressionShape => "shape",
     }
 }
 

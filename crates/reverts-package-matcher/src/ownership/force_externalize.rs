@@ -119,30 +119,28 @@ pub(crate) fn promote_proven_external_import_targets(
             let mut accepted_string_matches = source_only_match
                 .map(|package_match| package_match.string_anchor_matches)
                 .unwrap_or_default();
-            let mut target = standard_target;
-            if target.is_none() {
-                target = source_only_match.and_then(|package_match| {
-                    dependency_graph_source_fingerprint_external_import_target(
+            let graph_target = source_only_match.and_then(|package_match| {
+                dependency_graph_source_fingerprint_external_import_target(
+                    rows,
+                    module,
+                    package_match,
+                    &external_source_index,
+                    module_source,
+                    &concrete_sources_by_module,
+                    &cache,
+                )
+                .or_else(|| {
+                    dependency_edge_path_external_import_target(
                         rows,
                         module,
                         package_match,
                         &external_source_index,
-                        module_source,
                         &concrete_sources_by_module,
                         &cache,
                     )
-                    .or_else(|| {
-                        dependency_edge_path_external_import_target(
-                            rows,
-                            module,
-                            package_match,
-                            &external_source_index,
-                            &concrete_sources_by_module,
-                            &cache,
-                        )
-                    })
-                });
-            }
+                })
+            });
+            let mut target = graph_target.or(standard_target);
             if target.is_none()
                 && let Some(correction) = source_only_match.and_then(|package_match| {
                     same_package_cross_version_source_external_import_target(

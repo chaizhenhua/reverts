@@ -214,6 +214,7 @@ pub(crate) fn dependency_graph_source_fingerprint_policy_allows(
             | ModuleMatchStrategy::CascadePartialFunctionCoverage
             | ModuleMatchStrategy::AggregateStructuralBagSimilarity
             | ModuleMatchStrategy::AggregateStringAnchorSimilarity
+            | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
             | ModuleMatchStrategy::PropertyShapeAndStringAnchors
             | ModuleMatchStrategy::ObjectShapeAndStringAnchors
             | ModuleMatchStrategy::ClassShapeAndStringAnchors

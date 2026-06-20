@@ -114,13 +114,13 @@ pub fn match_packages_with_pipeline(
     run_package_match_pass(DependencyClosurePass, &context, &mut state, &mut timing);
     run_package_match_pass(DependencyClusterPass, &context, &mut state, &mut timing);
     run_package_match_pass(PackageFileGraphPass, &context, &mut state, &mut timing);
-    run_package_match_pass(ImportablePass, &context, &mut state, &mut timing);
     run_package_match_pass(
         ProvenExternalImportTargetsPass,
         &context,
         &mut state,
         &mut timing,
     );
+    run_package_match_pass(ImportablePass, &context, &mut state, &mut timing);
     run_package_match_pass(CacheAnchoredSurfacesPass, &context, &mut state, &mut timing);
 
     PackageMatchingPipelineReport {
@@ -1352,6 +1352,7 @@ impl FunctionAxisToken {
         match self.kind {
             AxisKind::Ast => 8,
             AxisKind::Cfg => 5,
+            AxisKind::NormalizedCfg => 4,
             AxisKind::LiteralAnchor
             | AxisKind::AccessPattern
             | AxisKind::CalleeSet
@@ -1361,6 +1362,7 @@ impl FunctionAxisToken {
             | AxisKind::EffectPattern
             | AxisKind::LiteralShape
             | AxisKind::AccessShape
+            | AxisKind::ExpressionShape
             | AxisKind::BindingPattern => 1,
         }
     }
@@ -1508,11 +1510,13 @@ fn push_axis_tokens(
     for (kind, hash) in [
         (AxisKind::Ast, Some(axes.ast)),
         (AxisKind::Cfg, Some(axes.cfg)),
+        (AxisKind::NormalizedCfg, Some(axes.normalized_cfg)),
         (AxisKind::StructuralAnchor, Some(axes.structural_anchor)),
         (AxisKind::LiteralAnchor, axes.literal_anchor),
         (AxisKind::AccessPattern, axes.access_pattern),
         (AxisKind::CalleeSet, axes.callee_set),
         (AxisKind::ThrowSet, axes.throw_set),
+        (AxisKind::ExpressionShape, axes.expression_shape),
     ] {
         if let Some(hash) = hash {
             out.insert(FunctionAxisToken {

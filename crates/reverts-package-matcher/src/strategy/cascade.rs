@@ -277,6 +277,7 @@ mod tests {
         AxisHashes {
             ast,
             cfg: 0,
+            normalized_cfg: 0,
             return_pattern: 0,
             effect_pattern: 0,
             literal_anchor: None,
@@ -284,6 +285,7 @@ mod tests {
             structural_anchor: 0,
             literal_shape: None,
             access_shape: None,
+            expression_shape: None,
             callee_set: None,
             binding_pattern: 0,
             throw_set: None,
@@ -566,6 +568,7 @@ mod tests {
         let axes = AxisHashes {
             ast: 0,
             cfg: 0,
+            normalized_cfg: 0,
             return_pattern: 44,
             effect_pattern: 55,
             literal_anchor: None,
@@ -573,6 +576,7 @@ mod tests {
             structural_anchor: 22,
             literal_shape: None,
             access_shape: None,
+            expression_shape: None,
             callee_set: Some(11),
             binding_pattern: 33,
             throw_set: None,
@@ -618,6 +622,7 @@ mod tests {
         let axes = AxisHashes {
             ast: 0,
             cfg: 0,
+            normalized_cfg: 0,
             return_pattern: 44,
             effect_pattern: 55,
             literal_anchor: None,
@@ -625,6 +630,7 @@ mod tests {
             structural_anchor: 22,
             literal_shape: None,
             access_shape: None,
+            expression_shape: None,
             callee_set: Some(11),
             binding_pattern: 33,
             throw_set: None,

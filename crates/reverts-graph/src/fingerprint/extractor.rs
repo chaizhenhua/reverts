@@ -497,6 +497,7 @@ fn compute_axes<'a>(
     AxisHashes {
         ast: super::ast::compute(body),
         cfg: super::cfg::compute(body),
+        normalized_cfg: super::cfg_normalized::compute(body),
         return_pattern: super::return_pattern::compute(body),
         effect_pattern: super::effect_pattern::compute(body),
         literal_anchor: super::literal_anchor::compute(body),
@@ -504,6 +505,7 @@ fn compute_axes<'a>(
         structural_anchor: super::structural_anchor::compute(params, body),
         literal_shape: super::literal_shape::compute(body),
         access_shape: acc_s,
+        expression_shape: super::expression_shape::compute(params, body),
         callee_set: super::callee_set::compute_with_locals(body, &function_locals),
         binding_pattern: super::binding_pattern::compute(params, body),
         throw_set: super::throw_set::compute_with_locals(body, &function_locals),

@@ -714,10 +714,13 @@ const TYPESCRIPT_TSCONFIG_JSON: &str = r#"{
     "target": "ES2022"
   },
   "include": [
-    "cli.ts",
-    "modules/**/*.ts",
-    "modules/**/*.tsx",
+    "**/*.ts",
+    "**/*.tsx",
     "**/*.d.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
   ]
 }
 "#;

@@ -13,12 +13,13 @@ use oxc_ast::{
     ast::{
         ArrowFunctionExpression, CallExpression, Class, ClassElement, ExportAllDeclaration,
         ExportDefaultDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
-        MethodDefinitionKind, ObjectExpression, SwitchStatement, TemplateElement,
+        ImportDeclaration, ImportDeclarationSpecifier, MethodDefinitionKind, ObjectExpression,
+        SwitchStatement, TemplateElement,
     },
     visit::walk::{
         walk_assignment_expression, walk_call_expression, walk_class, walk_export_all_declaration,
-        walk_export_default_declaration, walk_export_named_declaration, walk_object_expression,
-        walk_switch_statement, walk_template_element,
+        walk_export_default_declaration, walk_export_named_declaration, walk_import_declaration,
+        walk_object_expression, walk_switch_statement, walk_template_element,
     },
 };
 use oxc_parser::Parser;
@@ -83,6 +84,7 @@ pub fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint,
 struct AstFingerprint {
     function_signature_hashes: BTreeSet<String>,
     string_anchors: BTreeSet<String>,
+    surface_anchors: BTreeSet<String>,
     prototype_members: BTreeSet<String>,
 }
 
@@ -149,6 +151,11 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
         walk_template_element(self, it);
     }
 
+    fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
+        self.record_import_surface_anchor(declaration);
+        walk_import_declaration(self, declaration);
+    }
+
     fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
         if let Some(declaration) = &declaration.declaration {
             for binding in declaration_binding_names(declaration) {
@@ -160,6 +167,7 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
                 self.record_export_member_anchor(exported);
             }
         }
+        self.record_export_surface_anchor(declaration);
         walk_export_named_declaration(self, declaration);
     }
 
@@ -286,6 +294,58 @@ impl FingerprintVisitor<'_> {
             self.fingerprint
                 .string_anchors
                 .insert(format!("regex:{pattern}/{flags}"));
+        }
+    }
+
+    fn record_import_surface_anchor(&mut self, declaration: &ImportDeclaration<'_>) {
+        let Some(specifiers) = declaration.specifiers.as_ref() else {
+            self.fingerprint.surface_anchors.insert(format!(
+                "import-surface:{}:side-effect",
+                declaration.source.value
+            ));
+            return;
+        };
+        let mut parts = BTreeSet::<String>::new();
+        for specifier in specifiers {
+            match specifier {
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => {
+                    parts.insert("default".to_string());
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {
+                    parts.insert("namespace".to_string());
+                }
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    if let Some(imported) = module_export_name(&specifier.imported) {
+                        parts.insert(format!("named:{imported}"));
+                    }
+                }
+            }
+        }
+        if !parts.is_empty() {
+            self.fingerprint.surface_anchors.insert(format!(
+                "import-surface:{}:{}",
+                declaration.source.value,
+                parts.into_iter().collect::<Vec<_>>().join(",")
+            ));
+        }
+    }
+
+    fn record_export_surface_anchor(&mut self, declaration: &ExportNamedDeclaration<'_>) {
+        let mut parts = BTreeSet::<String>::new();
+        for specifier in &declaration.specifiers {
+            if let Some(exported) = module_export_name(&specifier.exported) {
+                parts.insert(exported.to_string());
+            }
+        }
+        if !parts.is_empty() {
+            let source = declaration
+                .source
+                .as_ref()
+                .map_or("local".to_string(), |source| source.value.to_string());
+            self.fingerprint.surface_anchors.insert(format!(
+                "export-surface:{source}:{}",
+                parts.into_iter().collect::<Vec<_>>().join(",")
+            ));
         }
     }
 
@@ -587,4 +647,38 @@ fn module_source_hash_alternate_pass_enabled(pass: NormalizationPassId) -> bool 
             | NormalizationPassId::ComputedToStaticMember
             | NormalizationPassId::VoidZeroToUndefinedGuarded
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_surface_shape_ignores_named_specifier_order() {
+        let left = ast_fingerprint(
+            "a.ts",
+            "import { a, b as c } from 'pkg'; export const x = a;",
+        )
+        .expect("left fingerprint");
+        let right = ast_fingerprint(
+            "b.ts",
+            "import { b as c, a } from 'pkg'; export const x = a;",
+        )
+        .expect("right fingerprint");
+        assert!(
+            left.surface_anchors
+                .contains("import-surface:pkg:named:a,named:b")
+        );
+        assert_eq!(left.surface_anchors, right.surface_anchors);
+    }
+
+    #[test]
+    fn export_surface_shape_ignores_specifier_order() {
+        let left = ast_fingerprint("a.ts", "const a = 1; const b = 2; export { a, b };")
+            .expect("left fingerprint");
+        let right = ast_fingerprint("b.ts", "const a = 1; const b = 2; export { b, a };")
+            .expect("right fingerprint");
+        assert!(left.surface_anchors.contains("export-surface:local:a,b"));
+        assert_eq!(left.surface_anchors, right.surface_anchors);
+    }
 }

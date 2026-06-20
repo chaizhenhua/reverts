@@ -356,6 +356,9 @@ fn priority_axis(axes: &AxisHashes) -> Option<(AxisKind, u64)> {
 fn collect_remaining_axes(axes: &AxisHashes, exclude: AxisKind) -> Vec<(AxisKind, u64)> {
     let mut out: Vec<(AxisKind, u64)> = Vec::new();
     // Always-present axes
+    if exclude != AxisKind::NormalizedCfg {
+        out.push((AxisKind::NormalizedCfg, axes.normalized_cfg));
+    }
     if exclude != AxisKind::ReturnPattern {
         out.push((AxisKind::ReturnPattern, axes.return_pattern));
     }
@@ -398,6 +401,11 @@ fn collect_remaining_axes(axes: &AxisHashes, exclude: AxisKind) -> Vec<(AxisKind
         && exclude != AxisKind::LiteralShape
     {
         out.push((AxisKind::LiteralShape, h));
+    }
+    if let Some(h) = axes.expression_shape
+        && exclude != AxisKind::ExpressionShape
+    {
+        out.push((AxisKind::ExpressionShape, h));
     }
     out
 }
@@ -567,6 +575,7 @@ mod tests {
         AxisHashes {
             ast: 0,
             cfg: 7,
+            normalized_cfg: 17,
             return_pattern: 0,
             effect_pattern: 0,
             literal_anchor: Some(11),
@@ -574,6 +583,7 @@ mod tests {
             structural_anchor: 0,
             literal_shape: None,
             access_shape: None,
+            expression_shape: None,
             callee_set: Some(22),
             binding_pattern: 0,
             throw_set: None,
@@ -696,12 +706,21 @@ mod tests {
             },
             cand.clone(),
         );
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::NormalizedCfg,
+                hash: 0,
+            },
+            cand.clone(),
+        );
 
         // Primary axes lack the indexed values entirely (no callee_set
         // hit), so primary feature_similarity finds no candidates.
         let primary = AxisHashes {
             ast: 0,
             cfg: 0,
+            normalized_cfg: 0,
             return_pattern: 99_999, // doesn't match indexed return_pattern=1
             effect_pattern: 0,
             literal_anchor: None,
@@ -709,18 +728,20 @@ mod tests {
             structural_anchor: 99_999, // doesn't match indexed structural=1
             literal_shape: None,
             access_shape: None,
+            expression_shape: None,
             callee_set: None, // primary has no callee_set → priority_axis returns None
             binding_pattern: 0,
             throw_set: None,
         };
 
         // Alternate-source axes match the candidate on primary axis
-        // (callee_set=99) and exactly 2 of 4 remaining axes
-        // (return_pattern=1, structural_anchor=1). Jaccard ≈ 2/4 = 0.5,
+        // (callee_set=99) and 3 of 5 remaining axes
+        // (normalized_cfg=0, return_pattern=1, structural_anchor=1). Jaccard = 0.6,
         // which the alt threshold accepts.
         let alt = AxisHashes {
             ast: 0,
             cfg: 0,
+            normalized_cfg: 0,
             return_pattern: 1,
             effect_pattern: 0,
             literal_anchor: None,
@@ -728,6 +749,7 @@ mod tests {
             structural_anchor: 1,
             literal_shape: None,
             access_shape: None,
+            expression_shape: None,
             callee_set: Some(99),
             binding_pattern: 0,
             throw_set: None,

@@ -18,6 +18,7 @@ fn zero_axes(ast: u64) -> AxisHashes {
     AxisHashes {
         ast,
         cfg: 0,
+        normalized_cfg: 0,
         return_pattern: 0,
         effect_pattern: 0,
         literal_anchor: None,
@@ -25,6 +26,7 @@ fn zero_axes(ast: u64) -> AxisHashes {
         structural_anchor: 0,
         literal_shape: None,
         access_shape: None,
+        expression_shape: None,
         callee_set: None,
         binding_pattern: 0,
         throw_set: None,

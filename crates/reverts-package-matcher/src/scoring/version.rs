@@ -163,6 +163,24 @@ pub(crate) fn best_source_match(
                 || is_class_shape_match
                 || is_switch_shape_match
             {
+                let strategy = if is_function_string_match {
+                    ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+                } else if is_property_shape_match {
+                    ModuleMatchStrategy::PropertyShapeAndStringAnchors
+                } else if is_object_shape_match {
+                    ModuleMatchStrategy::ObjectShapeAndStringAnchors
+                } else if is_class_shape_match {
+                    ModuleMatchStrategy::ClassShapeAndStringAnchors
+                } else if is_switch_shape_match {
+                    ModuleMatchStrategy::SwitchShapeAndStringAnchors
+                } else {
+                    ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+                };
+                let direct_importable = is_function_string_match
+                    || is_property_shape_match
+                    || is_object_shape_match
+                    || is_class_shape_match
+                    || is_switch_shape_match;
                 Some((
                     source,
                     function_signature_matches
@@ -173,20 +191,8 @@ pub(crate) fn best_source_match(
                         .max(class_anchor_matches)
                         .max(switch_anchor_matches),
                     string_anchor_matches,
-                    if is_function_string_match
-                        || is_function_axis_match
-                        || is_jsx_react_shape_match
-                    {
-                        ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-                    } else if is_property_shape_match {
-                        ModuleMatchStrategy::PropertyShapeAndStringAnchors
-                    } else if is_object_shape_match {
-                        ModuleMatchStrategy::ObjectShapeAndStringAnchors
-                    } else if is_class_shape_match {
-                        ModuleMatchStrategy::ClassShapeAndStringAnchors
-                    } else {
-                        ModuleMatchStrategy::SwitchShapeAndStringAnchors
-                    },
+                    strategy,
+                    direct_importable,
                 ))
             } else {
                 None
@@ -225,7 +231,7 @@ pub(crate) fn best_source_match(
         best.3,
         best.1,
         best.2,
-        best.0.source.external_importable,
+        best.0.source.external_importable && best.4,
     ))
 }
 

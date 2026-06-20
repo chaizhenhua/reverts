@@ -187,12 +187,14 @@ struct FunctionShapeKey {
     param_count: u32,
     statement_count: u32,
     cfg: u64,
+    normalized_cfg: u64,
     return_pattern: u64,
     effect_pattern: u64,
     structural_anchor: u64,
     binding_pattern: u64,
     literal_shape: Option<u64>,
     access_shape: Option<u64>,
+    expression_shape: Option<u64>,
     throw_set: Option<u64>,
 }
 
@@ -504,6 +506,12 @@ fn axis_keys_for_axes(param_count: u32, axes: &AxisHashes) -> BTreeSet<AxisKey> 
     push_axis_key(
         &mut keys,
         param_count,
+        AxisKind::NormalizedCfg,
+        axes.normalized_cfg,
+    );
+    push_axis_key(
+        &mut keys,
+        param_count,
         AxisKind::ReturnPattern,
         axes.return_pattern,
     );
@@ -537,6 +545,9 @@ fn axis_keys_for_axes(param_count: u32, axes: &AxisHashes) -> BTreeSet<AxisKey> 
     if let Some(hash) = axes.access_shape {
         push_axis_key(&mut keys, param_count, AxisKind::AccessShape, hash);
     }
+    if let Some(hash) = axes.expression_shape {
+        push_axis_key(&mut keys, param_count, AxisKind::ExpressionShape, hash);
+    }
     if let Some(hash) = axes.callee_set {
         push_axis_key(&mut keys, param_count, AxisKind::CalleeSet, hash);
     }
@@ -549,6 +560,7 @@ fn axis_keys_for_axes(param_count: u32, axes: &AxisHashes) -> BTreeSet<AxisKey> 
 fn axis_pair_keys_for_axes(param_count: u32, axes: &AxisHashes) -> BTreeSet<AxisPairKey> {
     const PAIR_KINDS: &[(AxisKind, AxisKind)] = &[
         (AxisKind::Cfg, AxisKind::StructuralAnchor),
+        (AxisKind::NormalizedCfg, AxisKind::StructuralAnchor),
         (AxisKind::Cfg, AxisKind::ReturnPattern),
         (AxisKind::Cfg, AxisKind::EffectPattern),
         (AxisKind::StructuralAnchor, AxisKind::ReturnPattern),
@@ -559,6 +571,7 @@ fn axis_pair_keys_for_axes(param_count: u32, axes: &AxisHashes) -> BTreeSet<Axis
         (AxisKind::LiteralShape, AxisKind::AccessShape),
         (AxisKind::LiteralShape, AxisKind::ReturnPattern),
         (AxisKind::AccessShape, AxisKind::EffectPattern),
+        (AxisKind::ExpressionShape, AxisKind::StructuralAnchor),
         (AxisKind::ThrowSet, AxisKind::StructuralAnchor),
     ];
     PAIR_KINDS
@@ -598,12 +611,14 @@ fn function_shape_key_for_axes(
         param_count,
         statement_count,
         cfg: axes.cfg,
+        normalized_cfg: axes.normalized_cfg,
         return_pattern: axes.return_pattern,
         effect_pattern: axes.effect_pattern,
         structural_anchor: axes.structural_anchor,
         binding_pattern: axes.binding_pattern,
         literal_shape: axes.literal_shape,
         access_shape: axes.access_shape,
+        expression_shape: axes.expression_shape,
         throw_set: axes.throw_set,
     }
 }
@@ -934,10 +949,14 @@ const fn axis_weight(kind: AxisKind) -> u32 {
     match kind {
         AxisKind::Ast => 4,
         AxisKind::Cfg
+        | AxisKind::NormalizedCfg
         | AxisKind::StructuralAnchor
         | AxisKind::LiteralAnchor
         | AxisKind::ThrowSet => 3,
-        AxisKind::AccessPattern | AxisKind::AccessShape | AxisKind::CalleeSet => 2,
+        AxisKind::AccessPattern
+        | AxisKind::AccessShape
+        | AxisKind::ExpressionShape
+        | AxisKind::CalleeSet => 2,
         AxisKind::ReturnPattern
         | AxisKind::EffectPattern
         | AxisKind::LiteralShape
@@ -948,8 +967,11 @@ const fn axis_weight(kind: AxisKind) -> u32 {
 const fn axis_pair_weight(key: &AxisPairKey) -> u32 {
     match (key.left_kind, key.right_kind) {
         (AxisKind::Cfg, AxisKind::StructuralAnchor) => 5,
+        (AxisKind::NormalizedCfg, AxisKind::StructuralAnchor) => 4,
         (AxisKind::Cfg, _)
         | (_, AxisKind::Cfg)
+        | (AxisKind::NormalizedCfg, _)
+        | (_, AxisKind::NormalizedCfg)
         | (AxisKind::StructuralAnchor, _)
         | (_, AxisKind::StructuralAnchor) => 4,
         (AxisKind::LiteralShape, AxisKind::AccessShape)
@@ -1057,12 +1079,14 @@ mod tests {
             param_count: 1,
             statement_count: 2,
             cfg: 10 + seed,
+            normalized_cfg: 11 + seed,
             return_pattern: 20 + seed,
             effect_pattern: 30 + seed,
             structural_anchor: 40 + seed,
             binding_pattern: 50 + seed,
             literal_shape: Some(60 + seed),
             access_shape: Some(70 + seed),
+            expression_shape: Some(80 + seed),
             throw_set: None,
         }
     }

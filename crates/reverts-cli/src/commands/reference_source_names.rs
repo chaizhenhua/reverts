@@ -12,8 +12,8 @@ use reverts_graph::{
     FunctionExtractor, IdentifierStreams, extract_import_specifiers, function_names,
     function_string_literals, identifier_streams,
 };
-use reverts_input::PackageAttributionStatus;
-use reverts_input::sqlite::load_project_rows_from_connection;
+use reverts_input::sqlite::{load_project_rows_from_connection, load_project_rows_from_sqlite};
+use reverts_input::{InputRows, PackageAttributionStatus};
 use reverts_ir::{AxisHashes, FunctionFingerprint, ModuleId};
 use reverts_js::sanitize_identifier;
 use reverts_package_matcher::{
@@ -62,6 +62,18 @@ pub struct ReferenceSourceNamesArgs {
     pub min_tier: MinTier,
     #[arg(long, default_value = "source")]
     pub origin_prefix: String,
+    /// Match only module paths/names from bundle-extracted input slices.
+    ///
+    /// This avoids generating the full TypeScript project before source-tree
+    /// matching, which is much faster for large single-file bundles. It reuses
+    /// the normal `reverts-bundle` extraction path and intentionally skips
+    /// path overrides and export/local-binding name propagation because those
+    /// rows must target the final generated output.
+    #[arg(long, default_value_t = false)]
+    pub module_only: bool,
+    /// Write a machine-readable module match summary.
+    #[arg(long)]
+    pub summary_json: Option<PathBuf>,
 }
 
 impl ReferenceSourceNamesArgs {
@@ -90,11 +102,20 @@ struct ModulePlan {
 fn plan_modules(
     subjects: &[SubjectModule],
     index: &ReferenceSourceIndex,
+    use_structural_graph_support: bool,
 ) -> Result<Vec<ModulePlan>, CliRunError> {
     let trace_start = Instant::now();
-    let structural_support = source_structural_support(subjects, index);
+    let structural_support = if use_structural_graph_support {
+        source_structural_support(subjects, index)
+    } else {
+        BTreeMap::new()
+    };
     trace_reference_source_names(trace_start, "plan.source_structural_support");
-    let graph_support = source_graph_support(subjects, index, &structural_support);
+    let graph_support = if use_structural_graph_support {
+        source_graph_support(subjects, index, &structural_support)
+    } else {
+        BTreeMap::new()
+    };
     trace_reference_source_names(trace_start, "plan.source_graph_support");
     let subject_best_matches =
         best_ranked_by_subject(subjects, index, &structural_support, &graph_support);
@@ -117,6 +138,7 @@ fn plan_modules(
             matched.tier,
             matched.margin,
             matched.reciprocal_best,
+            matched.weighted_anchor,
             matched.normalized_anchor,
         );
         let reference_module = index
@@ -242,20 +264,31 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     let index = build_reference_source_index(&args.reference_source_root, &args.reference_version)
         .map_err(CliRunError::ReferenceSourceNames)?;
     trace_reference_source_names(trace_start, "build_reference_source_index");
-    let subjects = subject_modules(&args)?;
+    let subjects = if args.module_only {
+        subject_modules_from_extracted_input(&args)?
+    } else {
+        subject_modules(&args)?
+    };
     trace_reference_source_names(trace_start, "subject_modules");
-    let mut plans = plan_modules(&subjects, &index)?;
+    let mut plans = plan_modules(&subjects, &index, !args.module_only)?;
     trace_reference_source_names(trace_start, "plan_modules");
 
-    // Collect every named function across both corpora ONCE (the expensive
-    // extraction); reused across the reinforcement passes below.
+    // Collect every named function across both corpora once. In module-only
+    // mode this powers module promotions only; in full mode the same rows later
+    // feed binding/export propagation. Keeping one shared pass avoids a second,
+    // divergent matching implementation.
     let subject_fns = collect_subject_functions(&subjects);
     trace_reference_source_names(trace_start, "collect_subject_functions");
     let reference_fns = collect_reference_functions(&index);
     trace_reference_source_names(trace_start, "collect_reference_functions");
-    report_normalize_effect(&subject_fns, &reference_fns);
+    if !args.module_only {
+        report_normalize_effect(&subject_fns, &reference_fns);
+    }
 
-    // Pass 1: function match against the initial module matches.
+    // Function->module reinforcement: promote unmatched modules when multiple
+    // high-precision accepted function matches point at the same reference file.
+    // This is safe for module-only because it writes only module semantic names;
+    // generated-output binding/path mutations remain disabled in that mode.
     let module_matched_file: BTreeMap<u32, String> = plans
         .iter()
         .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
@@ -263,10 +296,6 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
         .collect();
     let mut binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
     trace_reference_source_names(trace_start, "match_function_lists");
-
-    // #1 Function->module reinforcement: promote unmatched modules that several
-    // accepted functions agree on, then re-match so the promoted modules'
-    // remaining functions get corroborated accepts (one bidirectional round).
     let promotions = derive_module_promotions(&binding_rows, &module_matched_file);
     if !promotions.is_empty() {
         apply_module_promotions(&mut plans, &promotions, &subjects, &index);
@@ -278,6 +307,48 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             .collect();
         binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
         trace_reference_source_names(trace_start, "module_promotions");
+    }
+
+    write_match_summary_if_requested(&args, subjects.len(), &plans)?;
+
+    if args.module_only {
+        if args.apply {
+            let mut connection = Connection::open(&args.input)
+                .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+            let rows = load_project_rows_from_connection(&connection, args.project_id)
+                .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+            let prepared_rows = prepare_input_rows_for_pipeline(rows);
+            persist_prepared_synthetic_inputs(
+                &mut connection,
+                args.project_id,
+                &prepared_rows.rows,
+                &prepared_rows.synthetic_modules,
+            )
+            .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+            persist_module_dependencies(&mut connection, &prepared_rows.rows)
+                .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+            ensure_semantic_name_source_column(&connection)
+                .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
+            let module_count = write_module_names(
+                &connection,
+                &plans,
+                args.min_tier,
+                &args.origin_prefix,
+                &args.reference_version,
+            )?;
+            println!("applied module-only: {module_count} module name(s)");
+        } else {
+            let accepted = plans
+                .iter()
+                .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
+                .count();
+            println!(
+                "dry-run module-only: {accepted}/{} module match(es) pass {:?}; pass --apply to write module names",
+                subjects.len(),
+                args.min_tier
+            );
+        }
+        return Ok(());
     }
 
     // Symbol propagation: name the module-level symbols that matched functions
@@ -426,6 +497,7 @@ fn trace_reference_source_names(start: Instant, label: &str) {
 
 /// One subject emitted module: its DB module id, emitted path, fingerprint,
 /// and the (original_name -> emitted_name) bindings that land in it.
+#[derive(Debug)]
 struct SubjectModule {
     module_id: u32,
     file_path: String,
@@ -500,6 +572,136 @@ fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>
         });
     }
     Ok(modules)
+}
+
+fn subject_modules_from_extracted_input(
+    args: &ReferenceSourceNamesArgs,
+) -> Result<Vec<SubjectModule>, CliRunError> {
+    let rows = load_project_rows_from_sqlite(&args.input, args.project_id)
+        .map_err(|error| CliRunError::ReferenceSourceNames(format!("load input rows: {error}")))?;
+    let package_owned_modules = package_owned_modules_from_rows(&rows);
+    let prepared = prepare_input_rows_for_pipeline(rows);
+    Ok(subject_modules_from_prepared_rows(
+        &prepared.rows,
+        &package_owned_modules,
+    ))
+}
+
+fn package_owned_modules_from_rows(rows: &InputRows) -> BTreeSet<u32> {
+    rows.package_attributions
+        .iter()
+        .filter(|attribution| {
+            matches!(
+                attribution.status,
+                PackageAttributionStatus::Accepted | PackageAttributionStatus::Rejected
+            ) && attribution.package_version.is_some()
+        })
+        .map(|attribution| attribution.module_id.0)
+        .collect()
+}
+
+fn subject_modules_from_prepared_rows(
+    rows: &InputRows,
+    package_owned_modules: &BTreeSet<u32>,
+) -> Vec<SubjectModule> {
+    let mut modules = Vec::new();
+    for module in &rows.modules {
+        if package_owned_modules.contains(&module.id.0) {
+            continue;
+        }
+        let Some(slice) = rows.module_source_slice(module.id) else {
+            continue;
+        };
+        let file_path = module.semantic_path.clone();
+        let Ok(fingerprint) = fingerprint_source(file_path.as_str(), slice.source) else {
+            continue;
+        };
+        let profile = build_source_evidence_profile_with_fingerprint(
+            file_path.as_str(),
+            slice.source,
+            fingerprint.clone(),
+        );
+        modules.push(SubjectModule {
+            module_id: module.id.0,
+            file_path,
+            source: slice.source.to_string(),
+            fingerprint,
+            profile,
+            bindings: Vec::new(),
+        });
+    }
+    modules
+}
+
+fn write_match_summary_if_requested(
+    args: &ReferenceSourceNamesArgs,
+    subject_count: usize,
+    plans: &[ModulePlan],
+) -> Result<(), CliRunError> {
+    let Some(path) = &args.summary_json else {
+        return Ok(());
+    };
+    let high = plans
+        .iter()
+        .filter(|plan| plan.matched.tier == MatchTier::High)
+        .count();
+    let medium = plans
+        .iter()
+        .filter(|plan| plan.matched.tier == MatchTier::Medium)
+        .count();
+    let low = plans
+        .iter()
+        .filter(|plan| plan.matched.tier == MatchTier::Low)
+        .count();
+    let accepted = plans
+        .iter()
+        .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
+        .count();
+    let distinct_reference_files = plans
+        .iter()
+        .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
+        .map(|plan| plan.matched.file_path.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let match_rate = if subject_count == 0 {
+        0.0
+    } else {
+        accepted as f64 / subject_count as f64
+    };
+    let summary = serde_json::json!({
+        "subject_modules": subject_count,
+        "planned_matches": plans.len(),
+        "accepted_matches": accepted,
+        "match_rate": match_rate,
+        "min_tier": match args.min_tier {
+            MinTier::High => "high",
+            MinTier::Medium => "medium",
+        },
+        "tiers": {
+            "high": high,
+            "medium": medium,
+            "low": low,
+        },
+        "distinct_reference_files": distinct_reference_files,
+        "module_only": args.module_only,
+    });
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|source| CliRunError::WriteOutput {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&summary)
+            .expect("reference source match summary is serializable"),
+    )
+    .map_err(|source| CliRunError::WriteOutput {
+        path: path.clone(),
+        source,
+    })
 }
 
 /// One source file from the reference tree, fingerprinted for matching.
@@ -995,6 +1197,13 @@ const MEDIUM_SCORE_MARGIN: f64 = 0.20;
 /// at nanchor=0.5) that the `weighted_anchor >= 30` mass gate misses. Normalized
 /// overlap is hub-resistant, so this does not re-admit large-file false matches.
 const MEDIUM_STRONG_NANCHOR: f64 = 0.30;
+/// A reciprocal-best assignment that shares a substantial mass of rare string
+/// anchors is strong enough to promote even when the normalized fraction is
+/// below the generic Medium floor. This recovers large first-party files whose
+/// minified split module preserves many distinctive literals but only a modest
+/// fraction of the full source file's anchor surface.
+const MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR: f64 = 20.0;
+const MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR: f64 = 0.10;
 const SOURCE_STRUCTURAL_CANDIDATE_LIMIT: usize = 12;
 const SOURCE_CANDIDATE_MAX_ANCHOR_FANOUT: usize = 64;
 const SOURCE_CANDIDATE_MIN_ANCHOR_IDF: f64 = 1.0;
@@ -1180,10 +1389,19 @@ fn calibrate_tier(
     tier: MatchTier,
     margin: f64,
     reciprocal_best: bool,
+    weighted_anchor: f64,
     normalized_anchor: f64,
 ) -> MatchTier {
     match tier {
-        MatchTier::High | MatchTier::Low => tier,
+        MatchTier::High => tier,
+        MatchTier::Low
+            if reciprocal_best
+                && weighted_anchor >= MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR
+                && normalized_anchor >= MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR =>
+        {
+            MatchTier::Medium
+        }
+        MatchTier::Low => tier,
         // Strong normalized content is self-sufficient: keep it Medium even
         // without reciprocal-best or a wide margin. The margin/reciprocal gate
         // exists to suppress weak/ambiguous matches, not strong-content ones.
@@ -1403,6 +1621,7 @@ pub(crate) fn best_module_match(
         best.tier,
         best.margin,
         best.reciprocal_best,
+        best.weighted_anchor,
         best.normalized_anchor,
     );
     Some(best)
@@ -1432,6 +1651,7 @@ fn best_module_match_with_reciprocal(
         matched.tier,
         matched.margin,
         matched.reciprocal_best,
+        matched.weighted_anchor,
         matched.normalized_anchor,
     );
     Some(matched)
@@ -2019,10 +2239,10 @@ fn match_function_lists(
 
 /// Identifier `uses` (in AST order) and the set of names bound anywhere inside a
 /// function span. Module-level symbols are uses not in the bound set.
-fn span_uses_and_bound<'a>(
-    streams: &'a IdentifierStreams,
+fn span_uses_and_bound(
+    streams: &IdentifierStreams,
     span: reverts_ir::ByteRange,
-) -> (Vec<&'a str>, BTreeSet<&'a str>) {
+) -> (Vec<&str>, BTreeSet<&str>) {
     let uses = streams
         .uses
         .iter()
@@ -2105,12 +2325,12 @@ fn propagate_symbols(
         ) else {
             continue;
         };
-        if !subject_streams.contains_key(&row.module_id) {
-            subject_streams.insert(row.module_id, identifier_streams(s_src));
-        }
-        if !reference_streams.contains_key(&row.reference_file) {
-            reference_streams.insert(row.reference_file.clone(), identifier_streams(r_src));
-        }
+        subject_streams
+            .entry(row.module_id)
+            .or_insert_with(|| identifier_streams(s_src));
+        reference_streams
+            .entry(row.reference_file.clone())
+            .or_insert_with(|| identifier_streams(r_src));
         let (s_uses, s_bound) = span_uses_and_bound(
             &subject_streams[&row.module_id],
             subject.fingerprint.id.span,
@@ -2548,6 +2768,8 @@ fn write_module_path_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reverts_input::{ModuleInput, ProjectInput, SourceFileInput, SourceSpan};
+    use reverts_ir::ModuleId;
     use reverts_package_matcher::fingerprint_source;
 
     #[test]
@@ -2614,6 +2836,32 @@ mod tests {
         assert!(
             assets.is_empty(),
             "no native-asset literals expected: {assets:?}"
+        );
+    }
+
+    #[test]
+    fn module_only_subjects_reuse_prepared_input_slices_without_generation() {
+        let source = r#"var E=(A,Q)=>()=>(A&&(Q=A(A=0)),Q);
+var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "cli.js", Some(source.to_string())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "cli.js", "cli")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(0, source.len() as u32)),
+        );
+
+        let prepared = prepare_input_rows_for_pipeline(rows);
+        let subjects = subject_modules_from_prepared_rows(&prepared.rows, &BTreeSet::new());
+
+        assert!(
+            subjects.iter().any(|subject| {
+                subject.module_id == 1
+                    && subject.source.contains("distinct-anchor")
+                    && !subject.source.contains("var E=")
+            }),
+            "module-only matching must consume reverts-bundle's prepared module slice, got {subjects:#?}"
         );
     }
 
@@ -2814,6 +3062,25 @@ mod tests {
             matched.normalized_anchor
         );
         assert_eq!(matched.tier, MatchTier::Low);
+    }
+
+    #[test]
+    fn reciprocal_rare_anchor_match_promotes_large_split_module() {
+        assert_eq!(
+            calibrate_tier(MatchTier::Low, 0.05, true, 25.0, 0.12),
+            MatchTier::Medium,
+            "reciprocal-best plus substantial rare-anchor mass should recover large split modules"
+        );
+        assert_eq!(
+            calibrate_tier(MatchTier::Low, 1.0, false, 25.0, 0.12),
+            MatchTier::Low,
+            "the reciprocal-best guard prevents raw rare-anchor mass from promoting hub-like matches"
+        );
+        assert_eq!(
+            calibrate_tier(MatchTier::Low, 0.05, true, 25.0, 0.03),
+            MatchTier::Low,
+            "reciprocal matches still need a non-trivial normalized overlap"
+        );
     }
 
     #[test]

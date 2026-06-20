@@ -365,6 +365,7 @@ fn encode_function_id(fn_id: &FunctionId) -> u64 {
 /// `collect_remaining_axes` without the exclusion filter.
 fn axes_to_feature_keys(axes: &AxisHashes) -> Vec<(AxisKind, u64)> {
     let mut out = vec![
+        (AxisKind::NormalizedCfg, axes.normalized_cfg),
         (AxisKind::ReturnPattern, axes.return_pattern),
         (AxisKind::EffectPattern, axes.effect_pattern),
         (AxisKind::StructuralAnchor, axes.structural_anchor),
@@ -387,6 +388,9 @@ fn axes_to_feature_keys(axes: &AxisHashes) -> Vec<(AxisKind, u64)> {
     }
     if let Some(h) = axes.literal_shape {
         out.push((AxisKind::LiteralShape, h));
+    }
+    if let Some(h) = axes.expression_shape {
+        out.push((AxisKind::ExpressionShape, h));
     }
     out
 }

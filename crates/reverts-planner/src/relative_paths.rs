@@ -5,7 +5,7 @@
 //! needs to import another, the resulting specifier has to be a
 //! relative path expressed in POSIX form because it ends up inside an
 //! `import` literal. `relative_import_specifier` does that with one
-//! additional convention: a recovered `.ts` filename on the *target*
+//! additional convention: a recovered `.ts`/`.tsx` filename on the *target*
 //! is rewritten to `.js` because the emitted runtime treats the
 //! generated file as JavaScript source for `import` resolution.
 //!
@@ -49,7 +49,9 @@ fn path_file_segments_with_js_extension(path: &str) -> Vec<String> {
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     if let Some(last) = segments.last_mut()
-        && let Some(stripped) = last.strip_suffix(".ts")
+        && let Some(stripped) = last
+            .strip_suffix(".tsx")
+            .or_else(|| last.strip_suffix(".ts"))
     {
         *last = format!("{stripped}.js");
     }
@@ -61,4 +63,21 @@ fn common_prefix_len(left: &[String], right: &[String]) -> usize {
         .zip(right)
         .take_while(|(left, right)| left == right)
         .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relative_import_specifier;
+
+    #[test]
+    fn target_ts_and_tsx_extensions_are_rewritten_for_runtime_imports() {
+        assert_eq!(
+            relative_import_specifier("modules/entrypoint.ts", "components/Button.ts"),
+            "../components/Button.js"
+        );
+        assert_eq!(
+            relative_import_specifier("modules/entrypoint.ts", "components/Button.tsx"),
+            "../components/Button.js"
+        );
+    }
 }
