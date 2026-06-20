@@ -923,6 +923,12 @@ fn write_match_summary_if_requested(
         .map(|plan| plan.matched.file_path.as_str())
         .collect::<BTreeSet<_>>()
         .len();
+    let accepted_rule_counts = match_rule_counts(
+        plans
+            .iter()
+            .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
+            .map(|plan| &plan.matched),
+    );
     let match_rate = if subject_count == 0 {
         0.0
     } else {
@@ -942,6 +948,7 @@ fn write_match_summary_if_requested(
             "medium": medium,
             "low": low,
         },
+        "accepted_rule_counts": accepted_rule_counts,
         "distinct_reference_files": distinct_reference_files,
         "module_only": args.module_only,
     });
@@ -1103,6 +1110,7 @@ fn low_boundary_row_json(
         "collision_group": collision_group,
         "shared_anchors": shared_anchor_statistics_json(plan),
         "source_score": source_score_json(matched.source_score),
+        "rule_tags": match_rule_tags(matched),
         "metrics": {
             "margin": matched.margin,
             "reciprocal_best": matched.reciprocal_best,
@@ -1535,6 +1543,69 @@ fn source_score_json(score: SourceEvidenceScore) -> serde_json::Value {
         "anchor_cooccurrence_overlap": score.anchor_cooccurrence_overlap,
         "anchor_cooccurrence_jaccard": score.anchor_cooccurrence_jaccard,
     })
+}
+
+fn match_rule_counts<'a>(matches: impl Iterator<Item = &'a ModuleMatch>) -> Vec<serde_json::Value> {
+    let mut counts = BTreeMap::<&'static str, usize>::new();
+    for matched in matches {
+        for tag in match_rule_tags(matched) {
+            *counts.entry(tag).or_default() += 1;
+        }
+    }
+    let mut rows = counts.into_iter().collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    rows.into_iter()
+        .map(|(rule, count)| {
+            serde_json::json!({
+                "rule": rule,
+                "count": count,
+            })
+        })
+        .collect()
+}
+
+fn match_rule_tags(matched: &ModuleMatch) -> Vec<&'static str> {
+    let mut tags = Vec::new();
+    if matched.asset_overlap > 0 {
+        tags.push("asset");
+    }
+    if matched.anchor_overlap > 0 || matched.weighted_anchor > 0.0 {
+        tags.push("string_anchor");
+    }
+    if matched.source_score.unique_string_anchor_overlap > 0 {
+        tags.push("unique_string_anchor");
+    }
+    if matched.source_score.anchor_cooccurrence_overlap > 0 {
+        tags.push("anchor_cooccurrence");
+    }
+    if matched.source_score.jsx_react_shape_overlap > 0 {
+        tags.push("jsx_react_shape");
+    }
+    if matched.source_score.function_axis_overlap > 0 || matched.function_overlap > 0 {
+        tags.push("function_axis");
+    }
+    if granular_match_overlap(matched) > 0 {
+        tags.push("multi_granular_hash");
+    }
+    if matched.import_export_surface_overlap > 0 {
+        tags.push("import_export_surface");
+    }
+    if matched.class_member_overlap > 0 {
+        tags.push("object_class_shape");
+    }
+    if matched.top_level_declaration_overlap > 0 {
+        tags.push("top_level_ts_shape");
+    }
+    if matched.structural_score > 0.0 {
+        tags.push("structural_score");
+    }
+    if matched.graph_support > 0 || matched.graph_structure.role_match {
+        tags.push("graph");
+    }
+    if matched.reciprocal_best {
+        tags.push("reciprocal_best");
+    }
+    tags
 }
 
 fn graph_structure_json(evidence: GraphStructureEvidence) -> serde_json::Value {

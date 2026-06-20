@@ -15,14 +15,16 @@ use oxc_ast::{
         ClassElement, Declaration, ExportAllDeclaration, ExportDefaultDeclaration,
         ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, FunctionBody,
         ImportDeclaration, ImportDeclarationSpecifier, ImportExpression, MethodDefinitionKind,
-        ObjectExpression, Program, Statement, SwitchStatement, TemplateElement,
+        ObjectExpression, Program, Statement, StaticMemberExpression, SwitchStatement,
+        TSEnumDeclaration, TSEnumMemberName, TSInterfaceDeclaration, TSSignature, TSType,
+        TSTypeAliasDeclaration, TSTypeName, TemplateElement,
     },
     visit::walk::{
         walk_assignment_expression, walk_block_statement, walk_call_expression, walk_class,
         walk_export_all_declaration, walk_export_default_declaration,
         walk_export_named_declaration, walk_function_body, walk_import_declaration,
-        walk_import_expression, walk_object_expression, walk_switch_statement,
-        walk_template_element,
+        walk_import_expression, walk_object_expression, walk_static_member_expression,
+        walk_switch_statement, walk_template_element,
     },
 };
 use oxc_parser::Parser;
@@ -243,6 +245,8 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
                 for member in members {
                     self.record_export_member_anchor(member.as_str());
                 }
+            } else if commonjs_module_exports_target(&expression.left) {
+                self.record_export_default_surface_shape("commonjs-default");
             }
             if let Some(member) = prototype_assignment_property_name(&expression.left) {
                 self.record_prototype_member_anchor(member.as_str());
@@ -265,7 +269,21 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
             self.record_export_member_anchor(exported.as_str());
             self.record_commonjs_export_surface_anchor(exported.as_str());
         }
+        self.record_zod_shape_anchor(call);
         walk_call_expression(self, call);
+    }
+
+    fn visit_static_member_expression(&mut self, expression: &StaticMemberExpression<'a>) {
+        if let Expression::CallExpression(call) = &expression.object
+            && expression_identifier(&call.callee) == Some("require")
+            && let Some(Argument::StringLiteral(source)) = call.arguments.first()
+        {
+            self.record_import_member_surface_anchor(
+                source.value.as_str(),
+                expression.property.name.as_str(),
+            );
+        }
+        walk_static_member_expression(self, expression);
     }
 
     fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
@@ -437,6 +455,10 @@ impl FingerprintVisitor<'_> {
             match specifier {
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => {
                     parts.insert("default".to_string());
+                    self.record_import_member_surface_anchor(
+                        declaration.source.value.as_str(),
+                        "default",
+                    );
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {
                     parts.insert("namespace".to_string());
@@ -444,6 +466,10 @@ impl FingerprintVisitor<'_> {
                 ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
                     if let Some(imported) = module_export_name(&specifier.imported) {
                         parts.insert(format!("named:{imported}"));
+                        self.record_import_member_surface_anchor(
+                            declaration.source.value.as_str(),
+                            imported,
+                        );
                     }
                 }
             }
@@ -488,12 +514,16 @@ impl FingerprintVisitor<'_> {
         &mut self,
         _declaration: &ExportDefaultDeclaration<'_>,
     ) {
+        self.record_export_default_surface_shape("default");
+    }
+
+    fn record_export_default_surface_shape(&mut self, kind: &str) {
         self.fingerprint
             .surface_anchors
             .insert("export-surface:local:default".to_string());
         self.fingerprint
             .surface_anchors
-            .insert("export-surface-shape:default".to_string());
+            .insert(format!("export-surface-shape:{kind}"));
     }
 
     fn record_export_all_surface_anchor(&mut self, declaration: &ExportAllDeclaration<'_>) {
@@ -520,6 +550,18 @@ impl FingerprintVisitor<'_> {
         self.fingerprint
             .surface_anchors
             .insert(format!("import-surface-shape:{kind}"));
+    }
+
+    fn record_import_member_surface_anchor(&mut self, source: &str, member: &str) {
+        if !is_usable_export_member(member) {
+            return;
+        }
+        self.fingerprint
+            .surface_anchors
+            .insert(format!("import-surface:{source}:named:{member}"));
+        self.fingerprint
+            .surface_anchors
+            .insert(format!("import-member-shape:named:{member}"));
     }
 
     fn record_commonjs_export_surface_anchor(&mut self, member: &str) {
@@ -603,6 +645,40 @@ impl FingerprintVisitor<'_> {
         self.fingerprint
             .string_anchors
             .insert(format!("object-shape:{shape}"));
+    }
+
+    fn record_zod_shape_anchor(&mut self, call: &CallExpression<'_>) {
+        let Some(callee) = expression_member_chain_name(&call.callee) else {
+            return;
+        };
+        let Some(kind) = callee.strip_prefix("z.") else {
+            return;
+        };
+        self.fingerprint
+            .string_anchors
+            .insert(format!("zod-call:{kind}"));
+        if kind == "object"
+            && let Some(Argument::ObjectExpression(object)) = call.arguments.first()
+        {
+            let keys = object_expression_static_keys(object)
+                .into_iter()
+                .filter(|key| is_usable_object_shape_key(key.as_str()))
+                .collect::<BTreeSet<_>>();
+            if keys.len() >= 2 {
+                let shape = keys
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                self.fingerprint
+                    .string_anchors
+                    .insert(format!("zod-object-shape:{shape}"));
+                let hash = stable_hash(shape.as_bytes());
+                self.fingerprint
+                    .class_member_hashes
+                    .insert(format!("zod-object-member-multiset:{}:{hash}", keys.len()));
+            }
+        }
     }
 
     fn record_class_shape_anchor(&mut self, class: &Class<'_>) {
@@ -1111,11 +1187,9 @@ fn top_level_declaration_shape(statement: &Statement<'_>) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join(",")
         )),
-        Statement::TSTypeAliasDeclaration(_) => Some("type_alias".to_string()),
-        Statement::TSInterfaceDeclaration(_) => Some("interface".to_string()),
-        Statement::TSEnumDeclaration(declaration) => {
-            Some(format!("enum:members={}", declaration.members.len()))
-        }
+        Statement::TSTypeAliasDeclaration(declaration) => Some(type_alias_shape(declaration)),
+        Statement::TSInterfaceDeclaration(declaration) => Some(interface_shape(declaration)),
+        Statement::TSEnumDeclaration(declaration) => Some(enum_shape(declaration)),
         Statement::TSModuleDeclaration(_) => Some("module".to_string()),
         Statement::TSImportEqualsDeclaration(_) => Some("import_equals".to_string()),
         Statement::ExportNamedDeclaration(declaration) => declaration
@@ -1163,11 +1237,9 @@ fn declaration_shape(declaration: &Declaration<'_>) -> String {
         ),
         Declaration::FunctionDeclaration(function) => function_shape(function),
         Declaration::ClassDeclaration(class) => class_declaration_shape(class),
-        Declaration::TSTypeAliasDeclaration(_) => "type_alias".to_string(),
-        Declaration::TSInterfaceDeclaration(_) => "interface".to_string(),
-        Declaration::TSEnumDeclaration(declaration) => {
-            format!("enum:members={}", declaration.members.len())
-        }
+        Declaration::TSTypeAliasDeclaration(declaration) => type_alias_shape(declaration),
+        Declaration::TSInterfaceDeclaration(declaration) => interface_shape(declaration),
+        Declaration::TSEnumDeclaration(declaration) => enum_shape(declaration),
         Declaration::TSModuleDeclaration(_) => "module".to_string(),
         Declaration::TSImportEqualsDeclaration(_) => "import_equals".to_string(),
     }
@@ -1199,6 +1271,157 @@ fn class_declaration_shape(class: &Class<'_>) -> String {
         "class:members={}:methods={method_count}:properties={property_count}",
         class.body.body.len()
     )
+}
+
+fn enum_shape(declaration: &TSEnumDeclaration<'_>) -> String {
+    let mut members = declaration
+        .members
+        .iter()
+        .filter_map(|member| enum_member_name(&member.id))
+        .filter(|member| is_usable_object_shape_key(member))
+        .collect::<Vec<_>>();
+    members.sort();
+    if members.is_empty() {
+        format!("enum:members={}", declaration.members.len())
+    } else {
+        format!(
+            "enum:const={}:members={}:{}",
+            u8::from(declaration.r#const),
+            members.len(),
+            members.join(",")
+        )
+    }
+}
+
+fn enum_member_name(name: &TSEnumMemberName<'_>) -> Option<String> {
+    match name {
+        TSEnumMemberName::Identifier(identifier) => Some(identifier.name.to_string()),
+        TSEnumMemberName::String(literal) => Some(literal.value.to_string()),
+    }
+}
+
+fn interface_shape(declaration: &TSInterfaceDeclaration<'_>) -> String {
+    let members = ts_signature_members(&declaration.body.body);
+    if members.is_empty() {
+        format!("interface:members={}", declaration.body.body.len())
+    } else {
+        format!(
+            "interface:extends={}:members={}:{}",
+            declaration.extends.as_ref().map_or(0, |items| items.len()),
+            members.len(),
+            members.join(",")
+        )
+    }
+}
+
+fn type_alias_shape(declaration: &TSTypeAliasDeclaration<'_>) -> String {
+    format!("type_alias:{}", ts_type_shape(&declaration.type_annotation))
+}
+
+fn ts_signature_members(signatures: &[TSSignature<'_>]) -> Vec<String> {
+    let mut members = signatures
+        .iter()
+        .filter_map(|signature| match signature {
+            TSSignature::TSPropertySignature(property) => {
+                let name = static_property_key_name(&property.key)?;
+                is_usable_object_shape_key(&name).then(|| {
+                    format!(
+                        "prop:{}{}:{}",
+                        if property.optional { "?" } else { "" },
+                        name,
+                        property
+                            .type_annotation
+                            .as_ref()
+                            .map(|annotation| ts_type_shape(&annotation.type_annotation))
+                            .unwrap_or_else(|| "unknown".to_string())
+                    )
+                })
+            }
+            TSSignature::TSMethodSignature(method) => {
+                let name = static_property_key_name(&method.key)?;
+                is_usable_object_shape_key(&name)
+                    .then(|| format!("method:{name}:params={}", method.params.items.len()))
+            }
+            TSSignature::TSIndexSignature(_) => Some("index".to_string()),
+            TSSignature::TSCallSignatureDeclaration(call) => {
+                Some(format!("call:params={}", call.params.items.len()))
+            }
+            TSSignature::TSConstructSignatureDeclaration(construct) => {
+                Some(format!("construct:params={}", construct.params.items.len()))
+            }
+        })
+        .collect::<Vec<_>>();
+    members.sort();
+    members
+}
+
+fn ts_type_shape(ty: &TSType<'_>) -> String {
+    match ty {
+        TSType::TSStringKeyword(_) => "string".to_string(),
+        TSType::TSNumberKeyword(_) => "number".to_string(),
+        TSType::TSBooleanKeyword(_) => "boolean".to_string(),
+        TSType::TSNullKeyword(_) => "null".to_string(),
+        TSType::TSUndefinedKeyword(_) => "undefined".to_string(),
+        TSType::TSAnyKeyword(_) => "any".to_string(),
+        TSType::TSUnknownKeyword(_) => "unknown".to_string(),
+        TSType::TSVoidKeyword(_) => "void".to_string(),
+        TSType::TSTypeReference(reference) => {
+            format!("ref:{}", ts_type_name_shape(&reference.type_name))
+        }
+        TSType::TSArrayType(array) => format!("array:{}", ts_type_shape(&array.element_type)),
+        TSType::TSUnionType(union) => {
+            let mut parts = union.types.iter().map(ts_type_shape).collect::<Vec<_>>();
+            parts.sort();
+            let literal_count = union
+                .types
+                .iter()
+                .filter(|item| matches!(item, TSType::TSLiteralType(_)))
+                .count();
+            format!("union:literals={literal_count}:{}", parts.join("|"))
+        }
+        TSType::TSIntersectionType(intersection) => {
+            let mut parts = intersection
+                .types
+                .iter()
+                .map(ts_type_shape)
+                .collect::<Vec<_>>();
+            parts.sort();
+            format!("intersection:{}", parts.join("&"))
+        }
+        TSType::TSLiteralType(literal) => match &literal.literal {
+            oxc_ast::ast::TSLiteral::StringLiteral(value) => {
+                format!("literal:string:{}", value.value)
+            }
+            oxc_ast::ast::TSLiteral::BooleanLiteral(value) => {
+                format!("literal:boolean:{}", value.value)
+            }
+            oxc_ast::ast::TSLiteral::NumericLiteral(_) => "literal:number".to_string(),
+            _ => "literal".to_string(),
+        },
+        TSType::TSTypeLiteral(literal) => {
+            let members = ts_signature_members(&literal.members);
+            format!(
+                "type_literal:members={}:{}",
+                members.len(),
+                members.join(",")
+            )
+        }
+        TSType::TSParenthesizedType(parenthesized) => ts_type_shape(&parenthesized.type_annotation),
+        _ => "other".to_string(),
+    }
+}
+
+fn ts_type_name_shape(name: &TSTypeName<'_>) -> String {
+    match name {
+        TSTypeName::IdentifierReference(identifier) => identifier.name.to_string(),
+        TSTypeName::QualifiedName(qualified) => {
+            format!(
+                "{}.{}",
+                ts_type_name_shape(&qualified.left),
+                qualified.right.name
+            )
+        }
+    }
 }
 
 fn binding_pattern_shape(pattern: &BindingPattern<'_>) -> &'static str {
@@ -1463,6 +1686,20 @@ fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> 
     }
 }
 
+fn expression_member_chain_name(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+        Expression::StaticMemberExpression(member) => {
+            let object = expression_member_chain_name(&member.object)?;
+            Some(format!("{}.{}", object, member.property.name))
+        }
+        Expression::ParenthesizedExpression(parenthesized) => {
+            expression_member_chain_name(&parenthesized.expression)
+        }
+        _ => None,
+    }
+}
+
 fn import_surface_shape(parts: &BTreeSet<String>) -> String {
     let default = usize::from(parts.contains("default"));
     let namespace = usize::from(parts.contains("namespace"));
@@ -1577,6 +1814,27 @@ mod tests {
     }
 
     #[test]
+    fn surface_hashes_align_require_member_and_named_import() {
+        let cjs = fingerprint_source("a.cjs", "const readFile = require('fs').readFile;")
+            .expect("cjs fingerprint");
+        let esm =
+            fingerprint_source("b.ts", "import { readFile } from 'fs';").expect("esm fingerprint");
+        assert!(
+            !cjs.import_export_surface_hashes
+                .is_disjoint(&esm.import_export_surface_hashes),
+            "require('x').member should share import-member surface with named import"
+        );
+
+        let default_export = ast_fingerprint("c.cjs", "module.exports = function run() {};")
+            .expect("ast fingerprint");
+        assert!(
+            default_export
+                .surface_anchors
+                .contains("export-surface:local:default")
+        );
+    }
+
+    #[test]
     fn surface_shape_hashes_abstract_over_source_and_order() {
         let left = fingerprint_source("a.ts", "import { a, b } from './local'; export { a, b };")
             .expect("left fingerprint");
@@ -1600,6 +1858,47 @@ mod tests {
                 .expect("right fingerprint");
         assert_eq!(left.class_member_hashes, right.class_member_hashes);
         assert!(!left.class_member_hashes.is_empty());
+    }
+
+    #[test]
+    fn typescript_object_shapes_capture_enum_interface_and_zod_schema() {
+        let left = fingerprint_source(
+            "a.ts",
+            r#"
+            enum Mode { Fast = "fast", Slow = "slow" }
+            interface Config { accessToken: string; refreshToken?: string; expiresAt: number }
+            type Status = "ready" | "blocked" | "done";
+            const schema = z.object({ accessToken: z.string(), refreshToken: z.string(), expiresAt: z.number() });
+            "#,
+        )
+        .expect("left fingerprint");
+        let right = fingerprint_source(
+            "b.ts",
+            r#"
+            enum Mode { Slow = "slow", Fast = "fast" }
+            interface Config { expiresAt: number; refreshToken?: string; accessToken: string }
+            type Status = "done" | "ready" | "blocked";
+            const schema = z.object({ expiresAt: z.number(), accessToken: z.string(), refreshToken: z.string() });
+            "#,
+        )
+        .expect("right fingerprint");
+        assert!(
+            !left
+                .top_level_declaration_hashes
+                .is_disjoint(&right.top_level_declaration_hashes),
+            "TS enum/interface/type surface should ignore declaration member ordering"
+        );
+        assert!(
+            !left
+                .class_member_hashes
+                .is_disjoint(&right.class_member_hashes),
+            "zod object key-set should produce an order-insensitive shape hash"
+        );
+        assert!(
+            left.string_anchors
+                .iter()
+                .any(|anchor| anchor.starts_with("zod-object-shape:"))
+        );
     }
 
     #[test]
