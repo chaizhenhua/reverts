@@ -84,6 +84,10 @@ fn plan_modules(
     let reference_best_subjects =
         best_subject_by_reference(subjects, index, &structural_support, &graph_support);
     let mut plans = Vec::new();
+    // Parallel to `plans`: the string anchors each subject shares with its
+    // matched reference file. Used to allow many-to-one assignment when esbuild
+    // split one source file into modules covering DISJOINT parts.
+    let mut shared_anchors: Vec<BTreeSet<String>> = Vec::new();
     for subject in subjects {
         let subject_structural_support = structural_support.get(&subject.module_id);
         let subject_graph_support = graph_support.get(&subject.module_id);
@@ -97,11 +101,22 @@ fn plan_modules(
         ) else {
             continue;
         };
-        let reference_exports = index
+        let reference_module = index
             .modules
             .iter()
-            .find(|m| m.file_path == matched.file_path)
+            .find(|m| m.file_path == matched.file_path);
+        let reference_exports = reference_module
             .map(|m| m.export_names.clone())
+            .unwrap_or_default();
+        let anchors = reference_module
+            .map(|m| {
+                subject
+                    .fingerprint
+                    .string_anchors
+                    .intersection(&m.fingerprint.string_anchors)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
         plans.push(ModulePlan {
             module_id: subject.module_id,
@@ -112,18 +127,28 @@ fn plan_modules(
             subject_bindings: subject.bindings.clone(),
             reference_exports,
         });
+        shared_anchors.push(anchors);
     }
-    calibrate_global_reference_uniqueness(&mut plans);
+    calibrate_global_reference_uniqueness(&mut plans, &shared_anchors);
     plans.sort_by(|a, b| a.module_id.cmp(&b.module_id));
     Ok(plans)
 }
 
-/// Injective 1:1 assignment: a reference file may anchor at most one Medium
-/// match. When iteration/propagation converges several subject modules onto one
-/// file (e.g. four modules all claiming `ElicitationDialog.tsx`), keep the
-/// single strongest and demote the rest to Low. Strength order: reciprocal-best,
-/// then content (`normalized_anchor`), then graph support, then margin.
-fn calibrate_global_reference_uniqueness(plans: &mut [ModulePlan]) {
+/// Near-injective assignment with a many-to-one escape hatch for esbuild
+/// splits. Normally a reference file anchors one Medium match: when several
+/// subject modules converge on one file, keep the strongest and demote the
+/// rest. BUT esbuild often splits one source file into multiple emitted
+/// modules covering DISJOINT parts; such modules share *different*, non-empty
+/// anchor sets with the file. So after keeping the strongest, also keep any
+/// competitor whose shared-anchor set is disjoint from every already-kept
+/// member AND that is independently strong (reciprocal-best or high content
+/// overlap). The "six modules all claiming utils/debug.ts" false-positive case
+/// is excluded: those share the SAME few common anchors (not disjoint) and have
+/// weak content, so they still demote. `shared_anchors[i]` parallels `plans[i]`.
+fn calibrate_global_reference_uniqueness(
+    plans: &mut [ModulePlan],
+    shared_anchors: &[BTreeSet<String>],
+) {
     let mut medium_by_reference = BTreeMap::<String, Vec<usize>>::new();
     for (index, plan) in plans.iter().enumerate() {
         if plan.matched.tier == MatchTier::Medium {
@@ -137,19 +162,31 @@ fn calibrate_global_reference_uniqueness(plans: &mut [ModulePlan]) {
         if indices.len() <= 1 {
             continue;
         }
-        let Some(&keep) = indices.iter().max_by(|&&a, &&b| {
+        // Strongest first: reciprocal-best, then content, then graph, then margin.
+        let mut ordered = indices.clone();
+        ordered.sort_by(|&a, &b| {
             let left = &plans[a].matched;
             let right = &plans[b].matched;
-            left.reciprocal_best
-                .cmp(&right.reciprocal_best)
-                .then(left.normalized_anchor.total_cmp(&right.normalized_anchor))
-                .then(left.graph_support.cmp(&right.graph_support))
-                .then(left.margin.total_cmp(&right.margin))
-        }) else {
-            continue;
-        };
-        for &index in indices {
-            if index != keep {
+            right
+                .reciprocal_best
+                .cmp(&left.reciprocal_best)
+                .then(right.normalized_anchor.total_cmp(&left.normalized_anchor))
+                .then(right.graph_support.cmp(&left.graph_support))
+                .then(right.margin.total_cmp(&left.margin))
+        });
+        let mut kept_anchors: Vec<&BTreeSet<String>> = Vec::new();
+        for &index in &ordered {
+            let anchors = &shared_anchors[index];
+            let matched = &plans[index].matched;
+            let independently_strong =
+                matched.reciprocal_best || matched.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR;
+            let covers_distinct_part =
+                !anchors.is_empty() && kept_anchors.iter().all(|kept| kept.is_disjoint(anchors));
+            if kept_anchors.is_empty() {
+                kept_anchors.push(anchors); // strongest is always kept
+            } else if covers_distinct_part && independently_strong {
+                kept_anchors.push(anchors); // esbuild split: a different part of the file
+            } else {
                 plans[index].matched.tier = MatchTier::Low;
             }
         }
@@ -2102,7 +2139,9 @@ mod tests {
         let unique = make_plan(5, "components/unique", MatchTier::Medium);
 
         let mut plans = vec![reciprocal, hub_duplicate, graph_strong, graph_weak, unique];
-        calibrate_global_reference_uniqueness(&mut plans);
+        // Empty shared-anchors -> no esbuild-split exception -> classic injective.
+        let anchors = vec![BTreeSet::new(); plans.len()];
+        calibrate_global_reference_uniqueness(&mut plans, &anchors);
 
         assert_eq!(plans[0].matched.tier, MatchTier::Medium, "reciprocal kept");
         assert_eq!(
@@ -2121,6 +2160,41 @@ mod tests {
             "weaker graph duplicate demoted (injective 1:1)"
         );
         assert_eq!(plans[4].matched.tier, MatchTier::Medium, "unique untouched");
+    }
+
+    #[test]
+    fn many_to_one_keeps_disjoint_strong_split_modules() {
+        // Two modules both match split.ts; their shared-anchor sets are DISJOINT
+        // (esbuild split it into two parts) and both are independently strong ->
+        // both kept. A third module shares the SAME anchors as the first and is
+        // weak -> demoted.
+        let mut a = make_plan(1, "split", MatchTier::Medium);
+        a.matched.reciprocal_best = true;
+        a.matched.normalized_anchor = 0.4;
+        let mut b = make_plan(2, "split", MatchTier::Medium);
+        b.matched.reciprocal_best = false;
+        b.matched.normalized_anchor = 0.3; // independently strong (>=0.18)
+        let mut c = make_plan(3, "split", MatchTier::Medium);
+        c.matched.normalized_anchor = 0.05; // weak, overlapping anchors -> demote
+        let mut plans = vec![a, b, c];
+        let anchors = vec![
+            BTreeSet::from(["alpha".to_string(), "beta".to_string()]),
+            BTreeSet::from(["gamma".to_string(), "delta".to_string()]), // disjoint from a
+            BTreeSet::from(["alpha".to_string()]),                      // overlaps a
+        ];
+        calibrate_global_reference_uniqueness(&mut plans, &anchors);
+        // a is strongest (reciprocal) -> kept; b disjoint+strong -> kept; c overlaps -> demoted.
+        assert_eq!(plans[0].matched.tier, MatchTier::Medium, "strongest kept");
+        assert_eq!(
+            plans[1].matched.tier,
+            MatchTier::Medium,
+            "disjoint split kept"
+        );
+        assert_eq!(
+            plans[2].matched.tier,
+            MatchTier::Low,
+            "overlapping weak demoted"
+        );
     }
 
     #[test]
