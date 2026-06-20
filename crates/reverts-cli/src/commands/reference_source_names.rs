@@ -74,6 +74,9 @@ pub struct ReferenceSourceNamesArgs {
     /// Write a machine-readable module match summary.
     #[arg(long)]
     pub summary_json: Option<PathBuf>,
+    /// Write Low/Medium boundary diagnostics for tuning source matching.
+    #[arg(long)]
+    pub diagnostics_json: Option<PathBuf>,
 }
 
 impl ReferenceSourceNamesArgs {
@@ -310,6 +313,7 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     }
 
     write_match_summary_if_requested(&args, subjects.len(), &plans)?;
+    write_match_diagnostics_if_requested(&args, subjects.len(), &plans)?;
 
     if args.module_only {
         if args.apply {
@@ -702,6 +706,237 @@ fn write_match_summary_if_requested(
         path: path.clone(),
         source,
     })
+}
+
+fn write_match_diagnostics_if_requested(
+    args: &ReferenceSourceNamesArgs,
+    subject_count: usize,
+    plans: &[ModulePlan],
+) -> Result<(), CliRunError> {
+    let Some(path) = &args.diagnostics_json else {
+        return Ok(());
+    };
+    let mut reason_counts = BTreeMap::<&'static str, usize>::new();
+    let mut low_rows = plans
+        .iter()
+        .filter(|plan| plan.matched.tier == MatchTier::Low)
+        .map(|plan| {
+            let reason = low_boundary_reason(&plan.matched);
+            *reason_counts.entry(reason).or_default() += 1;
+            (low_medium_closeness(&plan.matched), reason, plan)
+        })
+        .collect::<Vec<_>>();
+    low_rows.sort_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.2.module_id.cmp(&right.2.module_id))
+    });
+    let near_medium = low_rows
+        .iter()
+        .filter(|(closeness, _reason, _plan)| *closeness >= 0.80)
+        .count();
+    let accepted = plans
+        .iter()
+        .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
+        .count();
+    let reason_counts_json = reason_counts
+        .iter()
+        .map(|(reason, count)| {
+            serde_json::json!({
+                "reason": reason,
+                "count": count,
+            })
+        })
+        .collect::<Vec<_>>();
+    let low_details = low_rows
+        .iter()
+        .map(|(closeness, reason, plan)| low_boundary_row_json(plan, reason, *closeness))
+        .collect::<Vec<_>>();
+    let summary = serde_json::json!({
+        "subject_modules": subject_count,
+        "planned_matches": plans.len(),
+        "accepted_matches": accepted,
+        "low_matches": low_rows.len(),
+        "near_medium_low_matches": near_medium,
+        "min_tier": match args.min_tier {
+            MinTier::High => "high",
+            MinTier::Medium => "medium",
+        },
+        "module_only": args.module_only,
+        "thresholds": {
+            "medium_weighted_anchor": MEDIUM_WEIGHTED_ANCHOR,
+            "medium_normalized_anchor": MEDIUM_NORMALIZED_ANCHOR,
+            "medium_score_margin": MEDIUM_SCORE_MARGIN,
+            "medium_strong_normalized_anchor": MEDIUM_STRONG_NANCHOR,
+            "medium_reciprocal_weighted_anchor": MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR,
+            "medium_reciprocal_normalized_anchor": MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR,
+            "medium_structural_score": MEDIUM_STRUCTURAL_SCORE,
+            "medium_structural_weighted_anchor": MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR,
+            "medium_structural_normalized_anchor": MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR,
+            "medium_content_normalized_floor": MEDIUM_CONTENT_NORMALIZED_FLOOR,
+        },
+        "reason_counts": reason_counts_json,
+        "low_matches_by_closeness": low_details,
+    });
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|source| CliRunError::WriteOutput {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&summary)
+            .expect("reference source match diagnostics are serializable"),
+    )
+    .map_err(|source| CliRunError::WriteOutput {
+        path: path.clone(),
+        source,
+    })
+}
+
+fn low_boundary_row_json(
+    plan: &ModulePlan,
+    reason: &'static str,
+    closeness: f64,
+) -> serde_json::Value {
+    let matched = &plan.matched;
+    serde_json::json!({
+        "module_id": plan.module_id,
+        "subject_path": plan.subject_path,
+        "reference_file": matched.file_path,
+        "reason": reason,
+        "closeness_to_medium": closeness,
+        "metrics": {
+            "margin": matched.margin,
+            "reciprocal_best": matched.reciprocal_best,
+            "anchor_overlap": matched.anchor_overlap,
+            "weighted_anchor": matched.weighted_anchor,
+            "normalized_anchor": matched.normalized_anchor,
+            "asset_overlap": matched.asset_overlap,
+            "export_overlap": matched.export_overlap,
+            "function_overlap": matched.function_overlap,
+            "structural_score": matched.structural_score,
+            "graph_support": matched.graph_support,
+            "graph_known_edges": matched.graph_known_edges,
+        },
+        "shortfalls": {
+            "strong_normalized_anchor": positive_shortfall(MEDIUM_STRONG_NANCHOR, matched.normalized_anchor),
+            "weighted_anchor": positive_shortfall(MEDIUM_WEIGHTED_ANCHOR, matched.weighted_anchor),
+            "normalized_anchor": positive_shortfall(MEDIUM_NORMALIZED_ANCHOR, matched.normalized_anchor),
+            "reciprocal_weighted_anchor": positive_shortfall(MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR, matched.weighted_anchor),
+            "reciprocal_normalized_anchor": positive_shortfall(MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR, matched.normalized_anchor),
+            "content_normalized_floor": positive_shortfall(MEDIUM_CONTENT_NORMALIZED_FLOOR, matched.normalized_anchor),
+            "margin": positive_shortfall(MEDIUM_SCORE_MARGIN, matched.margin),
+        },
+    })
+}
+
+fn low_boundary_reason(matched: &ModuleMatch) -> &'static str {
+    if matched.normalized_anchor >= MEDIUM_STRONG_NANCHOR {
+        return "global_uniqueness_demoted_strong_content";
+    }
+    if matched.reciprocal_best
+        && matched.weighted_anchor >= MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR
+        && matched.normalized_anchor >= MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR
+    {
+        return "global_uniqueness_demoted_reciprocal_anchors";
+    }
+    if matched.normalized_anchor >= MEDIUM_STRONG_NANCHOR * 0.80 {
+        return "near_strong_normalized_anchor";
+    }
+    if matched.reciprocal_best {
+        if matched.weighted_anchor >= MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR {
+            return "reciprocal_normalized_anchor_shortfall";
+        }
+        if matched.normalized_anchor >= MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR {
+            return "reciprocal_weighted_anchor_shortfall";
+        }
+        return "reciprocal_anchor_shortfall";
+    }
+    if matched.weighted_anchor >= MEDIUM_WEIGHTED_ANCHOR
+        && matched.normalized_anchor < MEDIUM_NORMALIZED_ANCHOR
+    {
+        return "anchor_fraction_shortfall";
+    }
+    if matched.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR
+        && matched.weighted_anchor < MEDIUM_WEIGHTED_ANCHOR
+    {
+        return "anchor_mass_shortfall";
+    }
+    if (matched.export_overlap >= 2 || matched.function_overlap >= 2)
+        && matched.normalized_anchor < MEDIUM_CONTENT_NORMALIZED_FLOOR
+    {
+        return "content_floor_shortfall";
+    }
+    if matched.structural_score >= MEDIUM_STRUCTURAL_SCORE
+        && (matched.weighted_anchor < MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR
+            || matched.normalized_anchor < MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR)
+    {
+        return "structural_anchor_corroboration_shortfall";
+    }
+    if matched.graph_support >= MEDIUM_GRAPH_SUPPORT
+        && (matched.weighted_anchor < MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR
+            || matched.normalized_anchor < MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR)
+    {
+        return "graph_anchor_corroboration_shortfall";
+    }
+    if matched.margin < MEDIUM_SCORE_MARGIN && matched.normalized_anchor < MEDIUM_STRONG_NANCHOR {
+        return "ambiguous_runner_up_or_weak_content";
+    }
+    "insufficient_evidence"
+}
+
+fn low_medium_closeness(matched: &ModuleMatch) -> f64 {
+    let anchor_pair = ratio(matched.weighted_anchor, MEDIUM_WEIGHTED_ANCHOR)
+        .min(ratio(matched.normalized_anchor, MEDIUM_NORMALIZED_ANCHOR));
+    let reciprocal_pair = if matched.reciprocal_best {
+        ratio(matched.weighted_anchor, MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR).min(ratio(
+            matched.normalized_anchor,
+            MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR,
+        ))
+    } else {
+        0.0
+    };
+    let structural_pair = ratio(matched.structural_score, MEDIUM_STRUCTURAL_SCORE).min(
+        ratio(matched.weighted_anchor, MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR).min(ratio(
+            matched.normalized_anchor,
+            MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR,
+        )),
+    );
+    let graph_pair = ratio(matched.graph_support as f64, MEDIUM_GRAPH_SUPPORT as f64).min(
+        ratio(matched.weighted_anchor, MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR).min(ratio(
+            matched.normalized_anchor,
+            MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR,
+        )),
+    );
+    let content_floor = if matched.export_overlap >= 2 || matched.function_overlap >= 2 {
+        ratio(matched.normalized_anchor, MEDIUM_CONTENT_NORMALIZED_FLOOR)
+    } else {
+        0.0
+    };
+    ratio(matched.normalized_anchor, MEDIUM_STRONG_NANCHOR)
+        .max(anchor_pair)
+        .max(reciprocal_pair)
+        .max(structural_pair)
+        .max(graph_pair)
+        .max(content_floor)
+        .min(1.0)
+}
+
+fn ratio(value: f64, threshold: f64) -> f64 {
+    if threshold <= f64::EPSILON {
+        0.0
+    } else {
+        (value / threshold).max(0.0)
+    }
+}
+
+fn positive_shortfall(threshold: f64, value: f64) -> f64 {
+    (threshold - value).max(0.0)
 }
 
 /// One source file from the reference tree, fingerprinted for matching.
@@ -3133,6 +3368,34 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             reference_exports: std::collections::BTreeSet::new(),
         }
     }
+
+    #[test]
+    fn low_boundary_reason_reports_reciprocal_anchor_shortfalls() {
+        let mut plan = make_plan(7, "features/near", MatchTier::Low);
+        plan.matched.reciprocal_best = true;
+        plan.matched.weighted_anchor = MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR + 1.0;
+        plan.matched.normalized_anchor = MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR / 2.0;
+
+        assert_eq!(
+            low_boundary_reason(&plan.matched),
+            "reciprocal_normalized_anchor_shortfall"
+        );
+        assert!(low_medium_closeness(&plan.matched) >= 0.5);
+    }
+
+    #[test]
+    fn low_boundary_reason_reports_content_floor_shortfall() {
+        let mut plan = make_plan(8, "features/content", MatchTier::Low);
+        plan.matched.reciprocal_best = false;
+        plan.matched.function_overlap = 2;
+        plan.matched.normalized_anchor = 0.0;
+
+        assert_eq!(
+            low_boundary_reason(&plan.matched),
+            "content_floor_shortfall"
+        );
+    }
+
     fn high_plan(id: u32, name: &str) -> ModulePlan {
         make_plan(id, name, MatchTier::High)
     }
