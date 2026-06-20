@@ -13,7 +13,7 @@ use reverts_graph::{
     function_string_literals, identifier_streams,
 };
 use reverts_input::sqlite::{load_project_rows_from_connection, load_project_rows_from_sqlite};
-use reverts_input::{InputRows, ModuleDependencyTarget, PackageAttributionStatus};
+use reverts_input::{InputBundle, InputRows, ModuleDependencyTarget, PackageAttributionStatus};
 use reverts_ir::{AxisHashes, FunctionFingerprint, ModuleId};
 use reverts_js::sanitize_identifier;
 use reverts_package_matcher::{
@@ -38,6 +38,7 @@ use crate::errors::{CliError, CliRunError};
 use crate::input_externalization::load_project_bundle_with_package_externalization;
 use crate::persistence::repository::persist_module_dependencies;
 use crate::persistence::synthetic_modules::persist_prepared_synthetic_inputs;
+use crate::pkg_sources::version_resolution::best_matching_package_version_by_binary_search;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum MinTier {
@@ -746,6 +747,21 @@ fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>
         })
         .map(|attribution| attribution.module_id.0)
         .collect::<BTreeSet<_>>();
+    // Standard naming targets the non-package modules; package-owned modules are
+    // externalized (or named separately by `ownership-source-names`).
+    generate_subject_modules(bundle, |module_id| {
+        !package_owned_modules.contains(&module_id)
+    })
+}
+
+/// Generate the project and collect [`SubjectModule`]s for every emitted module
+/// the `include_module` predicate keeps. Shared by [`subject_modules`] (which
+/// keeps non-package modules) and the ownership-driven naming path (which keeps
+/// exactly the package-owned modules instead).
+fn generate_subject_modules(
+    bundle: InputBundle,
+    include_module: impl Fn(u32) -> bool,
+) -> Result<Vec<SubjectModule>, CliRunError> {
     let prepared = prepare_and_enrich(bundle)
         .map_err(|error| CliRunError::ReferenceSourceNames(format!("prepare: {error}")))?;
     let run = generate_project_from_prepared(prepared)
@@ -757,7 +773,7 @@ fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>
     // wrappers) still need source/package matching coverage.
     let mut bindings_for_path: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for entry in &run.symbol_index {
-        if package_owned_modules.contains(&entry.module_id.0) {
+        if !include_module(entry.module_id.0) {
             continue;
         }
         bindings_for_path
@@ -768,7 +784,7 @@ fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>
     let module_for_path = run
         .module_output_paths
         .iter()
-        .filter(|(module_id, _)| !package_owned_modules.contains(&module_id.0))
+        .filter(|(module_id, _)| include_module(module_id.0))
         .map(|(module_id, path)| (path.clone(), module_id.0))
         .collect::<BTreeMap<_, _>>();
 
@@ -5113,6 +5129,345 @@ fn write_module_path_overrides(
     Ok(written)
 }
 
+// ---------------------------------------------------------------------------
+// Ownership-driven package naming
+//
+// The package matcher establishes module->package@version "ownership" matches
+// that it cannot safely externalize (the inlined esbuild bundle does not prove a
+// clean single external import), so the attribution is persisted as `rejected`
+// and the ownership evidence is otherwise discarded. Those modules stay inlined
+// and decompiled, but they ARE the published source of a known package — so the
+// package source file is an authoritative naming reference for the module's
+// minified functions. This pass loads each owned module's matched package source
+// from the global cache, matches bundle functions against it with the same
+// engine `reference-source-names` uses, and writes recovered names. It is
+// completely independent of externalization: a module that can never be turned
+// into an `import` still gets `useState`/`parseSemVer`-grade names.
+// ---------------------------------------------------------------------------
+
+/// Request for [`run_ownership_source_names`].
+#[derive(Debug, Clone)]
+pub(crate) struct OwnershipNamingRequest {
+    /// Per-run input database (holds `package_attributions` + the bundle).
+    pub input: String,
+    pub project_id: u32,
+    /// Global package source cache database (`~/.reverts/.reverts.db`).
+    pub cache_db: PathBuf,
+    /// Write recovered names when true; otherwise dry-run summary only.
+    pub apply: bool,
+    /// Non-automated origin prefix so the vocabulary gate stays bypassed and
+    /// domain names like `parseSemVer` are accepted on identifier evidence.
+    pub origin_prefix: String,
+}
+
+/// One module's package-ownership match, parsed from `package_attributions`.
+#[derive(Debug, Clone)]
+struct OwnershipMatch {
+    module_id: u32,
+    package_name: String,
+    package_version: String,
+    /// Package-relative source file path (e.g. `cjs/react.development.js`), when
+    /// the match pinned a specific source file; `None` for package-only matches.
+    entry_path: Option<String>,
+}
+
+/// Build [`ReferenceFunction`]s from a single package source file. Mirrors the
+/// per-module body of [`collect_reference_functions`] for one `(file, source)`.
+fn reference_functions_from_source(file: &str, source: &str) -> Vec<ReferenceFunction> {
+    let names: BTreeMap<reverts_ir::ByteRange, String> = function_names(source)
+        .into_iter()
+        .filter(|(_, name)| is_specific_reference_name(name))
+        .collect();
+    let mut literals = function_string_literals(source);
+    let mut out = Vec::new();
+    for fingerprint in FunctionExtractor::fingerprint_primary(ModuleId(0), source) {
+        if let Some(name) = names.get(&fingerprint.id.span) {
+            let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
+            out.push(ReferenceFunction {
+                file: file.to_string(),
+                name: name.clone(),
+                fingerprint,
+                literals: function_literals,
+            });
+        }
+    }
+    out
+}
+
+/// Recover the package-relative entry path from a matcher `source_path`.
+///
+/// The matcher decorates the path, e.g.
+/// `anonymous-function-axis-source:react@19.2.4:react@19.2.4/cjs/react.development.js:score=72:...`
+/// (specific file) or `anonymous-function-axis:react@19.2.4:score=43:...`
+/// (package-only, no file). Using the separately-known `name`/`version`, locate
+/// the `name@version/` marker and read the entry path up to the next `:`.
+fn ownership_entry_path(source_path: &str, name: &str, version: &str) -> Option<String> {
+    let marker = format!("{name}@{version}/");
+    let start = source_path.find(&marker)?;
+    let rest = &source_path[start + marker.len()..];
+    let entry = rest.split(':').next().unwrap_or(rest).trim();
+    if entry.is_empty() {
+        None
+    } else {
+        Some(entry.to_string())
+    }
+}
+
+/// Read ownership matches (module + package@version + optional source file) from
+/// every `package_attributions` row whose evidence carries an `ownership_match`.
+fn load_ownership_matches(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<Vec<OwnershipMatch>, CliRunError> {
+    let map_err = |error: rusqlite::Error| CliRunError::ReferenceSourceNames(error.to_string());
+    let _ = project_id; // package_attributions is per-run, not project-scoped.
+    let mut statement = connection
+        .prepare(
+            "SELECT module_id, evidence_json FROM package_attributions \
+              WHERE evidence_json LIKE '%\"ownership_match\"%'",
+        )
+        .map_err(map_err)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(map_err)?;
+    let mut matches = Vec::new();
+    for row in rows {
+        let (module_id, evidence_json) = row.map_err(map_err)?;
+        let Ok(evidence) = serde_json::from_str::<serde_json::Value>(&evidence_json) else {
+            continue;
+        };
+        let Some(ownership) = evidence.get("ownership_match") else {
+            continue;
+        };
+        let (Some(package_name), Some(package_version)) = (
+            ownership.get("package_name").and_then(|v| v.as_str()),
+            ownership.get("package_version").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        if package_name.trim().is_empty() || package_version.trim().is_empty() {
+            continue;
+        }
+        let entry_path = ownership
+            .get("source_path")
+            .and_then(|v| v.as_str())
+            .and_then(|path| ownership_entry_path(path, package_name, package_version));
+        matches.push(OwnershipMatch {
+            module_id: u32::try_from(module_id).unwrap_or_default(),
+            package_name: package_name.to_string(),
+            package_version: package_version.to_string(),
+            entry_path,
+        });
+    }
+    Ok(matches)
+}
+
+/// Distinct cached versions for a package, parsed to semver for resolution and
+/// paired with their raw cache strings for exact lookup.
+fn cached_package_versions(
+    cache: &Connection,
+    package_name: &str,
+) -> Result<Vec<(semver::Version, String)>, CliRunError> {
+    let map_err = |error: rusqlite::Error| CliRunError::ReferenceSourceNames(error.to_string());
+    let mut statement = cache
+        .prepare(
+            "SELECT DISTINCT package_version FROM package_source_cache \
+              WHERE package_name = ?1 AND TRIM(COALESCE(package_version, '')) != ''",
+        )
+        .map_err(map_err)?;
+    let rows = statement
+        .query_map(params![package_name], |row| row.get::<_, String>(0))
+        .map_err(map_err)?;
+    let mut versions = Vec::new();
+    for row in rows {
+        let raw = row.map_err(map_err)?;
+        if let Ok(parsed) = raw.parse::<semver::Version>() {
+            versions.push((parsed, raw));
+        }
+    }
+    Ok(versions)
+}
+
+/// Cache rows `(entry_path, source_content)` for one resolved package version.
+fn cached_package_files(
+    cache: &Connection,
+    package_name: &str,
+    package_version: &str,
+) -> Result<Vec<(String, String)>, CliRunError> {
+    let map_err = |error: rusqlite::Error| CliRunError::ReferenceSourceNames(error.to_string());
+    let mut statement = cache
+        .prepare(
+            "SELECT entry_path, source_content FROM package_source_cache \
+              WHERE package_name = ?1 AND package_version = ?2 \
+                AND TRIM(COALESCE(entry_path, '')) != ''",
+        )
+        .map_err(map_err)?;
+    let rows = statement
+        .query_map(params![package_name, package_version], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(map_err)?;
+    let mut files = Vec::new();
+    for row in rows {
+        files.push(row.map_err(map_err)?);
+    }
+    Ok(files)
+}
+
+/// Largest single package source file to fingerprint. Guards against pathological
+/// cost on giant bundled entry points (e.g. the TypeScript compiler) while
+/// keeping every ordinary module file.
+const MAX_OWNERSHIP_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+
+/// `(package, requested_version) -> resolved cache version` for the owned
+/// packages, so callers can reconstruct each module's reference-file key.
+type ResolvedPackageVersions = BTreeMap<(String, String), String>;
+
+/// Build the reference-function corpus for every owned package, resolving each
+/// requested version to the best available cached version. Returns the corpus
+/// plus the resolved-version map.
+fn load_ownership_reference_corpus(
+    cache: &Connection,
+    owned: &[OwnershipMatch],
+) -> Result<(Vec<ReferenceFunction>, ResolvedPackageVersions), CliRunError> {
+    let mut requested: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for owner in owned {
+        requested
+            .entry(owner.package_name.clone())
+            .or_default()
+            .insert(owner.package_version.clone());
+    }
+
+    let mut reference_fns = Vec::new();
+    let mut resolved_by_request: ResolvedPackageVersions = BTreeMap::new();
+    let mut loaded: BTreeSet<(String, String)> = BTreeSet::new();
+
+    for (package_name, requested_versions) in &requested {
+        let available = cached_package_versions(cache, package_name)?;
+        if available.is_empty() {
+            continue;
+        }
+        let version_set: BTreeSet<semver::Version> = available
+            .iter()
+            .map(|(version, _)| version.clone())
+            .collect();
+        for requested_version in requested_versions {
+            let Some(resolved) =
+                best_matching_package_version_by_binary_search(requested_version, &version_set)
+            else {
+                continue;
+            };
+            let Some((_, resolved_raw)) =
+                available.iter().find(|(version, _)| version == &resolved)
+            else {
+                continue;
+            };
+            resolved_by_request.insert(
+                (package_name.clone(), requested_version.clone()),
+                resolved_raw.clone(),
+            );
+            if !loaded.insert((package_name.clone(), resolved_raw.clone())) {
+                continue;
+            }
+            for (entry_path, source) in cached_package_files(cache, package_name, resolved_raw)? {
+                if source.len() > MAX_OWNERSHIP_SOURCE_BYTES {
+                    continue;
+                }
+                let file_key = format!("{package_name}@{resolved_raw}/{entry_path}");
+                reference_fns.extend(reference_functions_from_source(&file_key, &source));
+            }
+        }
+    }
+    Ok((reference_fns, resolved_by_request))
+}
+
+pub(crate) fn run_ownership_source_names(
+    request: &OwnershipNamingRequest,
+) -> Result<(), CliRunError> {
+    let connection = Connection::open(&request.input)
+        .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+    let owned = load_ownership_matches(&connection, request.project_id)?;
+    if owned.is_empty() {
+        println!(
+            "ownership-source-names: no ownership matches in {}",
+            request.input
+        );
+        return Ok(());
+    }
+    let target_modules: BTreeSet<u32> = owned.iter().map(|owner| owner.module_id).collect();
+    let package_count = owned
+        .iter()
+        .map(|owner| (owner.package_name.as_str(), owner.package_version.as_str()))
+        .collect::<BTreeSet<_>>()
+        .len();
+
+    let cache = Connection::open(&request.cache_db).map_err(|error| {
+        CliRunError::ReferenceSourceNames(format!(
+            "open package cache {}: {error}",
+            request.cache_db.display()
+        ))
+    })?;
+    let (reference_fns, resolved_by_request) = load_ownership_reference_corpus(&cache, &owned)?;
+
+    // Constrain the high-precision module-corroborated / within-pair passes to the
+    // specific source file the matcher pinned (using the resolved cache version);
+    // package-only matches fall through to the globally-unique-composite pass.
+    let mut module_matched_file: BTreeMap<u32, String> = BTreeMap::new();
+    for owner in &owned {
+        let Some(entry_path) = owner.entry_path.as_deref() else {
+            continue;
+        };
+        let key = (owner.package_name.clone(), owner.package_version.clone());
+        let Some(resolved_raw) = resolved_by_request.get(&key) else {
+            continue;
+        };
+        module_matched_file.insert(
+            owner.module_id,
+            format!("{}@{resolved_raw}/{entry_path}", owner.package_name),
+        );
+    }
+
+    let bundle =
+        load_project_bundle_with_package_externalization(&request.input, request.project_id)
+            .map_err(|error| CliRunError::ReferenceSourceNames(format!("load input: {error}")))?;
+    let subjects =
+        generate_subject_modules(bundle, |module_id| target_modules.contains(&module_id))?;
+    let subject_fns = collect_subject_functions(&subjects);
+    let binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
+
+    let accepted = binding_rows.iter().filter(|row| row.accepted).count();
+    let proposed = binding_rows.len() - accepted;
+
+    if request.apply {
+        let final_path_by_module: BTreeMap<u32, String> = subjects
+            .iter()
+            .map(|subject| (subject.module_id, subject.file_path.clone()))
+            .collect();
+        let (written_accepted, written_proposed) = write_binding_names(
+            &connection,
+            request.project_id,
+            &binding_rows,
+            &final_path_by_module,
+            &request.origin_prefix,
+            "owned",
+        )?;
+        println!(
+            "applied ownership-source-names: {written_accepted} accepted, {written_proposed} proposal(s) across {} owned module(s) / {package_count} package(s)",
+            target_modules.len()
+        );
+    } else {
+        println!(
+            "dry-run ownership-source-names: {} owned module(s), {package_count} package(s), {} subject module(s), {} reference fn(s); {accepted} accepted name(s), {proposed} proposal(s); pass --apply to write",
+            target_modules.len(),
+            subjects.len(),
+            reference_fns.len(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6995,5 +7350,44 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         ] {
             assert!(is_specific_reference_name(good), "should keep {good}");
         }
+    }
+
+    #[test]
+    fn ownership_entry_path_recovers_file_from_decorated_source_path() {
+        // Specific-file match: the entry path sits after the `name@version/`
+        // marker and runs up to the next `:`-delimited score field.
+        assert_eq!(
+            ownership_entry_path(
+                "anonymous-function-axis-source:react@19.2.4:react@19.2.4/cjs/react.development.js:score=72:runner_up=46",
+                "react",
+                "19.2.4",
+            ),
+            Some("cjs/react.development.js".to_string())
+        );
+        // Package-only match carries no source file (no `name@version/` marker).
+        assert_eq!(
+            ownership_entry_path(
+                "anonymous-function-axis:zod@3.24.1:score=76:runner_up=61",
+                "zod",
+                "3.24.1",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn package_source_origin_is_not_automated_so_domain_names_pass() {
+        // The ownership-naming pass keys names with a composite `package-source:`
+        // origin, which must never be treated as automated — otherwise the
+        // vocabulary gate would reject package domain tokens like `parseSemVer`.
+        let origin = "package-source:owned:semver@7.6.0/index.js";
+        validate_name_acceptance(
+            "a",
+            "parseSemVer",
+            origin,
+            Some("{\"tier\":\"fn-hash-unique\"}"),
+            NamingGateMode::LocalBinding,
+        )
+        .expect("non-automated package-source origin must accept a domain function name");
     }
 }

@@ -17,6 +17,7 @@ pub(crate) mod module_classify;
 pub(crate) mod naming_gates;
 pub(crate) mod naming_plan;
 pub(crate) mod naming_progress;
+pub(crate) mod ownership_source_names;
 pub(crate) mod package_cache;
 pub(crate) mod package_surface_decisions;
 pub(crate) mod package_version_diagnostics;

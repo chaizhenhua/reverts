@@ -21,6 +21,7 @@ pub enum HelpTopic {
     RuntimeInventory,
     BindingNames,
     ReferenceSourceNames,
+    OwnershipSourceNames,
     SymbolNames,
     NamingProgress,
     NamingPlan,
@@ -51,6 +52,7 @@ pub const IDENTIFIER_INVENTORY_COMMAND: &str = "identifier-inventory";
 pub const RUNTIME_INVENTORY_COMMAND: &str = "runtime-inventory";
 pub const BINDING_NAMES_COMMAND: &str = "binding-names";
 pub const REFERENCE_SOURCE_NAMES_COMMAND: &str = "reference-source-names";
+pub const OWNERSHIP_SOURCE_NAMES_COMMAND: &str = "ownership-source-names";
 pub const SYMBOL_NAMES_COMMAND: &str = "symbol-names";
 pub const NAMING_PROGRESS_COMMAND: &str = "naming-progress";
 pub const NAMING_PLAN_COMMAND: &str = "naming-plan";
@@ -137,6 +139,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: REFERENCE_SOURCE_NAMES_COMMAND,
         topic: HelpTopic::ReferenceSourceNames,
         summary: "Name modules/exports/bindings from a historical first-party source tree",
+    },
+    CommandSpec {
+        name: OWNERSHIP_SOURCE_NAMES_COMMAND,
+        topic: HelpTopic::OwnershipSourceNames,
+        summary: "Name owned-but-inlined package modules from their matched package source",
     },
     CommandSpec {
         name: SYMBOL_NAMES_COMMAND,
@@ -232,6 +239,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         HelpTopic::ReferenceSourceNames => {
             "reverts-cli reference-source-names\n\nUSAGE:\n    reverts-cli reference-source-names --input <DB> --project-id <ID> --reference-source-root <DIR> --reference-version <VERSION> [--apply] [--min-tier high|medium] [--origin-prefix source] [--module-only] [--summary-json <FILE>] [--diagnostics-json <FILE>]\n\nOPTIONS:\n    --input <DB>                    SQLite input database\n    --project-id <ID>               Positive project id\n    --reference-source-root <DIR>   Root of the historical first-party source tree to match against\n    --reference-version <VERSION>   Version label stored with accepted names (e.g. 2.1.76)\n    --apply                         Persist accepted names; without it, dry-run only\n    --min-tier high|medium          Minimum match tier to auto-accept (default: high)\n    --origin-prefix source          Prefix stored in the origin field of accepted names (default: source)\n    --module-only                   Fast module-name matching from bundle-extracted input; skips path overrides and generated-output binding propagation\n    --summary-json <FILE>           Write a machine-readable module match summary
     --diagnostics-json <FILE>       Write Low/Medium boundary diagnostics for matcher tuning"
+        }
+        HelpTopic::OwnershipSourceNames => {
+            "reverts-cli ownership-source-names\n\nUSAGE:\n    reverts-cli ownership-source-names --input <DB> --project-id <ID> [--cache-db <DB>] [--origin-prefix package-source] [--apply]\n\nOPTIONS:\n    --input <DB>                 Per-run SQLite input database (holds package_attributions)\n    --project-id <ID>            Positive project id\n    --cache-db <DB>              Package source cache database (default: $HOME/.reverts/.reverts.db)\n    --origin-prefix <PREFIX>     Non-automated origin prefix stored with accepted names (default: package-source)\n    --apply                      Persist recovered names; without it, dry-run only\n\nNames the functions of package-owned modules that could not be safely\nexternalized (status=rejected ownership matches) by matching their bundle\nfunctions against the matched npm package source from the cache. Independent of\nexternalization: inlined package modules still get real function names."
         }
         HelpTopic::SymbolNames => {
             "reverts-cli symbol-names\n\nUSAGE:\n    reverts-cli symbol-names --input <DB> --project-id <ID> --list [--all-proposals]\n    reverts-cli symbol-names --input <DB> --project-id <ID> [--propose <MODULE_ID:ORIGINAL=SEMANTIC> ...] [--accept <MODULE_ID:ORIGINAL=SEMANTIC> ...] [--clear-active <MODULE_ID:ORIGINAL> ...] [--origin <SOURCE>] [--evidence <TEXT>] [--batch <TSV|->] [--apply]\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --list                Print active module/global symbols as TSV\n    --all-proposals       With --list, print recorded name proposals instead of active symbols\n    --propose <SPEC>      Record a naming proposal without changing emitted output; repeatable\n    --accept <SPEC>       Record and activate a semantic name for the next emit; repeatable (--set alias)\n    --clear-active <SPEC> Clear the active semantic name; repeatable (--clear alias)\n    --origin <SOURCE>     Proposal source label, default: agent\n    --evidence <TEXT>     Evidence for names from automated origins; required for origin=agent/llm/model/etc.\n    --batch <TSV|->       Read tab-separated propose/accept/clear-active operations from a file or stdin\n    --apply               Persist changes; without --apply, only validates and prints a dry-run summary\n\nBATCH TSV:\n    propose<TAB>module_id<TAB>original_name<TAB>semantic_name\n    accept<TAB>module_id<TAB>original_name<TAB>semantic_name\n    clear-active<TAB>module_id<TAB>original_name"
