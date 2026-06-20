@@ -144,6 +144,7 @@ fn plan_modules(
             matched.tier,
             matched.margin,
             matched.reciprocal_best,
+            matched.source_score,
             matched.weighted_anchor,
             matched.normalized_anchor,
         );
@@ -782,8 +783,11 @@ fn write_match_diagnostics_if_requested(
             "medium_score_margin": MEDIUM_SCORE_MARGIN,
             "medium_strong_normalized_anchor": MEDIUM_STRONG_NANCHOR,
             "medium_guarded_strong_normalized_anchor": MEDIUM_GUARDED_STRONG_NANCHOR,
+            "medium_sourced_guarded_strong_normalized_anchor": MEDIUM_SOURCED_GUARDED_STRONG_NANCHOR,
             "medium_reciprocal_weighted_anchor": MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR,
             "medium_reciprocal_normalized_anchor": MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR,
+            "medium_reciprocal_near_weighted_anchor": MEDIUM_RECIPROCAL_NEAR_WEIGHTED_ANCHOR,
+            "medium_reciprocal_near_normalized_anchor": MEDIUM_RECIPROCAL_NEAR_NORMALIZED_ANCHOR,
             "medium_structural_score": MEDIUM_STRUCTURAL_SCORE,
             "medium_structural_weighted_anchor": MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR,
             "medium_structural_normalized_anchor": MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR,
@@ -865,10 +869,13 @@ fn low_boundary_row_json(
         "shortfalls": {
             "strong_normalized_anchor": positive_shortfall(MEDIUM_STRONG_NANCHOR, matched.normalized_anchor),
             "guarded_strong_normalized_anchor": positive_shortfall(MEDIUM_GUARDED_STRONG_NANCHOR, matched.normalized_anchor),
+            "sourced_guarded_strong_normalized_anchor": positive_shortfall(MEDIUM_SOURCED_GUARDED_STRONG_NANCHOR, matched.normalized_anchor),
             "weighted_anchor": positive_shortfall(MEDIUM_WEIGHTED_ANCHOR, matched.weighted_anchor),
             "normalized_anchor": positive_shortfall(MEDIUM_NORMALIZED_ANCHOR, matched.normalized_anchor),
             "reciprocal_weighted_anchor": positive_shortfall(MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR, matched.weighted_anchor),
             "reciprocal_normalized_anchor": positive_shortfall(MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR, matched.normalized_anchor),
+            "reciprocal_near_weighted_anchor": positive_shortfall(MEDIUM_RECIPROCAL_NEAR_WEIGHTED_ANCHOR, matched.weighted_anchor),
+            "reciprocal_near_normalized_anchor": positive_shortfall(MEDIUM_RECIPROCAL_NEAR_NORMALIZED_ANCHOR, matched.normalized_anchor),
             "content_normalized_floor": positive_shortfall(MEDIUM_CONTENT_NORMALIZED_FLOOR, matched.normalized_anchor),
             "margin": positive_shortfall(MEDIUM_SCORE_MARGIN, matched.margin),
         },
@@ -958,11 +965,25 @@ fn low_boundary_reason(matched: &ModuleMatch) -> &'static str {
     {
         return "global_uniqueness_demoted_guarded_strong_content";
     }
+    if matched.normalized_anchor >= MEDIUM_SOURCED_GUARDED_STRONG_NANCHOR
+        && matched.margin >= MEDIUM_SCORE_MARGIN
+        && has_sourced_near_strong_support(matched.source_score)
+    {
+        return "global_uniqueness_demoted_sourced_guarded_strong_content";
+    }
     if matched.reciprocal_best
         && matched.weighted_anchor >= MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR
         && matched.normalized_anchor >= MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR
     {
         return "global_uniqueness_demoted_reciprocal_anchors";
+    }
+    if matched.reciprocal_best
+        && matched.weighted_anchor >= MEDIUM_RECIPROCAL_NEAR_WEIGHTED_ANCHOR
+        && matched.normalized_anchor >= MEDIUM_RECIPROCAL_NEAR_NORMALIZED_ANCHOR
+        && matched.margin >= MEDIUM_SCORE_MARGIN
+        && has_sourced_reciprocal_shortfall_support(matched.source_score)
+    {
+        return "global_uniqueness_demoted_sourced_reciprocal_anchors";
     }
     if matched.normalized_anchor >= MEDIUM_STRONG_NANCHOR * 0.80 {
         return "near_strong_normalized_anchor";
@@ -1014,6 +1035,11 @@ fn low_medium_closeness(matched: &ModuleMatch) -> f64 {
         .min(ratio(matched.normalized_anchor, MEDIUM_NORMALIZED_ANCHOR));
     let guarded_strong_pair = ratio(matched.normalized_anchor, MEDIUM_GUARDED_STRONG_NANCHOR)
         .min(ratio(matched.margin, MEDIUM_SCORE_MARGIN));
+    let sourced_guarded_strong_pair = ratio(
+        matched.normalized_anchor,
+        MEDIUM_SOURCED_GUARDED_STRONG_NANCHOR,
+    )
+    .min(ratio(matched.margin, MEDIUM_SCORE_MARGIN));
     let reciprocal_pair = if matched.reciprocal_best {
         ratio(matched.weighted_anchor, MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR).min(ratio(
             matched.normalized_anchor,
@@ -1042,6 +1068,7 @@ fn low_medium_closeness(matched: &ModuleMatch) -> f64 {
     ratio(matched.normalized_anchor, MEDIUM_STRONG_NANCHOR)
         .max(anchor_pair)
         .max(guarded_strong_pair)
+        .max(sourced_guarded_strong_pair)
         .max(reciprocal_pair)
         .max(structural_pair)
         .max(graph_pair)
@@ -1559,6 +1586,11 @@ const MEDIUM_STRONG_NANCHOR: f64 = 0.30;
 /// self-sufficient strong threshold and gated by the normal Medium margin so it
 /// only recovers confident near misses, not ambiguous hub collisions.
 const MEDIUM_GUARDED_STRONG_NANCHOR: f64 = 0.25;
+/// Slightly lower near-strong normalized content can promote only when an
+/// independent source-evidence axis also corroborates the same candidate. This
+/// recovers a narrow band identified by diagnostics while avoiding pure common
+/// string-anchor matches.
+const MEDIUM_SOURCED_GUARDED_STRONG_NANCHOR: f64 = 0.24;
 /// A reciprocal-best assignment that shares a substantial mass of rare string
 /// anchors is strong enough to promote even when the normalized fraction is
 /// below the generic Medium floor. This recovers large first-party files whose
@@ -1566,6 +1598,11 @@ const MEDIUM_GUARDED_STRONG_NANCHOR: f64 = 0.25;
 /// fraction of the full source file's anchor surface.
 const MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR: f64 = 20.0;
 const MEDIUM_RECIPROCAL_NORMALIZED_ANCHOR: f64 = 0.10;
+/// Narrow reciprocal near miss: diagnostics showed a small, high-margin band
+/// just below the 20.0 weighted-anchor gate. It still requires unique string
+/// evidence so common-anchor reciprocal ties do not promote.
+const MEDIUM_RECIPROCAL_NEAR_WEIGHTED_ANCHOR: f64 = 18.0;
+const MEDIUM_RECIPROCAL_NEAR_NORMALIZED_ANCHOR: f64 = 0.13;
 const SOURCE_STRUCTURAL_CANDIDATE_LIMIT: usize = 12;
 const SOURCE_CANDIDATE_MAX_ANCHOR_FANOUT: usize = 64;
 const SOURCE_CANDIDATE_MIN_ANCHOR_IDF: f64 = 1.0;
@@ -1758,6 +1795,7 @@ fn calibrate_tier(
     tier: MatchTier,
     margin: f64,
     reciprocal_best: bool,
+    source_score: SourceEvidenceScore,
     weighted_anchor: f64,
     normalized_anchor: f64,
 ) -> MatchTier {
@@ -1771,8 +1809,24 @@ fn calibrate_tier(
             MatchTier::Medium
         }
         MatchTier::Low
+            if reciprocal_best
+                && weighted_anchor >= MEDIUM_RECIPROCAL_NEAR_WEIGHTED_ANCHOR
+                && normalized_anchor >= MEDIUM_RECIPROCAL_NEAR_NORMALIZED_ANCHOR
+                && margin >= MEDIUM_SCORE_MARGIN
+                && has_sourced_reciprocal_shortfall_support(source_score) =>
+        {
+            MatchTier::Medium
+        }
+        MatchTier::Low
             if normalized_anchor >= MEDIUM_GUARDED_STRONG_NANCHOR
                 && margin >= MEDIUM_SCORE_MARGIN =>
+        {
+            MatchTier::Medium
+        }
+        MatchTier::Low
+            if normalized_anchor >= MEDIUM_SOURCED_GUARDED_STRONG_NANCHOR
+                && margin >= MEDIUM_SCORE_MARGIN
+                && has_sourced_near_strong_support(source_score) =>
         {
             MatchTier::Medium
         }
@@ -1789,6 +1843,15 @@ fn calibrate_tier(
         }
         MatchTier::Medium => MatchTier::Low,
     }
+}
+
+fn has_sourced_near_strong_support(score: SourceEvidenceScore) -> bool {
+    score.unique_string_anchor_overlap >= 1
+        || (score.function_axis_overlap >= 4 && score.function_axis_containment >= 0.40)
+}
+
+fn has_sourced_reciprocal_shortfall_support(score: SourceEvidenceScore) -> bool {
+    score.unique_string_anchor_overlap >= 1
 }
 
 fn ranked_module_matches(
@@ -1997,6 +2060,7 @@ pub(crate) fn best_module_match(
         best.tier,
         best.margin,
         best.reciprocal_best,
+        best.source_score,
         best.weighted_anchor,
         best.normalized_anchor,
     );
@@ -2027,6 +2091,7 @@ fn best_module_match_with_reciprocal(
         matched.tier,
         matched.margin,
         matched.reciprocal_best,
+        matched.source_score,
         matched.weighted_anchor,
         matched.normalized_anchor,
     );
@@ -3463,17 +3528,38 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
     #[test]
     fn reciprocal_rare_anchor_match_promotes_large_split_module() {
         assert_eq!(
-            calibrate_tier(MatchTier::Low, 0.05, true, 25.0, 0.12),
+            calibrate_tier(
+                MatchTier::Low,
+                0.05,
+                true,
+                SourceEvidenceScore::default(),
+                25.0,
+                0.12,
+            ),
             MatchTier::Medium,
             "reciprocal-best plus substantial rare-anchor mass should recover large split modules"
         );
         assert_eq!(
-            calibrate_tier(MatchTier::Low, 1.0, false, 25.0, 0.12),
+            calibrate_tier(
+                MatchTier::Low,
+                1.0,
+                false,
+                SourceEvidenceScore::default(),
+                25.0,
+                0.12,
+            ),
             MatchTier::Low,
             "the reciprocal-best guard prevents raw rare-anchor mass from promoting hub-like matches"
         );
         assert_eq!(
-            calibrate_tier(MatchTier::Low, 0.05, true, 25.0, 0.03),
+            calibrate_tier(
+                MatchTier::Low,
+                0.05,
+                true,
+                SourceEvidenceScore::default(),
+                25.0,
+                0.03,
+            ),
             MatchTier::Low,
             "reciprocal matches still need a non-trivial normalized overlap"
         );
@@ -3572,6 +3658,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
                 MatchTier::Low,
                 MEDIUM_SCORE_MARGIN,
                 false,
+                SourceEvidenceScore::default(),
                 0.0,
                 MEDIUM_GUARDED_STRONG_NANCHOR,
             ),
@@ -3583,11 +3670,74 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
                 MatchTier::Low,
                 MEDIUM_SCORE_MARGIN / 2.0,
                 false,
+                SourceEvidenceScore::default(),
                 MEDIUM_WEIGHTED_ANCHOR,
                 MEDIUM_GUARDED_STRONG_NANCHOR,
             ),
             MatchTier::Low,
             "near-strong content remains Low when the runner-up is too close"
+        );
+    }
+
+    #[test]
+    fn sourced_near_strong_content_requires_independent_source_evidence() {
+        assert_eq!(
+            calibrate_tier(
+                MatchTier::Low,
+                MEDIUM_SCORE_MARGIN,
+                false,
+                SourceEvidenceScore {
+                    unique_string_anchor_overlap: 1,
+                    ..SourceEvidenceScore::default()
+                },
+                0.0,
+                MEDIUM_SOURCED_GUARDED_STRONG_NANCHOR,
+            ),
+            MatchTier::Medium,
+            "unique string source evidence can corroborate the sourced near-strong band"
+        );
+        assert_eq!(
+            calibrate_tier(
+                MatchTier::Low,
+                MEDIUM_SCORE_MARGIN,
+                false,
+                SourceEvidenceScore::default(),
+                MEDIUM_WEIGHTED_ANCHOR,
+                MEDIUM_SOURCED_GUARDED_STRONG_NANCHOR,
+            ),
+            MatchTier::Low,
+            "plain string-anchor overlap below the guarded threshold is not enough"
+        );
+    }
+
+    #[test]
+    fn sourced_reciprocal_near_miss_requires_unique_string_evidence() {
+        assert_eq!(
+            calibrate_tier(
+                MatchTier::Low,
+                MEDIUM_SCORE_MARGIN,
+                true,
+                SourceEvidenceScore {
+                    unique_string_anchor_overlap: 1,
+                    ..SourceEvidenceScore::default()
+                },
+                MEDIUM_RECIPROCAL_NEAR_WEIGHTED_ANCHOR,
+                MEDIUM_RECIPROCAL_NEAR_NORMALIZED_ANCHOR,
+            ),
+            MatchTier::Medium,
+            "reciprocal near misses can promote when unique string evidence corroborates them"
+        );
+        assert_eq!(
+            calibrate_tier(
+                MatchTier::Low,
+                MEDIUM_SCORE_MARGIN,
+                true,
+                SourceEvidenceScore::default(),
+                MEDIUM_RECIPROCAL_NEAR_WEIGHTED_ANCHOR,
+                MEDIUM_RECIPROCAL_NEAR_NORMALIZED_ANCHOR,
+            ),
+            MatchTier::Low,
+            "reciprocal near misses without source corroboration remain Low"
         );
     }
 
