@@ -70,21 +70,16 @@ struct ModulePlan {
     module_semantic_name: String,
     subject_bindings: Vec<(String, String)>,
     reference_exports: std::collections::BTreeSet<String>,
-    /// Emitted subject source and matched reference source, retained so the
-    /// binding-level pass can pair functions by AST hash after module tiers
-    /// (and the injective 1:1 demotion) are finalized.
-    subject_source: String,
-    reference_source: String,
 }
 
-fn plan_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<ModulePlan>, CliRunError> {
-    let index = build_reference_source_index(&args.reference_source_root, &args.reference_version)
-        .map_err(CliRunError::ReferenceSourceNames)?;
-    let subjects = subject_modules(args)?;
-    let structural_support = source_structural_support(&subjects, &index);
-    let graph_support = source_graph_support(&subjects, &index, &structural_support);
+fn plan_modules(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+) -> Result<Vec<ModulePlan>, CliRunError> {
+    let structural_support = source_structural_support(subjects, index);
+    let graph_support = source_graph_support(subjects, index, &structural_support);
     let reference_best_subjects =
-        best_subject_by_reference(&subjects, &index, &structural_support, &graph_support);
+        best_subject_by_reference(subjects, index, &structural_support, &graph_support);
     let mut plans = Vec::new();
     for subject in subjects {
         let subject_structural_support = structural_support.get(&subject.module_id);
@@ -92,33 +87,27 @@ fn plan_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<ModulePlan>, CliR
         let Some(matched) = best_module_match_with_reciprocal(
             subject.module_id,
             &subject.fingerprint,
-            &index,
+            index,
             &reference_best_subjects,
             subject_structural_support,
             subject_graph_support,
         ) else {
             continue;
         };
-        let reference_module = index
+        let reference_exports = index
             .modules
             .iter()
-            .find(|m| m.file_path == matched.file_path);
-        let reference_exports = reference_module
+            .find(|m| m.file_path == matched.file_path)
             .map(|m| m.export_names.clone())
-            .unwrap_or_default();
-        let reference_source = reference_module
-            .map(|m| m.source.clone())
             .unwrap_or_default();
         plans.push(ModulePlan {
             module_id: subject.module_id,
-            subject_path: subject.file_path,
+            subject_path: subject.file_path.clone(),
             reference_version: index.version.clone(),
             module_semantic_name: strip_source_extension(&matched.file_path),
             matched,
-            subject_bindings: subject.bindings,
+            subject_bindings: subject.bindings.clone(),
             reference_exports,
-            subject_source: subject.source,
-            reference_source,
         });
     }
     calibrate_global_reference_uniqueness(&mut plans);
@@ -182,7 +171,10 @@ fn tier_str(tier: MatchTier) -> &'static str {
 }
 
 pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
-    let plans = plan_modules(&args)?;
+    let index = build_reference_source_index(&args.reference_source_root, &args.reference_version)
+        .map_err(CliRunError::ReferenceSourceNames)?;
+    let subjects = subject_modules(&args)?;
+    let plans = plan_modules(&subjects, &index)?;
     println!(
         "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
     );
@@ -212,56 +204,33 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             },
         );
     }
-    // Binding-level pass: within each accepted module match, pair functions by
-    // α-rename-invariant AST hash and rename minified bindings to the reference
-    // function names. Computed once, reused for the dry-run report and --apply.
-    let binding_eligible: Vec<&ModulePlan> = plans
+    // Function-level pass: GLOBAL match over the whole corpus. Auto-accepts are
+    // corroborated by the module match (function's reference file == the file
+    // its module matched); everything else is a global proposal.
+    let module_matched_file: BTreeMap<u32, String> = plans
         .iter()
         .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
+        .map(|plan| (plan.module_id, plan.matched.file_path.clone()))
         .collect();
-    // Global AST-hash frequency across all eligible subject modules: a hash
-    // shared by many functions is a trivial shape and must not auto-accept.
-    let mut subject_hash_freq: BTreeMap<u64, usize> = BTreeMap::new();
-    for plan in &binding_eligible {
-        for f in FunctionExtractor::fingerprint(ModuleId(plan.module_id), &plan.subject_source) {
-            *subject_hash_freq.entry(f.primary.ast).or_default() += 1;
-        }
-    }
-    let binding_plans: Vec<(&ModulePlan, Vec<BindingNameRow>)> = binding_eligible
-        .iter()
-        .map(|plan| {
-            (
-                *plan,
-                pair_function_names(
-                    plan.module_id,
-                    &plan.subject_source,
-                    &plan.reference_source,
-                    &subject_hash_freq,
-                ),
-            )
-        })
-        .filter(|(_, rows)| !rows.is_empty())
-        .collect();
+    let binding_rows = match_functions_globally(&subjects, &index, &module_matched_file);
     println!("---bindings---");
     println!(
         "module_id\tsubject_path\tref_file\toriginal\tsemantic\tkind\tast\tparams\tstmts\tscore"
     );
-    for (plan, rows) in &binding_plans {
-        for row in rows {
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{:016x}\t{}\t{}\t{:.1}",
-                plan.module_id,
-                plan.subject_path,
-                plan.matched.file_path,
-                row.original_name,
-                row.semantic_name,
-                if row.accepted { "accepted" } else { "proposal" },
-                row.ast_hash,
-                row.param_count,
-                row.statement_count,
-                row.score,
-            );
-        }
+    for row in &binding_rows {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{:016x}\t{}\t{}\t{:.1}",
+            row.module_id,
+            row.subject_path,
+            row.reference_file,
+            row.original_name,
+            row.semantic_name,
+            if row.accepted { "accepted" } else { "proposal" },
+            row.ast_hash,
+            row.param_count,
+            row.statement_count,
+            row.score,
+        );
     }
 
     if args.apply {
@@ -297,23 +266,13 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
                 &origin,
             )?;
         }
-        let mut binding_accepted = 0usize;
-        let mut binding_proposed = 0usize;
-        for (plan, rows) in &binding_plans {
-            let origin = format!(
-                "{}:{}:{}",
-                args.origin_prefix, args.reference_version, plan.matched.file_path
-            );
-            write_binding_names(
-                &connection,
-                args.project_id,
-                &plan.subject_path,
-                rows,
-                &origin,
-            )?;
-            binding_accepted += rows.iter().filter(|row| row.accepted).count();
-            binding_proposed += rows.iter().filter(|row| !row.accepted).count();
-        }
+        let (binding_accepted, binding_proposed) = write_binding_names(
+            &connection,
+            args.project_id,
+            &binding_rows,
+            &args.origin_prefix,
+            &args.reference_version,
+        )?;
         println!(
             "applied: {module_count} module name(s), {export_count} export name(s), {binding_accepted} binding rename(s), {binding_proposed} binding proposal(s)"
         );
@@ -1246,20 +1205,15 @@ fn write_export_names(
 /// unaccepted subject function. Proposals are never written as `accepted`.
 const BINDING_PROPOSAL_TOP_K: usize = 3;
 
-/// Max number of subject functions (across all matched modules) that may share
-/// an AST hash for that hash to still auto-accept. A unique 1:1 hash match
-/// within a module pair is only *proof of identity* when the hash is also
-/// distinctive globally: a trivial body like `return x` collides across many
-/// unrelated functions, so a within-module-unique match on it is coincidence,
-/// not evidence. Common-hash pairs are demoted to proposals.
-const BINDING_ACCEPT_MAX_GLOBAL_FREQ: usize = 2;
-
 /// One function-binding naming decision derived from a matched module pair:
 /// rename the minified subject binding `original_name` to the reference
 /// function's `semantic_name`. `accepted` rows are provable (unique α-rename
 /// AST-hash match + param/statement corroboration); the rest are proposals.
 #[derive(Debug, Clone, PartialEq)]
 struct BindingNameRow {
+    module_id: u32,
+    subject_path: String,
+    reference_file: String,
     original_name: String,
     semantic_name: String,
     accepted: bool,
@@ -1373,127 +1327,191 @@ fn binding_proposal_score(
     Some(score)
 }
 
-/// Pair functions between a matched module's emitted source and its reference
-/// source. Provable pass: a primary AST hash unique on BOTH sides, with equal
-/// param and statement counts and a recoverable name on each side, yields an
-/// accepted rename. Everything else with shared AST-hash signal becomes ranked
-/// proposals. Anonymous functions (no recoverable name) are skipped.
-fn pair_function_names(
-    module_id: u32,
-    subject_source: &str,
-    reference_source: &str,
-    subject_hash_freq: &BTreeMap<u64, usize>,
-) -> Vec<BindingNameRow> {
-    let subject_fns = FunctionExtractor::fingerprint(ModuleId(module_id), subject_source);
-    let reference_fns = FunctionExtractor::fingerprint(ModuleId(0), reference_source);
-    let subject_names = function_names(subject_source);
-    // Drop placeholder/generic reference names so they neither auto-accept nor
-    // get proposed; a missing entry makes the reference function "anonymous".
-    let reference_names: BTreeMap<reverts_ir::ByteRange, String> = function_names(reference_source)
-        .into_iter()
-        .filter(|(_, name)| is_specific_reference_name(name))
-        .collect();
+/// One reference function with a recoverable, specific name.
+struct ReferenceFunction {
+    file: String,
+    name: String,
+    fingerprint: FunctionFingerprint,
+}
 
-    let mut subject_by_hash: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
-    for (index, f) in subject_fns.iter().enumerate() {
-        subject_by_hash
-            .entry(f.primary.ast)
-            .or_default()
-            .push(index);
+/// One subject (emitted) function with a recoverable name.
+struct SubjectFunction {
+    module_id: u32,
+    subject_path: String,
+    name: String,
+    fingerprint: FunctionFingerprint,
+}
+
+/// Every named, specifically-named function across the whole reference tree.
+fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFunction> {
+    let mut out = Vec::new();
+    for module in &index.modules {
+        let names: BTreeMap<reverts_ir::ByteRange, String> = function_names(module.source.as_str())
+            .into_iter()
+            .filter(|(_, name)| is_specific_reference_name(name))
+            .collect();
+        for fingerprint in FunctionExtractor::fingerprint(ModuleId(0), module.source.as_str()) {
+            if let Some(name) = names.get(&fingerprint.id.span) {
+                out.push(ReferenceFunction {
+                    file: module.file_path.clone(),
+                    name: name.clone(),
+                    fingerprint,
+                });
+            }
+        }
     }
-    let mut reference_by_hash: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
-    for (index, f) in reference_fns.iter().enumerate() {
-        reference_by_hash
-            .entry(f.primary.ast)
+    out
+}
+
+/// Every named function across all subject (emitted) modules.
+fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction> {
+    let mut out = Vec::new();
+    for subject in subjects {
+        let names = function_names(subject.source.as_str());
+        for fingerprint in
+            FunctionExtractor::fingerprint(ModuleId(subject.module_id), subject.source.as_str())
+        {
+            if let Some(name) = names.get(&fingerprint.id.span) {
+                out.push(SubjectFunction {
+                    module_id: subject.module_id,
+                    subject_path: subject.file_path.clone(),
+                    name: name.clone(),
+                    fingerprint,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Match subject functions to reference functions across the whole corpus.
+///
+/// Two independent signals must agree to **auto-accept** a rename: (1) the
+/// subject's module matched reference file `F` by content (`module_matched_file`),
+/// AND (2) the function's body AST hash maps 1:1 within that pair (unique among
+/// `F`'s functions and the module's functions), with equal param/stmt counts and
+/// a specific reference name. Global hash uniqueness alone is *not* enough — the
+/// α-rename-invariant hash makes structurally-identical-but-different functions
+/// collide, so a globally-unique body can match the wrong function in an
+/// unrelated file. Everything with shared AST-hash signal that isn't accepted
+/// becomes a ranked global **proposal** (top-K), maximizing coverage for review.
+fn match_function_lists(
+    subject_fns: &[SubjectFunction],
+    reference_fns: &[ReferenceFunction],
+    module_matched_file: &BTreeMap<u32, String>,
+) -> Vec<BindingNameRow> {
+    let mut ref_by_file: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut ref_by_any: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (index, r) in reference_fns.iter().enumerate() {
+        ref_by_file.entry(r.file.as_str()).or_default().push(index);
+        for hash in function_ast_hashes(&r.fingerprint) {
+            ref_by_any.entry(hash).or_default().push(index);
+        }
+    }
+    let mut subject_by_module: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for (index, s) in subject_fns.iter().enumerate() {
+        subject_by_module
+            .entry(s.module_id)
             .or_default()
             .push(index);
     }
 
     let mut rows = Vec::new();
-    let mut accepted_subject = BTreeSet::<usize>::new();
-    let mut consumed_reference = BTreeSet::<usize>::new();
+    // (module_id, original_name) accepted so the proposal pass skips them.
+    let mut accepted: BTreeSet<(u32, String)> = BTreeSet::new();
 
-    // Provable pass: unique 1:1 primary-AST-hash match on both sides.
-    for (hash, subject_indices) in &subject_by_hash {
-        if subject_indices.len() != 1 {
-            continue; // ambiguous on subject side
-        }
-        let Some(reference_indices) = reference_by_hash.get(hash) else {
+    // ACCEPT pass: module-corroborated, unique within the matched file pair.
+    for (module_id, subject_indices) in &subject_by_module {
+        let Some(file) = module_matched_file.get(module_id) else {
+            continue; // module didn't match a reference file - no corroboration
+        };
+        let Some(reference_indices) = ref_by_file.get(file.as_str()) else {
             continue;
         };
-        if reference_indices.len() != 1 {
-            continue; // ambiguous on reference side
+        let mut subject_by_hash: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+        for &si in subject_indices {
+            subject_by_hash
+                .entry(subject_fns[si].fingerprint.primary.ast)
+                .or_default()
+                .push(si);
         }
-        if *subject_hash_freq.get(hash).unwrap_or(&1) > BINDING_ACCEPT_MAX_GLOBAL_FREQ {
-            continue; // non-distinctive shape globally - demote to proposal below
+        let mut reference_by_hash: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+        for &ri in reference_indices {
+            reference_by_hash
+                .entry(reference_fns[ri].fingerprint.primary.ast)
+                .or_default()
+                .push(ri);
         }
-        let subject = &subject_fns[subject_indices[0]];
-        let reference = &reference_fns[reference_indices[0]];
-        if subject.param_count != reference.param_count
-            || subject.statement_count != reference.statement_count
-        {
-            continue; // shape disagreement - demote to proposal below
-        }
-        let (Some(subject_name), Some(reference_name)) = (
-            subject_names.get(&subject.id.span),
-            reference_names.get(&reference.id.span),
-        ) else {
-            continue; // one side anonymous - cannot anchor a name
-        };
-        accepted_subject.insert(subject_indices[0]);
-        consumed_reference.insert(reference_indices[0]);
-        if subject_name == reference_name {
-            continue; // already carries the reference name
-        }
-        rows.push(BindingNameRow {
-            original_name: subject_name.clone(),
-            semantic_name: reference_name.clone(),
-            accepted: true,
-            ast_hash: *hash,
-            param_count: subject.param_count,
-            statement_count: subject.statement_count,
-            score: 1.0,
-        });
-    }
-
-    // Proposal pass: remaining named subject functions vs unconsumed named
-    // reference functions that share any AST hash.
-    let reference_candidates: Vec<usize> = reference_fns
-        .iter()
-        .enumerate()
-        .filter(|(index, f)| {
-            !consumed_reference.contains(index) && reference_names.contains_key(&f.id.span)
-        })
-        .map(|(index, _)| index)
-        .collect();
-    for (subject_index, subject) in subject_fns.iter().enumerate() {
-        if accepted_subject.contains(&subject_index) {
-            continue;
-        }
-        let Some(subject_name) = subject_names.get(&subject.id.span) else {
-            continue;
-        };
-        let mut scored: Vec<(f64, usize)> = reference_candidates
-            .iter()
-            .filter_map(|&reference_index| {
-                binding_proposal_score(subject, &reference_fns[reference_index])
-                    .map(|score| (score, reference_index))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        for (score, reference_index) in scored.into_iter().take(BINDING_PROPOSAL_TOP_K) {
-            let reference = &reference_fns[reference_index];
-            let reference_name = &reference_names[&reference.id.span];
-            if subject_name == reference_name {
+        for (hash, sis) in &subject_by_hash {
+            if sis.len() != 1 {
+                continue; // ambiguous within the module
+            }
+            let Some(ris) = reference_by_hash.get(hash) else {
+                continue;
+            };
+            if ris.len() != 1 {
+                continue; // ambiguous within the reference file
+            }
+            let subject = &subject_fns[sis[0]];
+            let reference = &reference_fns[ris[0]];
+            if subject.fingerprint.param_count != reference.fingerprint.param_count
+                || subject.fingerprint.statement_count != reference.fingerprint.statement_count
+            {
+                continue;
+            }
+            accepted.insert((subject.module_id, subject.name.clone()));
+            if subject.name == reference.name {
                 continue;
             }
             rows.push(BindingNameRow {
-                original_name: subject_name.clone(),
-                semantic_name: reference_name.clone(),
+                module_id: subject.module_id,
+                subject_path: subject.subject_path.clone(),
+                reference_file: reference.file.clone(),
+                original_name: subject.name.clone(),
+                semantic_name: reference.name.clone(),
+                accepted: true,
+                ast_hash: *hash,
+                param_count: subject.fingerprint.param_count,
+                statement_count: subject.fingerprint.statement_count,
+                score: 1.0,
+            });
+        }
+    }
+
+    // PROPOSAL pass: global, for every subject function not auto-accepted.
+    for subject in subject_fns {
+        if accepted.contains(&(subject.module_id, subject.name.clone())) {
+            continue;
+        }
+        let mut candidates = BTreeSet::<usize>::new();
+        for h in function_ast_hashes(&subject.fingerprint) {
+            if let Some(indices) = ref_by_any.get(&h) {
+                candidates.extend(indices.iter().copied());
+            }
+        }
+        let mut scored: Vec<(f64, usize)> = candidates
+            .iter()
+            .filter_map(|&ri| {
+                binding_proposal_score(&subject.fingerprint, &reference_fns[ri].fingerprint)
+                    .map(|score| (score, ri))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (score, ri) in scored.into_iter().take(BINDING_PROPOSAL_TOP_K) {
+            let reference = &reference_fns[ri];
+            if subject.name == reference.name {
+                continue;
+            }
+            rows.push(BindingNameRow {
+                module_id: subject.module_id,
+                subject_path: subject.subject_path.clone(),
+                reference_file: reference.file.clone(),
+                original_name: subject.name.clone(),
+                semantic_name: reference.name.clone(),
                 accepted: false,
-                ast_hash: subject.primary.ast,
-                param_count: subject.param_count,
-                statement_count: subject.statement_count,
+                ast_hash: subject.fingerprint.primary.ast,
+                param_count: subject.fingerprint.param_count,
+                statement_count: subject.fingerprint.statement_count,
                 score,
             });
         }
@@ -1501,20 +1519,36 @@ fn pair_function_names(
     rows
 }
 
+/// Global function matching over the whole corpus (see [`match_function_lists`]).
+/// `module_matched_file` maps subject module id -> the reference file it matched,
+/// used to corroborate auto-accepts.
+fn match_functions_globally(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+    module_matched_file: &BTreeMap<u32, String>,
+) -> Vec<BindingNameRow> {
+    let reference_fns = collect_reference_functions(index);
+    let subject_fns = collect_subject_functions(subjects);
+    match_function_lists(&subject_fns, &reference_fns, module_matched_file)
+}
+
 /// Write binding-level naming rows into `semantic_binding_names`
-/// (`accepted=1` provable renames, `=0` proposals). Keyed on the subject
-/// emitted `file_path` + minified `original_name`.
+/// (`accepted=1` provable renames, `=0` proposals). Each row carries its own
+/// subject `file_path` and reference-file provenance (function matching is
+/// global, so a row's reference file is unrelated to its module's match).
+/// Returns `(accepted_written, proposals_written)`.
 fn write_binding_names(
     connection: &Connection,
     project_id: u32,
-    file_path: &str,
     rows: &[BindingNameRow],
-    origin: &str,
-) -> Result<usize, CliRunError> {
-    let mut written = 0;
+    origin_prefix: &str,
+    reference_version: &str,
+) -> Result<(usize, usize), CliRunError> {
+    let (mut accepted, mut proposed) = (0usize, 0usize);
     for row in rows {
         let binding_key = row.original_name.clone(); // no binding_index -> key on original
-        written += connection
+        let origin = format!("{origin_prefix}:{reference_version}:{}", row.reference_file);
+        connection
             .execute(
                 r"
                 INSERT INTO semantic_binding_names (
@@ -1528,7 +1562,7 @@ fn write_binding_names(
                 ",
                 params![
                     i64::from(project_id),
-                    file_path,
+                    row.subject_path,
                     row.original_name,
                     binding_key,
                     row.semantic_name,
@@ -1538,8 +1572,13 @@ fn write_binding_names(
                 ],
             )
             .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
+        if row.accepted {
+            accepted += 1;
+        } else {
+            proposed += 1;
+        }
     }
-    Ok(written)
+    Ok((accepted, proposed))
 }
 
 fn write_module_names(
@@ -1870,8 +1909,6 @@ mod tests {
             },
             subject_bindings: Vec::new(),
             reference_exports: std::collections::BTreeSet::new(),
-            subject_source: String::new(),
-            reference_source: String::new(),
         }
     }
     fn high_plan(id: u32, name: &str) -> ModulePlan {
@@ -2022,6 +2059,9 @@ mod tests {
             .expect("schema");
         let rows = vec![
             BindingNameRow {
+                module_id: 5,
+                subject_path: "modules/m.ts".into(),
+                reference_file: "f.ts".into(),
                 original_name: "x".into(),
                 semantic_name: "decodeFrame".into(),
                 accepted: true,
@@ -2031,6 +2071,9 @@ mod tests {
                 score: 1.0,
             },
             BindingNameRow {
+                module_id: 5,
+                subject_path: "modules/m.ts".into(),
+                reference_file: "f.ts".into(),
                 original_name: "y".into(),
                 semantic_name: "guessName".into(),
                 accepted: false,
@@ -2040,8 +2083,9 @@ mod tests {
                 score: 105.0,
             },
         ];
-        write_binding_names(&connection, 1, "modules/m.ts", &rows, "source:2.1.76:f.ts")
-            .expect("write");
+        let (accepted_n, proposed_n) =
+            write_binding_names(&connection, 1, &rows, "source", "2.1.76").expect("write");
+        assert_eq!((accepted_n, proposed_n), (1, 1));
         let accepted: i64 = connection
             .query_row(
                 "SELECT accepted FROM semantic_binding_names WHERE original_name='x'",
@@ -2337,72 +2381,148 @@ mod tests {
         );
     }
 
-    /// Pair with no global-frequency context (every hash treated as
-    /// distinctive, `unwrap_or(&1)`), so these unit cases exercise the
-    /// within-pair logic without the global rarity gate.
-    fn pair(subject: &str, reference: &str) -> Vec<BindingNameRow> {
-        pair_function_names(1, subject, reference, &BTreeMap::new())
+    fn subject_fn(module_id: u32, path: &str, source: &str) -> Vec<SubjectFunction> {
+        let names = function_names(source);
+        FunctionExtractor::fingerprint(ModuleId(module_id), source)
+            .into_iter()
+            .filter_map(|f| {
+                names.get(&f.id.span).map(|name| SubjectFunction {
+                    module_id,
+                    subject_path: path.to_string(),
+                    name: name.clone(),
+                    fingerprint: f,
+                })
+            })
+            .collect()
+    }
+
+    fn reference_fn(file: &str, source: &str) -> Vec<ReferenceFunction> {
+        let names: BTreeMap<reverts_ir::ByteRange, String> = function_names(source)
+            .into_iter()
+            .filter(|(_, name)| is_specific_reference_name(name))
+            .collect();
+        FunctionExtractor::fingerprint(ModuleId(0), source)
+            .into_iter()
+            .filter_map(|f| {
+                names.get(&f.id.span).map(|name| ReferenceFunction {
+                    file: file.to_string(),
+                    name: name.clone(),
+                    fingerprint: f,
+                })
+            })
+            .collect()
+    }
+
+    fn corroborate(module_id: u32, file: &str) -> BTreeMap<u32, String> {
+        BTreeMap::from([(module_id, file.to_string())])
     }
 
     #[test]
-    fn pair_function_names_accepts_unique_hash_match() {
-        // Same body structure (α-rename-invariant), unique on each side, equal
-        // shape, differing names -> accepted rename minified -> reference.
-        let rows = pair(
-            "function aB(x) { return x + 1; }",
-            "function increment(x) { return x + 1; }",
-        );
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert!(rows[0].accepted);
-        assert_eq!(rows[0].original_name, "aB");
-        assert_eq!(rows[0].semantic_name, "increment");
+    fn function_match_accepts_when_module_corroborates() {
+        // Module 1 matched util/inc.ts (signal 1) AND the body hash maps 1:1
+        // within that file (signal 2) -> provable accept.
+        let subjects = subject_fn(1, "modules/m.ts", "function aB(x) { return x + 1; }");
+        let references = reference_fn("util/inc.ts", "function increment(x) { return x + 1; }");
+        let rows = match_function_lists(&subjects, &references, &corroborate(1, "util/inc.ts"));
+        assert_eq!(rows.iter().filter(|r| r.accepted).count(), 1, "{rows:?}");
+        let accept = rows.iter().find(|r| r.accepted).unwrap();
+        assert_eq!(accept.original_name, "aB");
+        assert_eq!(accept.semantic_name, "increment");
+        assert_eq!(accept.reference_file, "util/inc.ts");
     }
 
     #[test]
-    fn pair_function_names_demotes_globally_common_hash() {
-        // A hash shared by many functions corpus-wide is a trivial shape; a
-        // within-pair-unique match on it must NOT auto-accept.
-        let subject = "function aB(x) { return x + 1; }";
-        let reference = "function increment(x) { return x + 1; }";
-        let hash = FunctionExtractor::fingerprint(ModuleId(1), subject)[0]
-            .primary
-            .ast;
-        let freq = BTreeMap::from([(hash, 5usize)]);
-        let rows = pair_function_names(1, subject, reference, &freq);
+    fn function_match_demotes_without_module_corroboration() {
+        // No module match (empty map) -> the same hash match is only a proposal,
+        // never auto-accepted. This is what stops false positives like
+        // `resolve -> isFollowUpDigit` in unmatched modules.
+        let subjects = subject_fn(1, "modules/m.ts", "function aB(x) { return x + 1; }");
+        let references = reference_fn("util/inc.ts", "function increment(x) { return x + 1; }");
+        let rows = match_function_lists(&subjects, &references, &BTreeMap::new());
         assert!(
             !rows.iter().any(|r| r.accepted),
-            "globally common hash must not auto-accept: {rows:?}"
+            "no accept w/o corroboration: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| !r.accepted && r.semantic_name == "increment")
         );
     }
 
     #[test]
-    fn pair_function_names_demotes_hash_collision_to_proposals() {
-        // Two subject functions share the body hash -> not unique -> no accept;
-        // both still surface as proposals against the single reference function.
-        let rows = pair(
-            "function aB(x) { return x + 1; } function cD(y) { return y + 1; }",
-            "function increment(z) { return z + 1; }",
+    fn function_match_demotes_when_module_matched_a_different_file() {
+        // Module matched a DIFFERENT file than the hash twin lives in -> the two
+        // signals disagree -> proposal, not accept.
+        let subjects = subject_fn(1, "modules/m.ts", "function aB(x) { return x + 1; }");
+        let references = reference_fn("util/inc.ts", "function increment(x) { return x + 1; }");
+        let rows = match_function_lists(
+            &subjects,
+            &references,
+            &corroborate(1, "other/elsewhere.ts"),
         );
+        assert!(!rows.iter().any(|r| r.accepted), "{rows:?}");
+    }
+
+    #[test]
+    fn function_match_demotes_when_reference_hash_not_unique_in_file() {
+        let subjects = subject_fn(1, "modules/m.ts", "function aB(x) { return x + 1; }");
+        let references = reference_fn(
+            "util/inc.ts",
+            "function increment(x) { return x + 1; } function bump(y) { return y + 1; }",
+        );
+        let rows = match_function_lists(&subjects, &references, &corroborate(1, "util/inc.ts"));
         assert!(!rows.iter().any(|r| r.accepted), "no accepts: {rows:?}");
         assert!(
             rows.iter().filter(|r| !r.accepted).count() >= 1,
             "expected proposals: {rows:?}"
         );
-        assert!(rows.iter().all(|r| r.semantic_name == "increment"));
     }
 
     #[test]
-    fn pair_function_names_blocks_accept_on_param_mismatch() {
-        // Same body hash but differing param counts -> shape disagreement blocks
-        // the accept; the shared-hash signal still yields a proposal.
-        let rows = pair(
-            "function aB(x) { return x + 1; }",
-            "function increment(x, y) { return x + 1; }",
+    fn function_match_demotes_when_subject_hash_not_unique_in_module() {
+        // Two functions in the SAME subject module share the hash -> ambiguous
+        // within the module -> no accept.
+        let subjects = subject_fn(
+            1,
+            "modules/m.ts",
+            "function aB(x) { return x + 1; } function cD(y) { return y + 1; }",
         );
+        let references = reference_fn("util/inc.ts", "function increment(z) { return z + 1; }");
+        let rows = match_function_lists(&subjects, &references, &corroborate(1, "util/inc.ts"));
+        assert!(!rows.iter().any(|r| r.accepted), "{rows:?}");
+    }
+
+    #[test]
+    fn function_match_blocks_accept_on_param_mismatch() {
+        let subjects = subject_fn(1, "modules/m.ts", "function aB(x) { return x + 1; }");
+        let references = reference_fn("util/inc.ts", "function increment(x, y) { return x + 1; }");
+        let rows = match_function_lists(&subjects, &references, &corroborate(1, "util/inc.ts"));
         assert!(!rows.iter().any(|r| r.accepted), "{rows:?}");
         assert!(
             rows.iter()
                 .any(|r| !r.accepted && r.semantic_name == "increment")
+        );
+    }
+
+    #[test]
+    fn function_match_drops_placeholder_reference_names() {
+        let subjects = subject_fn(1, "modules/m.ts", "function aB(x) { return x + 1; }");
+        let references = reference_fn("util/inc.ts", "function _temp1(x) { return x + 1; }");
+        let rows = match_function_lists(&subjects, &references, &corroborate(1, "util/inc.ts"));
+        assert!(
+            rows.is_empty(),
+            "placeholder ref name must be filtered: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn function_match_skips_when_name_already_matches() {
+        let subjects = subject_fn(1, "modules/m.ts", "function increment(x) { return x + 1; }");
+        let references = reference_fn("util/inc.ts", "function increment(x) { return x + 1; }");
+        let rows = match_function_lists(&subjects, &references, &corroborate(1, "util/inc.ts"));
+        assert!(
+            rows.is_empty(),
+            "already-correct name needs no row: {rows:?}"
         );
     }
 
@@ -2423,30 +2543,5 @@ mod tests {
         ] {
             assert!(is_specific_reference_name(good), "should keep {good}");
         }
-    }
-
-    #[test]
-    fn pair_function_names_drops_placeholder_reference_names() {
-        // Reference function named `_temp1` must not produce an accept.
-        let rows = pair(
-            "function aB(x) { return x + 1; }",
-            "function _temp1(x) { return x + 1; }",
-        );
-        assert!(
-            rows.is_empty(),
-            "placeholder ref name must be filtered: {rows:?}"
-        );
-    }
-
-    #[test]
-    fn pair_function_names_skips_when_name_already_matches() {
-        let rows = pair(
-            "function increment(x) { return x + 1; }",
-            "function increment(x) { return x + 1; }",
-        );
-        assert!(
-            rows.is_empty(),
-            "already-correct name needs no row: {rows:?}"
-        );
     }
 }
