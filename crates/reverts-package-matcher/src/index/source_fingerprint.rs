@@ -57,6 +57,7 @@ pub struct SourceFingerprint {
     pub class_member_hashes: BTreeSet<String>,
     pub statement_window_hashes: BTreeSet<String>,
     pub block_branch_hashes: BTreeSet<String>,
+    pub pq_gram_hashes: BTreeSet<String>,
     pub string_anchors: BTreeSet<String>,
 }
 
@@ -89,6 +90,7 @@ pub fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint,
         class_member_hashes: ast.class_member_hashes,
         statement_window_hashes: ast.statement_window_hashes,
         block_branch_hashes: ast.block_branch_hashes,
+        pq_gram_hashes: ast.pq_gram_hashes,
         string_anchors: ast.string_anchors,
     })
 }
@@ -101,6 +103,7 @@ struct AstFingerprint {
     class_member_hashes: BTreeSet<String>,
     statement_window_hashes: BTreeSet<String>,
     block_branch_hashes: BTreeSet<String>,
+    pq_gram_hashes: BTreeSet<String>,
     string_anchors: BTreeSet<String>,
     surface_anchors: BTreeSet<String>,
     prototype_members: BTreeSet<String>,
@@ -121,6 +124,7 @@ fn ast_fingerprint(path: &str, normalized_source: &str) -> Result<AstFingerprint
             visitor.record_top_level_declaration_hashes(&parsed.program);
             visitor.record_statement_window_hashes(&parsed.program.body, "program");
             visitor.record_block_branch_hashes(&parsed.program.body, "program");
+            visitor.record_pq_grams(&parsed.program);
             visitor.visit_program(&parsed.program);
             return Ok(visitor.finish());
         }
@@ -331,6 +335,14 @@ impl FingerprintVisitor<'_> {
             .insert(format!("block-bag:{scope}:{}:{bag_hash}", bag.len()));
     }
 
+    fn record_pq_grams(&mut self, program: &Program<'_>) {
+        let tree = TreeNode {
+            label: "program".to_string(),
+            children: program.body.iter().map(statement_tree).collect(),
+        };
+        collect_pq_grams(&tree, &mut Vec::new(), &mut self.fingerprint.pq_gram_hashes);
+    }
+
     fn record_arrow_function(&mut self, arrow: &ArrowFunctionExpression<'_>) {
         self.record_function(
             "arrow",
@@ -506,7 +518,7 @@ impl FingerprintVisitor<'_> {
     }
 
     fn record_class_shape_anchor(&mut self, class: &Class<'_>) {
-        let methods = class_method_shape_members(class);
+        let methods = class_member_shape_members(class);
         self.record_member_multiset_hash("class", &methods);
         if methods.len() < 3 {
             return;
@@ -689,6 +701,268 @@ fn statement_shape(statement: &Statement<'_>) -> String {
         ),
         Statement::TSExportAssignment(_) => "ts_export_assignment".to_string(),
         Statement::TSNamespaceExportDeclaration(_) => "ts_namespace_export".to_string(),
+    }
+}
+
+#[derive(Debug)]
+struct TreeNode {
+    label: String,
+    children: Vec<TreeNode>,
+}
+
+const PQ_GRAM_P: usize = 2;
+const PQ_GRAM_Q: usize = 3;
+const PQ_PAD: &str = "*";
+
+fn collect_pq_grams(node: &TreeNode, ancestors: &mut Vec<String>, output: &mut BTreeSet<String>) {
+    let mut ancestor_window = vec![PQ_PAD.to_string(); PQ_GRAM_P];
+    let start = ancestors.len().saturating_sub(PQ_GRAM_P);
+    for (index, ancestor) in ancestors[start..].iter().enumerate() {
+        let slot = PQ_GRAM_P - (ancestors.len() - start) + index;
+        ancestor_window[slot] = ancestor.clone();
+    }
+
+    let mut child_labels = vec![PQ_PAD.to_string(); PQ_GRAM_Q - 1];
+    child_labels.extend(node.children.iter().map(|child| child.label.clone()));
+    child_labels.extend(std::iter::repeat_n(PQ_PAD.to_string(), PQ_GRAM_Q - 1));
+    for window in child_labels.windows(PQ_GRAM_Q) {
+        let gram = format!(
+            "{}|{}|{}",
+            ancestor_window.join("/"),
+            node.label,
+            window.join("/")
+        );
+        output.insert(format!("pq-gram:{:016x}", stable_hash_u64(gram.as_bytes())));
+    }
+
+    ancestors.push(node.label.clone());
+    for child in &node.children {
+        collect_pq_grams(child, ancestors, output);
+    }
+    ancestors.pop();
+}
+
+fn stable_hash_u64(bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET_BASIS;
+    update_stable_hash(&mut hash, bytes);
+    hash
+}
+
+fn statement_tree(statement: &Statement<'_>) -> TreeNode {
+    let mut node = TreeNode {
+        label: statement_shape(statement),
+        children: Vec::new(),
+    };
+    match statement {
+        Statement::BlockStatement(block) => {
+            node.children.extend(block.body.iter().map(statement_tree));
+        }
+        Statement::DoWhileStatement(statement) => {
+            node.children.push(statement_tree(&statement.body));
+        }
+        Statement::ExpressionStatement(statement) => {
+            node.children.push(expression_tree(&statement.expression));
+        }
+        Statement::ForInStatement(statement) => {
+            node.children.push(expression_tree(&statement.right));
+            node.children.push(statement_tree(&statement.body));
+        }
+        Statement::ForOfStatement(statement) => {
+            node.children.push(expression_tree(&statement.right));
+            node.children.push(statement_tree(&statement.body));
+        }
+        Statement::ForStatement(statement) => {
+            if let Some(test) = &statement.test {
+                node.children.push(expression_tree(test));
+            }
+            if let Some(update) = &statement.update {
+                node.children.push(expression_tree(update));
+            }
+            node.children.push(statement_tree(&statement.body));
+        }
+        Statement::IfStatement(statement) => {
+            node.children.push(expression_tree(&statement.test));
+            node.children.push(statement_tree(&statement.consequent));
+            if let Some(alternate) = &statement.alternate {
+                node.children.push(statement_tree(alternate));
+            }
+        }
+        Statement::LabeledStatement(statement) => {
+            node.children.push(statement_tree(&statement.body));
+        }
+        Statement::ReturnStatement(statement) => {
+            if let Some(argument) = &statement.argument {
+                node.children.push(expression_tree(argument));
+            }
+        }
+        Statement::SwitchStatement(statement) => {
+            node.children.push(expression_tree(&statement.discriminant));
+            for case in &statement.cases {
+                let mut case_node = TreeNode {
+                    label: if case.test.is_some() {
+                        "case".to_string()
+                    } else {
+                        "default".to_string()
+                    },
+                    children: Vec::new(),
+                };
+                if let Some(test) = &case.test {
+                    case_node.children.push(expression_tree(test));
+                }
+                case_node
+                    .children
+                    .extend(case.consequent.iter().map(statement_tree));
+                node.children.push(case_node);
+            }
+        }
+        Statement::ThrowStatement(statement) => {
+            node.children.push(expression_tree(&statement.argument));
+        }
+        Statement::TryStatement(statement) => {
+            node.children
+                .extend(statement.block.body.iter().map(statement_tree));
+            if let Some(handler) = &statement.handler {
+                let mut catch_node = TreeNode {
+                    label: "catch".to_string(),
+                    children: Vec::new(),
+                };
+                catch_node
+                    .children
+                    .extend(handler.body.body.iter().map(statement_tree));
+                node.children.push(catch_node);
+            }
+            if let Some(finalizer) = &statement.finalizer {
+                let mut finally_node = TreeNode {
+                    label: "finally".to_string(),
+                    children: Vec::new(),
+                };
+                finally_node
+                    .children
+                    .extend(finalizer.body.iter().map(statement_tree));
+                node.children.push(finally_node);
+            }
+        }
+        Statement::WhileStatement(statement) => {
+            node.children.push(expression_tree(&statement.test));
+            node.children.push(statement_tree(&statement.body));
+        }
+        Statement::WithStatement(statement) => {
+            node.children.push(expression_tree(&statement.object));
+            node.children.push(statement_tree(&statement.body));
+        }
+        Statement::FunctionDeclaration(function) => {
+            if let Some(body) = &function.body {
+                node.children
+                    .extend(body.statements.iter().map(statement_tree));
+            }
+        }
+        Statement::ClassDeclaration(class) => {
+            node.children
+                .extend(
+                    class_member_shape_members(class)
+                        .into_iter()
+                        .map(|label| TreeNode {
+                            label,
+                            children: Vec::new(),
+                        }),
+                );
+        }
+        Statement::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                let mut declarator_node = TreeNode {
+                    label: format!("binding:{}", binding_pattern_shape(&declarator.id)),
+                    children: Vec::new(),
+                };
+                if let Some(init) = &declarator.init {
+                    declarator_node.children.push(expression_tree(init));
+                }
+                node.children.push(declarator_node);
+            }
+        }
+        Statement::ExportNamedDeclaration(declaration) => {
+            if let Some(declaration) = &declaration.declaration {
+                node.children.push(declaration_tree(declaration));
+            }
+        }
+        Statement::ExportDefaultDeclaration(declaration) => {
+            match &declaration.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                    if let Some(body) = &function.body {
+                        node.children
+                            .extend(body.statements.iter().map(statement_tree));
+                    }
+                }
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                    node.children
+                        .extend(class_member_shape_members(class).into_iter().map(|label| {
+                            TreeNode {
+                                label,
+                                children: Vec::new(),
+                            }
+                        }));
+                }
+                declaration => {
+                    if let Some(expression) = declaration.as_expression() {
+                        node.children.push(expression_tree(expression));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    node
+}
+
+fn declaration_tree(declaration: &Declaration<'_>) -> TreeNode {
+    match declaration {
+        Declaration::VariableDeclaration(declaration) => {
+            let mut node = TreeNode {
+                label: format!(
+                    "variable:{:?}:{}",
+                    declaration.kind,
+                    declaration.declarations.len()
+                ),
+                children: Vec::new(),
+            };
+            for declarator in &declaration.declarations {
+                if let Some(init) = &declarator.init {
+                    node.children.push(expression_tree(init));
+                }
+            }
+            node
+        }
+        Declaration::FunctionDeclaration(function) => {
+            let mut node = TreeNode {
+                label: function_shape(function),
+                children: Vec::new(),
+            };
+            if let Some(body) = &function.body {
+                node.children
+                    .extend(body.statements.iter().map(statement_tree));
+            }
+            node
+        }
+        Declaration::ClassDeclaration(class) => TreeNode {
+            label: class_declaration_shape(class),
+            children: class_member_shape_members(class)
+                .into_iter()
+                .map(|label| TreeNode {
+                    label,
+                    children: Vec::new(),
+                })
+                .collect(),
+        },
+        _ => TreeNode {
+            label: declaration_shape(declaration),
+            children: Vec::new(),
+        },
+    }
+}
+
+fn expression_tree(expression: &Expression<'_>) -> TreeNode {
+    TreeNode {
+        label: format!("expr:{}", expression_shape(expression)),
+        children: Vec::new(),
     }
 }
 
@@ -920,7 +1194,7 @@ fn is_usable_object_shape_key(key: &str) -> bool {
         )
 }
 
-fn class_method_shape_members(class: &Class<'_>) -> BTreeSet<String> {
+fn class_member_shape_members(class: &Class<'_>) -> BTreeSet<String> {
     class
         .body
         .body
@@ -1150,5 +1424,21 @@ mod tests {
         .expect("fingerprint");
         assert!(!fingerprint.statement_window_hashes.is_empty());
         assert!(!fingerprint.block_branch_hashes.is_empty());
+    }
+
+    #[test]
+    fn pq_grams_ignore_local_names_and_capture_statement_tree() {
+        let left = fingerprint_source(
+            "a.ts",
+            "function run(x) { const y = x + 1; if (y) { return 'yes'; } return 'no'; }\n",
+        )
+        .expect("left fingerprint");
+        let right = fingerprint_source(
+            "b.ts",
+            "function run(value) { const result = value + 1; if (result) { return 'yes'; } return 'no'; }\n",
+        )
+        .expect("right fingerprint");
+        assert_eq!(left.pq_gram_hashes, right.pq_gram_hashes);
+        assert!(!left.pq_gram_hashes.is_empty());
     }
 }

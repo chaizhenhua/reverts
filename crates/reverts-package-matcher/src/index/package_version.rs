@@ -311,6 +311,7 @@ pub(crate) fn module_match_fingerprint(
         class_member_hashes: source_fingerprint.class_member_hashes,
         statement_window_hashes: source_fingerprint.statement_window_hashes,
         block_branch_hashes: source_fingerprint.block_branch_hashes,
+        pq_gram_hashes: source_fingerprint.pq_gram_hashes,
         string_anchors: source_fingerprint.string_anchors,
         function_axis_anchors: profile.function_axis_anchors,
         jsx_react_shape_anchors: profile.jsx_react_shape_anchors,
@@ -339,6 +340,7 @@ pub(crate) fn package_source_fingerprint<'a>(
             class_member_hashes: cached.class_member_hashes.clone(),
             statement_window_hashes: cached.statement_window_hashes.clone(),
             block_branch_hashes: cached.block_branch_hashes.clone(),
+            pq_gram_hashes: cached.pq_gram_hashes.clone(),
             string_anchors: cached.string_anchors.clone(),
             function_axis_anchors: profile.function_axis_anchors,
             jsx_react_shape_anchors: profile.jsx_react_shape_anchors,
@@ -370,6 +372,7 @@ pub(crate) fn package_source_fingerprint_from_source<'a>(
         class_member_hashes: fingerprint.class_member_hashes,
         statement_window_hashes: fingerprint.statement_window_hashes,
         block_branch_hashes: fingerprint.block_branch_hashes,
+        pq_gram_hashes: fingerprint.pq_gram_hashes,
         string_anchors: fingerprint.string_anchors,
         function_axis_anchors,
         jsx_react_shape_anchors,
@@ -398,6 +401,7 @@ mod fingerprint_cache_tests {
             class_member_hashes: anchors(&["member1"]),
             statement_window_hashes: anchors(&["window1"]),
             block_branch_hashes: anchors(&["block1"]),
+            pq_gram_hashes: anchors(&["pq1"]),
             string_anchors: anchors(&["anchor"]),
         };
         // Deliberately unparseable body: if the matcher reused the cache it
@@ -425,6 +429,7 @@ mod fingerprint_cache_tests {
         assert_eq!(fp.class_member_hashes, cached.class_member_hashes);
         assert_eq!(fp.statement_window_hashes, cached.statement_window_hashes);
         assert_eq!(fp.block_branch_hashes, cached.block_branch_hashes);
+        assert_eq!(fp.pq_gram_hashes, cached.pq_gram_hashes);
         assert_eq!(fp.string_anchors, cached.string_anchors);
     }
 

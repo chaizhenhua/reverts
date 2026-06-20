@@ -396,11 +396,11 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     trace_reference_source_names(trace_start, "propagate_symbols");
 
     println!(
-        "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\ttop_decl\tsurface\tmember\tstmt_win\tblock_branch\tgranular\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
+        "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\ttop_decl\tsurface\tmember\tstmt_win\tblock_branch\tpq_gram\tgranular\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
     );
     for plan in &plans {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.1}\t{:.3}\t{:.3}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.1}\t{:.3}\t{:.3}\t{}",
             plan.module_id,
             plan.subject_path,
             plan.reference_version,
@@ -415,6 +415,7 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             plan.matched.class_member_overlap,
             plan.matched.statement_window_overlap,
             plan.matched.block_branch_overlap,
+            plan.matched.pq_gram_overlap,
             granular_match_overlap(&plan.matched),
             plan.matched.structural_score,
             plan.matched.graph_support,
@@ -931,6 +932,7 @@ fn low_boundary_row_json(
             "class_member_overlap": matched.class_member_overlap,
             "statement_window_overlap": matched.statement_window_overlap,
             "block_branch_overlap": matched.block_branch_overlap,
+            "pq_gram_overlap": matched.pq_gram_overlap,
             "granular_hash_overlap": granular_match_overlap(matched),
             "structural_score": matched.structural_score,
             "graph_support": matched.graph_support,
@@ -1235,6 +1237,7 @@ fn candidate_diagnostic_json(relevance: f64, matched: &ModuleMatch) -> serde_jso
             "class_member_overlap": matched.class_member_overlap,
             "statement_window_overlap": matched.statement_window_overlap,
             "block_branch_overlap": matched.block_branch_overlap,
+            "pq_gram_overlap": matched.pq_gram_overlap,
             "granular_hash_overlap": granular_match_overlap(matched),
             "structural_score": matched.structural_score,
             "graph_support": matched.graph_support,
@@ -2203,6 +2206,7 @@ pub(crate) struct ModuleMatch {
     pub class_member_overlap: usize,
     pub statement_window_overlap: usize,
     pub block_branch_overlap: usize,
+    pub pq_gram_overlap: usize,
     /// Aggregate structural-bag score produced by the shared package matcher
     /// scorer. This reuses package matcher matching mechanics for first-party
     /// source matching instead of maintaining a separate, weaker source-only
@@ -2272,6 +2276,7 @@ struct MatchEvidence {
     class_member_overlap: usize,
     statement_window_overlap: usize,
     block_branch_overlap: usize,
+    pq_gram_overlap: usize,
     source_score: SourceEvidenceScore,
     structural_score: f64,
     graph: GraphEvidence,
@@ -2290,6 +2295,7 @@ fn granular_fingerprint_hashes(fingerprint: &SourceFingerprint) -> BTreeSet<Stri
         .chain(fingerprint.class_member_hashes.iter())
         .chain(fingerprint.statement_window_hashes.iter())
         .chain(fingerprint.block_branch_hashes.iter())
+        .chain(fingerprint.pq_gram_hashes.iter())
         .cloned()
         .collect()
 }
@@ -2299,6 +2305,7 @@ fn granular_hash_overlap(evidence: MatchEvidence) -> usize {
         + evidence.class_member_overlap
         + evidence.statement_window_overlap
         + evidence.block_branch_overlap
+        + evidence.pq_gram_overlap
 }
 
 fn granular_match_overlap(matched: &ModuleMatch) -> usize {
@@ -2357,6 +2364,7 @@ fn candidate_relevance(evidence: MatchEvidence) -> f64 {
         + (evidence.class_member_overlap as f64) * 18.0
         + (evidence.statement_window_overlap as f64) * 10.0
         + (evidence.block_branch_overlap as f64) * 8.0
+        + (evidence.pq_gram_overlap as f64) * 6.0
         + evidence.source_score.function_axis_jaccard * 120.0
         + evidence.source_score.function_axis_containment * 60.0
         + evidence.source_score.jsx_react_shape_jaccard * 80.0
@@ -2403,6 +2411,12 @@ fn raw_match_tier(evidence: MatchEvidence) -> MatchTier {
         || (evidence.top_level_declaration_overlap >= 1
             && evidence.normalized_anchor >= MEDIUM_CONTENT_NORMALIZED_FLOOR
             && evidence.source_score.function_axis_containment >= 0.35)
+        || (evidence.pq_gram_overlap >= 6
+            && (evidence.normalized_anchor >= 0.03
+                || evidence.source_score.unique_string_anchor_overlap >= 1
+                || evidence.source_score.function_axis_containment >= 0.25
+                || evidence.top_level_declaration_overlap >= 1
+                || evidence.class_member_overlap >= 1))
         || (granular_hash_overlap(evidence) >= 4
             && (evidence.normalized_anchor >= 0.03
                 || evidence.source_score.unique_string_anchor_overlap >= 1
@@ -2532,6 +2546,10 @@ fn ranked_module_matches(
             &fingerprint.block_branch_hashes,
             &module.fingerprint.block_branch_hashes,
         );
+        let pq_gram_overlap = overlap_len(
+            &fingerprint.pq_gram_hashes,
+            &module.fingerprint.pq_gram_hashes,
+        );
         let anchor_overlap = overlap_len(
             &fingerprint.string_anchors,
             &module.fingerprint.string_anchors,
@@ -2586,6 +2604,7 @@ fn ranked_module_matches(
             class_member_overlap,
             statement_window_overlap,
             block_branch_overlap,
+            pq_gram_overlap,
             source_score,
             structural_score,
             graph,
@@ -2607,6 +2626,7 @@ fn ranked_module_matches(
                 class_member_overlap,
                 statement_window_overlap,
                 block_branch_overlap,
+                pq_gram_overlap,
                 structural_score,
                 graph_support: graph.matched_edges,
                 graph_known_edges: graph.known_edges,
@@ -3627,6 +3647,7 @@ fn apply_module_promotions(
                 class_member_overlap: 0,
                 statement_window_overlap: 0,
                 block_branch_overlap: 0,
+                pq_gram_overlap: 0,
                 structural_score: 0.0,
                 graph_support: 0,
                 graph_known_edges: 0,
@@ -4099,6 +4120,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             class_member_hashes: BTreeSet::new(),
             statement_window_hashes: BTreeSet::new(),
             block_branch_hashes: BTreeSet::new(),
+            pq_gram_hashes: BTreeSet::new(),
             string_anchors: anchors.iter().map(|s| (*s).to_string()).collect(),
         }
     }
@@ -4284,6 +4306,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             class_member_overlap: 0,
             statement_window_overlap: 0,
             block_branch_overlap: 0,
+            pq_gram_overlap: 0,
             source_score: SourceEvidenceScore::default(),
             structural_score: 0.0,
             graph: GraphEvidence::default(),
@@ -4314,6 +4337,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             class_member_overlap: 0,
             statement_window_overlap: 0,
             block_branch_overlap: 0,
+            pq_gram_overlap: 0,
             structural_score: 0.0,
             graph_support: 0,
             graph_known_edges: 0,

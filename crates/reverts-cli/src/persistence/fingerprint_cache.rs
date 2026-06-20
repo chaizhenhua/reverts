@@ -55,6 +55,7 @@ fn serialize_fingerprint(fingerprint: &SourceFingerprint) -> String {
         "cm": fingerprint.class_member_hashes,
         "sw": fingerprint.statement_window_hashes,
         "bb": fingerprint.block_branch_hashes,
+        "pq": fingerprint.pq_gram_hashes,
         "sa": fingerprint.string_anchors,
     })
     .to_string()
@@ -83,6 +84,7 @@ fn deserialize_fingerprint(json: &str) -> Option<SourceFingerprint> {
         class_member_hashes: string_set("cm"),
         statement_window_hashes: string_set("sw"),
         block_branch_hashes: string_set("bb"),
+        pq_gram_hashes: string_set("pq"),
         string_anchors: string_set("sa"),
     })
 }
@@ -237,6 +239,7 @@ mod tests {
             class_member_hashes: BTreeSet::from([format!("{tag}-member")]),
             statement_window_hashes: BTreeSet::from([format!("{tag}-window")]),
             block_branch_hashes: BTreeSet::from([format!("{tag}-block")]),
+            pq_gram_hashes: BTreeSet::from([format!("{tag}-pq")]),
             string_anchors: BTreeSet::from([format!("{tag}-anchor")]),
         }
     }
