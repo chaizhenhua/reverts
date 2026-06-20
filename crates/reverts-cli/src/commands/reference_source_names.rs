@@ -105,24 +105,31 @@ struct ModulePlan {
     reference_exports: std::collections::BTreeSet<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PlanSupportOptions {
+    structural_bag: bool,
+    graph_support: bool,
+    graph_structure: bool,
+}
+
 fn plan_modules(
     subjects: &[SubjectModule],
     index: &ReferenceSourceIndex,
-    use_structural_graph_support: bool,
+    support_options: PlanSupportOptions,
 ) -> Result<Vec<ModulePlan>, CliRunError> {
     let trace_start = Instant::now();
-    let structural_support = if use_structural_graph_support {
+    let structural_support = if support_options.structural_bag {
         source_structural_support(subjects, index)
     } else {
         BTreeMap::new()
     };
     trace_reference_source_names(trace_start, "plan.source_structural_support");
-    let graph_support = if use_structural_graph_support {
+    let graph_support = if support_options.graph_support {
         source_graph_support(subjects, index, &structural_support)
     } else {
         BTreeMap::new()
     };
-    let graph_structure = if use_structural_graph_support {
+    let graph_structure = if support_options.graph_structure {
         source_graph_structure(subjects, index)
     } else {
         GraphStructureContext::default()
@@ -130,6 +137,16 @@ fn plan_modules(
     trace_reference_source_names(trace_start, "plan.source_graph_support");
     let subject_best_matches =
         best_ranked_by_subject(subjects, index, &structural_support, &graph_support);
+    let post_match_graph_support =
+        if support_options.graph_structure && !support_options.graph_support {
+            let assignment = subject_best_matches
+                .iter()
+                .map(|(module_id, ranked)| (*module_id, ranked.best.matched.file_path.clone()))
+                .collect::<BTreeMap<_, _>>();
+            source_graph_support_for_assignment(subjects, index, &assignment)
+        } else {
+            BTreeMap::new()
+        };
     trace_reference_source_names(trace_start, "plan.best_ranked_by_subject");
     let reference_best_subjects = best_subject_by_reference_matches(&subject_best_matches);
     let mut plans = Vec::new();
@@ -142,6 +159,7 @@ fn plan_modules(
             continue;
         };
         let mut matched = ranked.best.matched.clone();
+        attach_post_match_graph_support(subject.module_id, &mut matched, &post_match_graph_support);
         matched.graph_structure = graph_structure_evidence(
             subject.module_id,
             matched.file_path.as_str(),
@@ -176,6 +194,11 @@ fn plan_modules(
             })
             .unwrap_or_default();
         let runner_up = ranked.runner_up.clone().map(|mut runner_up| {
+            attach_post_match_graph_support(
+                subject.module_id,
+                &mut runner_up.matched,
+                &post_match_graph_support,
+            );
             runner_up.matched.graph_structure = graph_structure_evidence(
                 subject.module_id,
                 runner_up.matched.file_path.as_str(),
@@ -183,6 +206,16 @@ fn plan_modules(
             );
             runner_up
         });
+        if matched.tier == MatchTier::Low && guarded_graph_placement_promotion(&matched) {
+            matched.tier = MatchTier::Medium;
+        }
+        if matched.tier == MatchTier::Low
+            && runner_up
+                .as_ref()
+                .is_some_and(|runner_up| guarded_ambiguous_promotion(&matched, &runner_up.matched))
+        {
+            matched.tier = MatchTier::Medium;
+        }
         plans.push(ModulePlan {
             module_id: subject.module_id,
             subject_path: subject.file_path.clone(),
@@ -301,7 +334,20 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
         subject_modules(&args)?
     };
     trace_reference_source_names(trace_start, "subject_modules");
-    let mut plans = plan_modules(&subjects, &index, !args.module_only)?;
+    let mut plans = plan_modules(
+        &subjects,
+        &index,
+        PlanSupportOptions {
+            // Full generated-output mode can afford the costlier structural-bag
+            // refinement. Module-only bundle matching is optimized for large
+            // single-file targets, so keep structural bags off there but still
+            // build dependency graph evidence/diagnostics from extracted module
+            // slices.
+            structural_bag: !args.module_only,
+            graph_support: !args.module_only,
+            graph_structure: true,
+        },
+    )?;
     trace_reference_source_names(trace_start, "plan_modules");
 
     // Collect every named function across both corpora once. In module-only
@@ -1763,6 +1809,40 @@ fn source_graph_support(
     support
 }
 
+fn source_graph_support_for_assignment(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+    assignment: &BTreeMap<u32, String>,
+) -> BTreeMap<u32, BTreeMap<String, GraphEvidence>> {
+    if assignment.is_empty() {
+        return BTreeMap::new();
+    }
+    let edges = build_source_graph_edges(subjects, index);
+    graph_neighborhood_support(
+        &edges.subject_deps,
+        &edges.subject_incoming,
+        &edges.reference_deps,
+        &edges.reference_incoming,
+        assignment,
+    )
+}
+
+fn attach_post_match_graph_support(
+    module_id: u32,
+    matched: &mut ModuleMatch,
+    post_match_graph_support: &BTreeMap<u32, BTreeMap<String, GraphEvidence>>,
+) {
+    let graph = post_match_graph_support
+        .get(&module_id)
+        .and_then(|support| support.get(matched.file_path.as_str()))
+        .copied()
+        .unwrap_or_default();
+    if graph.known_edges > 0 {
+        matched.graph_support = graph.matched_edges;
+        matched.graph_known_edges = graph.known_edges;
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct SourceGraphEdges {
     subject_deps: BTreeMap<u32, BTreeSet<u32>>,
@@ -2194,6 +2274,18 @@ const MAX_PROPAGATION_ROUNDS: usize = 1;
 /// unrelated modules all "matching" `utils/debug.ts`, three "matching"
 /// `cli/print.ts`, all at nanchor=0). Content is the true/false discriminator.
 const MEDIUM_CONTENT_NORMALIZED_FLOOR: f64 = 0.05;
+/// A narrow Low->Medium recovery path for the largest diagnostic bucket:
+/// top candidate has meaningful source/content evidence but was demoted only
+/// because the runner-up is close on aggregate relevance. This is deliberately
+/// below `MEDIUM_SCORE_MARGIN` and must be accompanied by axis-specific deltas
+/// over the runner-up, so WL/PQ/multigranular shape never promote by themselves.
+const AMBIGUOUS_PROMOTION_MIN_MARGIN: f64 = 0.05;
+const AMBIGUOUS_PROMOTION_MIN_NANCHOR: f64 = 0.03;
+const AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR: f64 = 6.0;
+const AMBIGUOUS_PROMOTION_NANCHOR_DELTA: f64 = 0.035;
+const AMBIGUOUS_PROMOTION_WEIGHTED_DELTA: f64 = 4.0;
+const AMBIGUOUS_PROMOTION_GRANULAR_DELTA: usize = 8;
+const AMBIGUOUS_PROMOTION_WINDOW_DELTA: usize = 2;
 
 type GraphEvidence = GraphNeighborhoodEvidence;
 
@@ -2505,6 +2597,110 @@ fn calibrate_tier(
         }
         MatchTier::Medium => MatchTier::Low,
     }
+}
+
+fn guarded_ambiguous_promotion(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
+    if top.margin < AMBIGUOUS_PROMOTION_MIN_MARGIN {
+        return false;
+    }
+    if !has_ambiguous_promotion_content(top) {
+        return false;
+    }
+    if has_clear_anchor_delta(top, runner_up) {
+        return true;
+    }
+    if has_clear_source_axis_delta(top, runner_up) {
+        return true;
+    }
+    if has_clear_granular_delta(top, runner_up) {
+        return true;
+    }
+    has_clear_graph_delta(top, runner_up)
+}
+
+fn guarded_graph_placement_promotion(matched: &ModuleMatch) -> bool {
+    if matched.graph_support == 0 || matched.graph_known_edges == 0 {
+        return false;
+    }
+    let anchored_graph_match = matched.graph_support >= MEDIUM_GRAPH_SUPPORT
+        && matched.weighted_anchor >= MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR
+        && matched.normalized_anchor >= MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR;
+    let strong_graph_match = matched.graph_support >= 3
+        && matched.graph_support * 5 >= matched.graph_known_edges * 3
+        && has_ambiguous_promotion_content(matched);
+    let complete_small_neighborhood = matched.graph_known_edges >= 2
+        && matched.graph_support == matched.graph_known_edges
+        && matched.normalized_anchor >= MEDIUM_CONTENT_NORMALIZED_FLOOR;
+    anchored_graph_match || strong_graph_match || complete_small_neighborhood
+}
+
+fn has_ambiguous_promotion_content(matched: &ModuleMatch) -> bool {
+    matched.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
+        || matched.weighted_anchor >= AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR
+        || matched.source_score.unique_string_anchor_overlap >= 1
+        || (matched.source_score.function_axis_overlap >= 4
+            && matched.source_score.function_axis_containment >= 0.25)
+}
+
+fn has_clear_anchor_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
+    top.normalized_anchor >= runner_up.normalized_anchor + AMBIGUOUS_PROMOTION_NANCHOR_DELTA
+        && top.weighted_anchor >= runner_up.weighted_anchor + AMBIGUOUS_PROMOTION_WEIGHTED_DELTA
+}
+
+fn has_clear_source_axis_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
+    let unique_delta = top
+        .source_score
+        .unique_string_anchor_overlap
+        .saturating_sub(runner_up.source_score.unique_string_anchor_overlap);
+    let function_delta = top
+        .source_score
+        .function_axis_overlap
+        .saturating_sub(runner_up.source_score.function_axis_overlap);
+    unique_delta >= 1
+        && (function_delta >= 4
+            || top.source_score.function_axis_jaccard
+                >= runner_up.source_score.function_axis_jaccard + 0.05
+            || positive_metric_delta(top, runner_up, |matched| matched.statement_window_overlap)
+                >= AMBIGUOUS_PROMOTION_WINDOW_DELTA
+            || positive_metric_delta(top, runner_up, |matched| matched.block_branch_overlap)
+                >= AMBIGUOUS_PROMOTION_WINDOW_DELTA)
+}
+
+fn has_clear_granular_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
+    let granular_delta =
+        granular_match_overlap(top).saturating_sub(granular_match_overlap(runner_up));
+    let statement_delta =
+        positive_metric_delta(top, runner_up, |matched| matched.statement_window_overlap);
+    let block_delta = positive_metric_delta(top, runner_up, |matched| matched.block_branch_overlap);
+    let wl_delta = positive_metric_delta(top, runner_up, |matched| matched.wl_overlap);
+    granular_delta >= AMBIGUOUS_PROMOTION_GRANULAR_DELTA
+        && (statement_delta >= AMBIGUOUS_PROMOTION_WINDOW_DELTA
+            || block_delta >= AMBIGUOUS_PROMOTION_WINDOW_DELTA
+            || wl_delta >= 3)
+        && (top.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
+            || top.source_score.unique_string_anchor_overlap >= 1
+            || top.source_score.function_axis_containment >= 0.25)
+}
+
+fn has_clear_graph_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
+    if top.graph_known_edges == 0 {
+        return false;
+    }
+    let support_delta = top.graph_support.saturating_sub(runner_up.graph_support);
+    let ratio_delta = matched_neighbor_ratio(top) - matched_neighbor_ratio(runner_up);
+    support_delta >= 1
+        && ratio_delta >= 0.25
+        && (top.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
+            || top.source_score.unique_string_anchor_overlap >= 1
+            || top.weighted_anchor >= MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR)
+}
+
+fn positive_metric_delta(
+    top: &ModuleMatch,
+    runner_up: &ModuleMatch,
+    metric: impl Fn(&ModuleMatch) -> usize,
+) -> usize {
+    metric(top).saturating_sub(metric(runner_up))
 }
 
 fn has_sourced_near_strong_support(score: SourceEvidenceScore) -> bool {
@@ -4505,6 +4701,151 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             MatchTier::Low,
             "reciprocal near misses without source corroboration remain Low"
         );
+    }
+
+    #[test]
+    fn ambiguous_promotion_requires_content_and_runner_up_axis_delta() {
+        let mut top = make_plan(10, "features/top", MatchTier::Low).matched;
+        top.margin = AMBIGUOUS_PROMOTION_MIN_MARGIN;
+        top.normalized_anchor = 0.08;
+        top.weighted_anchor = 12.0;
+        top.statement_window_overlap = 6;
+        top.block_branch_overlap = 4;
+        top.wl_overlap = 8;
+
+        let mut runner_up = make_plan(11, "features/runner", MatchTier::Low).matched;
+        runner_up.normalized_anchor = 0.02;
+        runner_up.weighted_anchor = 4.0;
+        runner_up.statement_window_overlap = 2;
+        runner_up.block_branch_overlap = 1;
+        runner_up.wl_overlap = 3;
+
+        assert!(
+            guarded_ambiguous_promotion(&top, &runner_up),
+            "content plus clear top-vs-runner-up axis deltas should recover near-medium ambiguous rows"
+        );
+
+        let mut no_content = top.clone();
+        no_content.normalized_anchor = 0.0;
+        no_content.weighted_anchor = 0.0;
+        no_content.source_score = SourceEvidenceScore::default();
+        assert!(
+            !guarded_ambiguous_promotion(&no_content, &runner_up),
+            "shape/WL/PQ evidence must not promote without content/source corroboration"
+        );
+
+        let mut no_delta = runner_up.clone();
+        no_delta.normalized_anchor = top.normalized_anchor;
+        no_delta.weighted_anchor = top.weighted_anchor;
+        no_delta.statement_window_overlap = top.statement_window_overlap;
+        no_delta.block_branch_overlap = top.block_branch_overlap;
+        no_delta.wl_overlap = top.wl_overlap;
+        assert!(
+            !guarded_ambiguous_promotion(&top, &no_delta),
+            "ambiguous rows stay Low when the runner-up has equivalent evidence"
+        );
+    }
+
+    #[test]
+    fn graph_placement_promotion_requires_anchor_or_content_corroboration() {
+        let mut matched = make_plan(12, "features/graph", MatchTier::Low).matched;
+        matched.graph_support = 2;
+        matched.graph_known_edges = 2;
+        matched.weighted_anchor = MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR;
+        matched.normalized_anchor = MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR;
+        assert!(
+            guarded_graph_placement_promotion(&matched),
+            "matched graph neighbors plus anchor corroboration should promote"
+        );
+
+        let mut graph_only = matched.clone();
+        graph_only.weighted_anchor = 0.0;
+        graph_only.normalized_anchor = 0.0;
+        graph_only.source_score = SourceEvidenceScore::default();
+        assert!(
+            !guarded_graph_placement_promotion(&graph_only),
+            "graph placement without source/content corroboration remains Low"
+        );
+    }
+
+    #[test]
+    fn module_only_planning_builds_graph_structure_without_structural_bags() {
+        let subject_a_fp = fp(&["subject-a-rare"]);
+        let subject_b_fp = fp(&["subject-b-rare"]);
+        let subjects = vec![
+            SubjectModule {
+                module_id: 1,
+                file_path: "modules/a.ts".to_string(),
+                source: "import './b'; const value = 'subject-a-rare';".to_string(),
+                fingerprint: subject_a_fp.clone(),
+                profile: test_profile("modules/a.ts", subject_a_fp),
+                dependencies: BTreeSet::new(),
+                bindings: Vec::new(),
+            },
+            SubjectModule {
+                module_id: 2,
+                file_path: "modules/b.ts".to_string(),
+                source: "export const value = 'subject-b-rare';".to_string(),
+                fingerprint: subject_b_fp.clone(),
+                profile: test_profile("modules/b.ts", subject_b_fp),
+                dependencies: BTreeSet::new(),
+                bindings: Vec::new(),
+            },
+        ];
+        let ref_a_fp = fp(&["subject-a-rare"]);
+        let ref_b_fp = fp(&["subject-b-rare"]);
+        let index = test_index(vec![
+            ReferenceSourceModule {
+                file_path: "src/a.ts".to_string(),
+                source: "import './b'; const value = 'subject-a-rare';".to_string(),
+                profile: test_profile("src/a.ts", ref_a_fp.clone()),
+                fingerprint: ref_a_fp,
+                export_names: BTreeSet::new(),
+                asset_literals: BTreeSet::new(),
+            },
+            ReferenceSourceModule {
+                file_path: "src/b.ts".to_string(),
+                source: "export const value = 'subject-b-rare';".to_string(),
+                profile: test_profile("src/b.ts", ref_b_fp.clone()),
+                fingerprint: ref_b_fp,
+                export_names: BTreeSet::new(),
+                asset_literals: BTreeSet::new(),
+            },
+            refmod("src/filler-one.ts", &["filler-one-rare"]),
+            refmod("src/filler-two.ts", &["filler-two-rare"]),
+        ]);
+
+        let plans = plan_modules(
+            &subjects,
+            &index,
+            PlanSupportOptions {
+                structural_bag: false,
+                graph_support: false,
+                graph_structure: true,
+            },
+        )
+        .expect("planning should succeed");
+        let plan = plans
+            .iter()
+            .find(|plan| plan.module_id == 1)
+            .expect("subject a should be planned");
+
+        assert_eq!(plan.matched.file_path, "src/a.ts");
+        assert!(
+            plan.matched.graph_structure.subject_has_edges,
+            "module-only subject graph should be populated from extracted slice imports"
+        );
+        assert!(
+            plan.matched.graph_structure.reference_has_edges,
+            "reference graph should be populated from source imports"
+        );
+        assert_eq!(plan.matched.graph_structure.subject_out_degree, 1);
+        assert_eq!(plan.matched.graph_structure.reference_out_degree, 1);
+        assert_eq!(
+            plan.matched.graph_known_edges, 1,
+            "post-match graph support should expose seeded neighbor coverage in module-only mode"
+        );
+        assert_eq!(plan.matched.graph_support, 1);
     }
 
     #[test]
