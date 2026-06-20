@@ -841,21 +841,26 @@ struct SubjectModule {
 fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>, CliRunError> {
     let bundle = load_project_bundle_with_package_externalization(&args.input, args.project_id)
         .map_err(|error| CliRunError::ReferenceSourceNames(format!("load input: {error}")))?;
-    let package_owned_modules = bundle
+    // Exclude only EXTERNALIZED package modules (`Accepted` → emitted as a runtime
+    // `import` of the real npm package); those have no first-party counterpart in
+    // the reference tree. `Rejected` modules are package code that was inlined
+    // (vendored) rather than externalized — and crucially, a `Rejected` attribution
+    // can be a FALSE POSITIVE of the package matcher (e.g. first-party `insights`
+    // mis-attributed to highlight.js). Including them as first-party subjects lets
+    // a strong cross-version match RECLAIM such mis-attributed modules; genuine
+    // inlined package code (react/undici/…) shares no distinctive anchors with any
+    // reference file, so the medium-tier accept gate never names it.
+    let externalized_modules = bundle
         .package_attributions
         .iter()
         .filter(|attribution| {
-            matches!(
-                attribution.status,
-                PackageAttributionStatus::Accepted | PackageAttributionStatus::Rejected
-            ) && attribution.package_version.is_some()
+            matches!(attribution.status, PackageAttributionStatus::Accepted)
+                && attribution.package_version.is_some()
         })
         .map(|attribution| attribution.module_id.0)
         .collect::<BTreeSet<_>>();
-    // Standard naming targets the non-package modules; package-owned modules are
-    // externalized (or named separately by `ownership-source-names`).
     generate_subject_modules(bundle, |module_id| {
-        !package_owned_modules.contains(&module_id)
+        !externalized_modules.contains(&module_id)
     })
 }
 
@@ -948,14 +953,15 @@ fn subject_modules_from_extracted_input(
     ))
 }
 
+/// Externalized (`Accepted`) package modules only — see [`subject_modules`] for
+/// why `Rejected` (inlined / possibly mis-attributed) modules stay eligible as
+/// first-party subjects.
 fn package_owned_modules_from_rows(rows: &InputRows) -> BTreeSet<u32> {
     rows.package_attributions
         .iter()
         .filter(|attribution| {
-            matches!(
-                attribution.status,
-                PackageAttributionStatus::Accepted | PackageAttributionStatus::Rejected
-            ) && attribution.package_version.is_some()
+            matches!(attribution.status, PackageAttributionStatus::Accepted)
+                && attribution.package_version.is_some()
         })
         .map(|attribution| attribution.module_id.0)
         .collect()
