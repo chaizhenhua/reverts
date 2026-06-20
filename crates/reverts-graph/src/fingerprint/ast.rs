@@ -69,8 +69,12 @@ fn hash_statement(hash: &mut u64, stmt: &Statement<'_>) {
         }
         Statement::SwitchStatement(_) => update_fnv1a(hash, b"switch"),
         Statement::VariableDeclaration(v) => {
+            // Cross-build normalization: esbuild bundling lowers `let`/`const` to
+            // `var`, so a decompiled `var` is the same declaration as a source
+            // `let`/`const`. Hashing the kind would split every such pair, which
+            // is the single most common reason a bundle function fails to match
+            // its clean-source original. Unify the kind.
             update_fnv1a(hash, b"var(");
-            update_fnv1a(hash, format!("{:?}", v.kind).as_bytes());
             update_fnv1a(hash, format!("/{}", v.declarations.len()).as_bytes());
             update_fnv1a(hash, b")");
         }
@@ -134,8 +138,13 @@ fn hash_expression(hash: &mut u64, expr: &Expression<'_>) {
         E::ComputedMemberExpression(_) => update_fnv1a(hash, b"cmem"),
         E::ConditionalExpression(_) => update_fnv1a(hash, b"cond"),
         E::AssignmentExpression(_) => update_fnv1a(hash, b"assign"),
-        E::ArrowFunctionExpression(_) => update_fnv1a(hash, b"arrow"),
-        E::FunctionExpression(_) => update_fnv1a(hash, b"fnexpr"),
+        // Cross-build normalization: an arrow callback and a function-expression
+        // callback are interchangeable forms that minify/decompile swap freely,
+        // so a nested `() => ...` and `function () { ... }` must not split the
+        // enclosing function's hash. Unify them as a generic function value.
+        E::ArrowFunctionExpression(_) | E::FunctionExpression(_) => {
+            update_fnv1a(hash, b"fnval");
+        }
         E::ObjectExpression(_) => update_fnv1a(hash, b"obj"),
         E::ArrayExpression(_) => update_fnv1a(hash, b"arr"),
         E::AwaitExpression(_) => update_fnv1a(hash, b"await"),
@@ -227,26 +236,25 @@ mod tests {
     }
 
     #[test]
-    fn ast_hash_distinguishes_var_let_const_kinds() {
-        // Legacy `// Note: var/let/const kind differences are allowed with sugar rules`.
-        // Our hasher mixes `format!("{:?}", v.kind)` into the digest so each
-        // declarator kind has a distinct hash.
+    fn ast_hash_unifies_var_let_const_kinds_for_cross_build_matching() {
+        // esbuild lowers `let`/`const` to `var`, so a decompiled bundle function
+        // and its clean-source original differ only in declaration kind. The hash
+        // unifies them so the pair matches.
         let var_decl = hash_first_function("function f() { var x = 1; return x; }");
         let let_decl = hash_first_function("function f() { let x = 1; return x; }");
         let const_decl = hash_first_function("function f() { const x = 1; return x; }");
-        assert_ne!(var_decl, let_decl);
-        assert_ne!(let_decl, const_decl);
-        assert_ne!(var_decl, const_decl);
+        assert_eq!(var_decl, let_decl);
+        assert_eq!(let_decl, const_decl);
     }
 
     #[test]
-    fn ast_hash_distinguishes_arrow_from_function_expression() {
-        // Legacy treats `() => x` and `function () { return x; }` as sugar
-        // alternatives. The orchestrator's `ClosureBoundaryAligned` pass may
-        // align some IIFE forms, but the raw `ast` axis must distinguish.
-        let arrow = hash_first_function("function f() { return () => 1; }");
-        let fn_expr = hash_first_function("function f() { return function () { return 1; }; }");
-        assert_ne!(arrow, fn_expr);
+    fn ast_hash_unifies_arrow_and_function_expression_callbacks() {
+        // A nested arrow callback and a function-expression callback are
+        // interchangeable forms that minify/decompile swap freely, so they must
+        // not split the enclosing function's hash.
+        let arrow = hash_first_function("function f() { return g(() => 1); }");
+        let fn_expr = hash_first_function("function f() { return g(function () { return 1; }); }");
+        assert_eq!(arrow, fn_expr);
     }
 
     #[test]
