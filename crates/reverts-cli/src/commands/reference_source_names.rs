@@ -4101,6 +4101,146 @@ fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction>
 /// module corroboration instead. See ACCEPT pass 0.
 const MIN_CORROBORATION_FREE_STATEMENTS: u32 = 2;
 
+/// Minimum body size for the within-pair optimal-assignment accept pass. Trivial
+/// bodies carry too little entropy for a graded similarity to imply identity even
+/// inside a confirmed module pair, so they stay proposals.
+const MIN_WITHIN_PAIR_ASSIGN_STATEMENTS: u32 = 3;
+/// Similarity floor for a within-pair assignment to be accepted (scale matches
+/// `within_pair_similarity`: a single shared composite signature is 120).
+const WITHIN_PAIR_ASSIGN_FLOOR: i64 = 150;
+/// Skip the O(k³) assignment for pathologically large module pairs.
+const WITHIN_PAIR_ASSIGN_LIMIT: usize = 300;
+
+/// Graded similarity between a subject and reference function for the within-pair
+/// optimal assignment. Returns `(score, hard)` where `hard` is true only when
+/// there is real structural/content evidence (shared composite signature, exact
+/// AST hash, or strong literal overlap) — arity/stmt closeness alone is soft and
+/// never sets `hard`, so it can rank candidates but never justify an accept.
+fn within_pair_similarity(
+    s: &FunctionFingerprint,
+    s_literals: &BTreeSet<String>,
+    r: &FunctionFingerprint,
+    r_literals: &BTreeSet<String>,
+) -> (i64, bool) {
+    let mut score = 0i64;
+    let mut hard = false;
+    let s_ast: BTreeSet<u64> = function_ast_hashes(s).into_iter().collect();
+    if function_ast_hashes(r).iter().any(|h| s_ast.contains(h)) {
+        score += 1000;
+        hard = true;
+    }
+    let s_comp: BTreeSet<u64> = function_composites(s).into_iter().collect();
+    let shared_comp = function_composites(r)
+        .into_iter()
+        .filter(|c| s_comp.contains(c))
+        .count();
+    if shared_comp > 0 {
+        score += (shared_comp.min(5) as i64) * 120;
+        hard = true;
+    }
+    let inter = s_literals.intersection(r_literals).count();
+    let union = s_literals.union(r_literals).count().max(1);
+    let jaccard = inter as f64 / union as f64;
+    if jaccard > 0.0 {
+        score += (jaccard * 300.0) as i64;
+        if jaccard >= 0.34 {
+            hard = true;
+        }
+    }
+    if s.param_count == r.param_count {
+        score += 30;
+    }
+    if (s.statement_count as i64 - r.statement_count as i64).abs() <= 1 {
+        score += 30;
+    }
+    (score, hard)
+}
+
+/// Max-weight perfect assignment (Kuhn-Munkres) on an n×m similarity matrix.
+/// Returns, per row, the assigned column (or `None` if padded/unassigned). Pads to
+/// square internally; O(k³) with k = max(n,m), bounded by `WITHIN_PAIR_ASSIGN_LIMIT`.
+fn hungarian_max(sim: &[Vec<i64>]) -> Vec<Option<usize>> {
+    let n = sim.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let m = sim[0].len();
+    let k = n.max(m);
+    let max_sim = sim
+        .iter()
+        .flat_map(|row| row.iter().copied())
+        .max()
+        .unwrap_or(0)
+        .max(0);
+    let big = max_sim + 1;
+    // cost[i][j] = big - sim (min-cost ⇔ max-weight); padded entries similarity 0.
+    let mut cost = vec![vec![big; k + 1]; k + 1];
+    for i in 0..k {
+        for j in 0..k {
+            let s = if i < n && j < m { sim[i][j] } else { 0 };
+            cost[i + 1][j + 1] = big - s;
+        }
+    }
+    const INF: i64 = i64::MAX / 4;
+    let mut u = vec![0i64; k + 1];
+    let mut v = vec![0i64; k + 1];
+    let mut p = vec![0usize; k + 1];
+    let mut way = vec![0usize; k + 1];
+    for i in 1..=k {
+        p[0] = i;
+        let mut j0 = 0usize;
+        let mut minv = vec![INF; k + 1];
+        let mut used = vec![false; k + 1];
+        loop {
+            used[j0] = true;
+            let i0 = p[j0];
+            let mut delta = INF;
+            let mut j1 = 0usize;
+            for j in 1..=k {
+                if !used[j] {
+                    let cur = cost[i0][j] - u[i0] - v[j];
+                    if cur < minv[j] {
+                        minv[j] = cur;
+                        way[j] = j0;
+                    }
+                    if minv[j] < delta {
+                        delta = minv[j];
+                        j1 = j;
+                    }
+                }
+            }
+            for j in 0..=k {
+                if used[j] {
+                    u[p[j]] += delta;
+                    v[j] -= delta;
+                } else {
+                    minv[j] -= delta;
+                }
+            }
+            j0 = j1;
+            if p[j0] == 0 {
+                break;
+            }
+        }
+        loop {
+            let j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+            if j0 == 0 {
+                break;
+            }
+        }
+    }
+    let mut assign = vec![None; n];
+    for j in 1..=k {
+        let i = p[j];
+        if i >= 1 && i <= n && j <= m {
+            assign[i - 1] = Some(j - 1);
+        }
+    }
+    assign
+}
+
 /// Match subject functions to reference functions across the whole corpus.
 ///
 /// Two independent signals must agree to **auto-accept** a rename: (1) the
@@ -4159,6 +4299,9 @@ fn match_function_lists(
     let mut rows = Vec::new();
     // (module_id, original_name) accepted so later passes skip them.
     let mut accepted: BTreeSet<(u32, String)> = BTreeSet::new();
+    // reference_fns indices already claimed by an accepted row, so the within-pair
+    // assignment pass cannot reuse a reference function already taken.
+    let mut used_ref: BTreeSet<usize> = BTreeSet::new();
 
     // ACCEPT pass 0: globally-unique COMPOSITE signature — identical across every
     // structural axis and one-of-a-kind in both corpora. Strong enough to accept
@@ -4187,13 +4330,15 @@ fn match_function_lists(
         else {
             continue;
         };
-        let reference = &reference_fns[ref_by_composite[&sig][0]];
+        let reference_idx = ref_by_composite[&sig][0];
+        let reference = &reference_fns[reference_idx];
         if subject.fingerprint.param_count != reference.fingerprint.param_count
             || subject.fingerprint.statement_count != reference.fingerprint.statement_count
         {
             continue;
         }
         accepted.insert((subject.module_id, subject.name.clone()));
+        used_ref.insert(reference_idx);
         rows.push(BindingNameRow {
             module_id: subject.module_id,
             subject_path: subject.subject_path.clone(),
@@ -4251,6 +4396,7 @@ fn match_function_lists(
                 continue;
             }
             accepted.insert((subject.module_id, subject.name.clone()));
+            used_ref.insert(ris[0]);
             rows.push(BindingNameRow {
                 module_id: subject.module_id,
                 subject_path: subject.subject_path.clone(),
@@ -4262,6 +4408,93 @@ fn match_function_lists(
                 param_count: subject.fingerprint.param_count,
                 statement_count: subject.fingerprint.statement_count,
                 score: 1.0,
+            });
+        }
+    }
+
+    // ACCEPT pass 2: within-pair OPTIMAL ASSIGNMENT (Kuhn-Munkres) for functions
+    // whose AST hash drifted across versions, which the exact-hash pass 1 misses.
+    // Inside a confirmed module pair the candidate set is tiny, so a graded
+    // similarity (shared composite signatures + distinctive literal overlap +
+    // arity/stmt closeness) plus optimal 1:1 assignment recovers the right pair.
+    // Precision gates (kept conservative to preserve the ~0-false-positive accept
+    // guarantee): (a) non-trivial body, (b) HARD structural evidence on the chosen
+    // pair (shared composite signature or strong literal overlap — never arity
+    // alone), (c) a clear MARGIN over the runner-up reference for that function.
+    for (module_id, subject_indices) in &subject_by_module {
+        let Some(file) = module_matched_file.get(module_id) else {
+            continue;
+        };
+        let Some(reference_indices) = ref_by_file.get(file.as_str()) else {
+            continue;
+        };
+        let s_pool: Vec<usize> = subject_indices
+            .iter()
+            .copied()
+            .filter(|&si| {
+                let s = &subject_fns[si];
+                s.fingerprint.statement_count >= MIN_WITHIN_PAIR_ASSIGN_STATEMENTS
+                    && !accepted.contains(&(s.module_id, s.name.clone()))
+            })
+            .collect();
+        let r_pool: Vec<usize> = reference_indices
+            .iter()
+            .copied()
+            .filter(|&ri| !used_ref.contains(&ri))
+            .collect();
+        if s_pool.is_empty() || r_pool.is_empty() {
+            continue;
+        }
+        if s_pool.len().min(r_pool.len()) > WITHIN_PAIR_ASSIGN_LIMIT {
+            continue;
+        }
+        let n = s_pool.len();
+        let m = r_pool.len();
+        let mut sim = vec![vec![0i64; m]; n];
+        let mut hard = vec![vec![false; m]; n];
+        for (a, &si) in s_pool.iter().enumerate() {
+            for (b, &ri) in r_pool.iter().enumerate() {
+                let (score, is_hard) = within_pair_similarity(
+                    &subject_fns[si].fingerprint,
+                    &subject_fns[si].literals,
+                    &reference_fns[ri].fingerprint,
+                    &reference_fns[ri].literals,
+                );
+                sim[a][b] = score;
+                hard[a][b] = is_hard;
+            }
+        }
+        let assignment = hungarian_max(&sim);
+        for (a, b_opt) in assignment.iter().enumerate() {
+            let Some(b) = *b_opt else { continue };
+            if !hard[a][b] || sim[a][b] < WITHIN_PAIR_ASSIGN_FLOOR {
+                continue;
+            }
+            // Margin: the chosen reference must clearly beat the runner-up for this
+            // function, else the assignment is ambiguous and we leave it to review.
+            let runner_up = (0..m)
+                .filter(|&b2| b2 != b)
+                .map(|b2| sim[a][b2])
+                .max()
+                .unwrap_or(0);
+            if sim[a][b] < runner_up * 3 / 2 {
+                continue;
+            }
+            let subject = &subject_fns[s_pool[a]];
+            let reference = &reference_fns[r_pool[b]];
+            accepted.insert((subject.module_id, subject.name.clone()));
+            used_ref.insert(r_pool[b]);
+            rows.push(BindingNameRow {
+                module_id: subject.module_id,
+                subject_path: subject.subject_path.clone(),
+                reference_file: reference.file.clone(),
+                original_name: subject.name.clone(),
+                semantic_name: reference.name.clone(),
+                accepted: true,
+                ast_hash: subject.fingerprint.primary.ast,
+                param_count: subject.fingerprint.param_count,
+                statement_count: subject.fingerprint.statement_count,
+                score: 1.5,
             });
         }
     }
