@@ -5980,6 +5980,161 @@ fn match_function_lists_inner(
         rows.extend(new_rows);
     }
 
+    // ACCEPT pass 6e: STRUCTURE-DISAMBIGUATED body match (combined evidence).
+    //
+    // Pass 2 (within-pair assignment) needs a clear body MARGIN; the propagation
+    // passes need >=2 matched structural neighbors. The gap between them: a
+    // function whose body carries HARD evidence (shared composite/AST/literal) for
+    // SEVERAL reference candidates at once (ambiguous body — no margin, so Pass 2
+    // leaves it), but only ONE of those candidates is structurally consistent
+    // (shares a matched caller or callee). Body says "one of these"; a single
+    // matched neighbor breaks the tie. Neither signal alone accepts here; together
+    // they do. Iterative, confined to confirmed module pairs, seeded by all prior
+    // accepts. Score 5.4.
+    let disambig_rounds = if island_mode { 0 } else { 3 };
+    for _round in 0..disambig_rounds {
+        let name_map: BTreeMap<String, String> = rows
+            .iter()
+            .filter(|row| row.accepted)
+            .map(|row| (row.original_name.clone(), row.semantic_name.clone()))
+            .collect();
+        let mut new_rows: Vec<BindingNameRow> = Vec::new();
+        let mut round_matches = 0usize;
+        for (module_id, subject_indices) in &subject_by_module {
+            let Some(file) = module_matched_file.get(module_id) else {
+                continue;
+            };
+            let Some(reference_indices) = ref_by_file.get(file.as_str()) else {
+                continue;
+            };
+            let mut subject_callers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for &si in subject_indices {
+                let caller = &subject_fns[si];
+                for callee in &caller.callees {
+                    if let Some(callee_name) = callee.strip_prefix("c:") {
+                        subject_callers
+                            .entry(callee_name)
+                            .or_default()
+                            .insert(caller.name.as_str());
+                    }
+                }
+            }
+            let mut reference_callers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for &ri in reference_indices {
+                let caller = &reference_fns[ri];
+                for callee in &caller.callees {
+                    if let Some(callee_name) = callee.strip_prefix("c:") {
+                        reference_callers
+                            .entry(callee_name)
+                            .or_default()
+                            .insert(caller.name.as_str());
+                    }
+                }
+            }
+            for &si in subject_indices {
+                let subject = &subject_fns[si];
+                if accepted.contains(&(subject.module_id, subject.name.clone())) {
+                    continue;
+                }
+                let out_resolved: BTreeSet<&str> = subject
+                    .callees
+                    .iter()
+                    .filter_map(|callee| callee.strip_prefix("c:"))
+                    .filter_map(|callee| name_map.get(callee).map(String::as_str))
+                    .collect();
+                let in_resolved: BTreeSet<&str> = subject_callers
+                    .get(subject.name.as_str())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|caller| name_map.get(*caller).map(String::as_str))
+                    .collect();
+                if out_resolved.is_empty() && in_resolved.is_empty() {
+                    continue;
+                }
+                // Among body-HARD candidates, pick the structurally-consistent one.
+                let mut best: Option<(usize, usize)> = None; // (structure_overlap, ref_index)
+                let mut runner = 0usize;
+                for &ri in reference_indices {
+                    if used_ref.contains(&ri) {
+                        continue;
+                    }
+                    let reference = &reference_fns[ri];
+                    if reference.fingerprint.param_count != subject.fingerprint.param_count {
+                        continue;
+                    }
+                    let (_, hard) = within_pair_similarity(
+                        &subject.fingerprint,
+                        &subject.literals,
+                        &reference.fingerprint,
+                        &reference.literals,
+                    );
+                    if !hard {
+                        continue;
+                    }
+                    let out_overlap = reference
+                        .callees
+                        .iter()
+                        .filter_map(|callee| callee.strip_prefix("c:"))
+                        .filter(|callee| out_resolved.contains(*callee))
+                        .count();
+                    let in_overlap = reference_callers
+                        .get(reference.name.as_str())
+                        .into_iter()
+                        .flatten()
+                        .filter(|caller| in_resolved.contains(*caller))
+                        .count();
+                    let structure = out_overlap + in_overlap;
+                    if structure == 0 {
+                        continue;
+                    }
+                    match best {
+                        Some((best_structure, _)) if structure <= best_structure => {
+                            runner = runner.max(structure);
+                        }
+                        Some((best_structure, _)) => {
+                            runner = runner.max(best_structure);
+                            best = Some((structure, ri));
+                        }
+                        None => best = Some((structure, ri)),
+                    }
+                }
+                let Some((structure, ri)) = best else {
+                    continue;
+                };
+                // The structural winner must carry >=2 matched neighbors AND
+                // strictly beat any other body-hard candidate. A single shared
+                // neighbor is too thin to disambiguate a tight family of
+                // body-identical functions (the `getXSources` cluster) without
+                // permutation risk; requiring two agreeing edges plus a strict
+                // margin keeps the 0-false-positive discipline.
+                const DISAMBIG_MIN_STRUCTURE: usize = 2;
+                if structure < DISAMBIG_MIN_STRUCTURE || structure <= runner {
+                    continue;
+                }
+                let reference = &reference_fns[ri];
+                accepted.insert((subject.module_id, subject.name.clone()));
+                used_ref.insert(ri);
+                new_rows.push(BindingNameRow {
+                    module_id: subject.module_id,
+                    subject_path: subject.subject_path.clone(),
+                    reference_file: reference.file.clone(),
+                    original_name: subject.name.clone(),
+                    semantic_name: reference.name.clone(),
+                    accepted: true,
+                    ast_hash: subject.fingerprint.primary.ast,
+                    param_count: subject.fingerprint.param_count,
+                    statement_count: subject.fingerprint.statement_count,
+                    score: 5.4,
+                });
+                round_matches += 1;
+            }
+        }
+        rows.extend(new_rows);
+        if round_matches == 0 {
+            break;
+        }
+    }
+
     // PROPOSAL pass: global, for every subject function not auto-accepted.
     // Candidates come from shared AST hashes AND shared DISTINCTIVE in-body
     // string literals (the latter recovers functions whose AST drifted across
