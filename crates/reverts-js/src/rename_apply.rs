@@ -262,6 +262,8 @@ pub(crate) fn apply_all_scope_readability_renames<'a>(
         let symbol_ids = symbols.symbol_ids().collect::<Vec<_>>();
         let mut binding_ordinals = BindingOrdinalCollector::default();
         binding_ordinals.visit_program(program);
+        let mut catch_params = CatchParamCollector::default();
+        catch_params.visit_program(program);
         let mut symbol_names_by_scope = BTreeMap::<_, BTreeMap<String, Vec<SymbolId>>>::new();
         for symbol_id in &symbol_ids {
             symbol_names_by_scope
@@ -281,11 +283,24 @@ pub(crate) fn apply_all_scope_readability_renames<'a>(
                 .get(&symbol_id)
                 .copied();
             let indexed_key = binding_index.map(|index| (original.to_string(), index));
-            let Some(renamed) = indexed_key
+            let renamed = if let Some(renamed) = indexed_key
                 .as_ref()
                 .and_then(|key| requested_by_binding.get(key))
-                .or_else(|| requested_all.get(original))
-            else {
+            {
+                // Explicit per-binding rename (precise ordinal) — honored as-is.
+                renamed
+            } else if let Some(renamed) = requested_all.get(original) {
+                // All-scope rename: renames EVERY same-named binding. A reused
+                // minified name must not capture a catch-clause parameter (an error
+                // binding), so skip those — the fix for `catch (processElements)`.
+                if catch_params.symbols.contains(&symbol_id) {
+                    report.push(format!(
+                        "skipped rename {original} -> {renamed}, source=explicit_binding_semantic, reason=catch_parameter"
+                    ));
+                    continue;
+                }
+                renamed
+            } else {
                 continue;
             };
             let scope_id = symbols.get_scope_id(symbol_id);
@@ -335,6 +350,39 @@ pub(crate) fn apply_all_scope_readability_renames<'a>(
         reference_renames,
     };
     renamer.visit_program(program);
+}
+
+/// Collects the symbol ids bound by `catch (param)` clauses. An `All`-scope
+/// readability rename renames EVERY same-named binding in the file, which wrongly
+/// captures a reused minified catch-parameter (producing nonsense like
+/// `catch (processElements)` / `catch (onAbort)` — an error binding named after an
+/// unrelated recovered function). Catch parameters are never exported and their
+/// names are not meaningfully recoverable, so they are excluded from All-scope
+/// renames.
+#[derive(Default)]
+struct CatchParamCollector {
+    symbols: BTreeSet<SymbolId>,
+    depth: u32,
+}
+
+impl<'a> Visit<'a> for CatchParamCollector {
+    fn visit_program(&mut self, program: &Program<'a>) {
+        oxc_ast::visit::walk::walk_program(self, program);
+    }
+
+    fn visit_catch_parameter(&mut self, it: &oxc_ast::ast::CatchParameter<'a>) {
+        self.depth += 1;
+        oxc_ast::visit::walk::walk_catch_parameter(self, it);
+        self.depth -= 1;
+    }
+
+    fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
+        if self.depth > 0
+            && let Some(symbol_id) = identifier.symbol_id.get()
+        {
+            self.symbols.insert(symbol_id);
+        }
+    }
 }
 
 #[derive(Default)]

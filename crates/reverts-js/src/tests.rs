@@ -1865,6 +1865,37 @@ fn readability_renames_skip_root_scope_collisions() {
 }
 
 #[test]
+fn readability_renames_all_scope_skips_catch_parameter() {
+    // An All-scope rename renames every same-named binding. A reused minified name
+    // used as a catch-clause parameter must NOT be captured (the source of nonsense
+    // like `catch (processElements)`): the root function binding is renamed, the
+    // catch parameter keeps its original name.
+    let formatted = format_source_with_module_items_and_renames(
+        "function aB(){ return 1; } try { aB(); } catch (aB) { console.log(aB); }",
+        &[],
+        &[],
+        &[GeneratedRename::new("aB", "processItems")],
+        Some(Path::new("src/index.ts")),
+        ParseGoal::TypeScript,
+        CompilerLowering::None,
+    )
+    .expect("fixture should format");
+
+    assert!(
+        formatted.contains("function processItems("),
+        "root function binding should be renamed: {formatted}"
+    );
+    assert!(
+        formatted.contains("catch (aB)"),
+        "catch parameter must NOT be renamed: {formatted}"
+    );
+    assert!(
+        formatted.contains("console.log(aB)"),
+        "catch-scoped reference must follow the un-renamed catch parameter: {formatted}"
+    );
+}
+
+#[test]
 fn readability_renames_skip_generated_import_collisions() {
     let formatted = format_source_with_module_items_and_renames(
         "var a = 1; console.log(a);",
