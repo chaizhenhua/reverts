@@ -5851,6 +5851,135 @@ fn match_function_lists_inner(
         }
     }
 
+    // ACCEPT pass 6d: STRUCTURAL-ROLE ANCHOR (cold-start; no seed needed).
+    //
+    // The propagation passes (6/6b/6c) need at least one already-matched neighbor
+    // to start. A self-contained subsystem inside a confirmed module pair whose
+    // functions only call each other — and which no body-fingerprint pass seeded —
+    // is invisible to them. But a function's POSITION in the intra-module call
+    // graph is itself build-invariant: if exactly one subject function and exactly
+    // one reference function in the pair share a non-trivial role signature
+    // (in-degree, out-degree, arity) and that signature is UNIQUE on BOTH sides,
+    // they are the same function. Uniqueness-on-both-sides + a degree floor is the
+    // precision gate (per the cascade discipline: a build-invariant UNIQUE role is
+    // evidence; a merely-common one is not). Non-iterative — pure structure.
+    const ROLE_ANCHOR_MIN_DEGREE: usize = 4;
+    if !island_mode {
+        let mut new_rows: Vec<BindingNameRow> = Vec::new();
+        for (module_id, subject_indices) in &subject_by_module {
+            let Some(file) = module_matched_file.get(module_id) else {
+                continue;
+            };
+            let Some(reference_indices) = ref_by_file.get(file.as_str()) else {
+                continue;
+            };
+            // Intra-pair role signatures keyed by (in-degree, out-degree, arity),
+            // counting only edges to/from other functions in the same pair.
+            let subject_names: BTreeSet<&str> = subject_indices
+                .iter()
+                .map(|&i| subject_fns[i].name.as_str())
+                .collect();
+            let mut subject_in: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            let mut subject_out: BTreeMap<&str, usize> = BTreeMap::new();
+            for &i in subject_indices {
+                let f = &subject_fns[i];
+                let mut outs: BTreeSet<&str> = BTreeSet::new();
+                for callee in &f.callees {
+                    if let Some(target) = callee.strip_prefix("c:") {
+                        if subject_names.contains(target) {
+                            outs.insert(target);
+                            subject_in
+                                .entry(target)
+                                .or_default()
+                                .insert(f.name.as_str());
+                        }
+                    }
+                }
+                subject_out.insert(f.name.as_str(), outs.len());
+            }
+            let mut subject_by_sig: BTreeMap<(usize, usize, u32), Vec<usize>> = BTreeMap::new();
+            for &i in subject_indices {
+                let f = &subject_fns[i];
+                let out = *subject_out.get(f.name.as_str()).unwrap_or(&0);
+                let in_deg = subject_in.get(f.name.as_str()).map_or(0, BTreeSet::len);
+                if in_deg + out >= ROLE_ANCHOR_MIN_DEGREE {
+                    subject_by_sig
+                        .entry((in_deg, out, f.fingerprint.param_count))
+                        .or_default()
+                        .push(i);
+                }
+            }
+            let reference_names: BTreeSet<&str> = reference_indices
+                .iter()
+                .map(|&i| reference_fns[i].name.as_str())
+                .collect();
+            let mut reference_in: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            let mut reference_out: BTreeMap<&str, usize> = BTreeMap::new();
+            for &i in reference_indices {
+                let f = &reference_fns[i];
+                let mut outs: BTreeSet<&str> = BTreeSet::new();
+                for callee in &f.callees {
+                    if let Some(target) = callee.strip_prefix("c:") {
+                        if reference_names.contains(target) {
+                            outs.insert(target);
+                            reference_in
+                                .entry(target)
+                                .or_default()
+                                .insert(f.name.as_str());
+                        }
+                    }
+                }
+                reference_out.insert(f.name.as_str(), outs.len());
+            }
+            let mut reference_by_sig: BTreeMap<(usize, usize, u32), Vec<usize>> = BTreeMap::new();
+            for &i in reference_indices {
+                let f = &reference_fns[i];
+                let out = *reference_out.get(f.name.as_str()).unwrap_or(&0);
+                let in_deg = reference_in.get(f.name.as_str()).map_or(0, BTreeSet::len);
+                if in_deg + out >= ROLE_ANCHOR_MIN_DEGREE {
+                    reference_by_sig
+                        .entry((in_deg, out, f.fingerprint.param_count))
+                        .or_default()
+                        .push(i);
+                }
+            }
+            for (sig, s_list) in &subject_by_sig {
+                if s_list.len() != 1 {
+                    continue;
+                }
+                let Some(r_list) = reference_by_sig.get(sig) else {
+                    continue;
+                };
+                if r_list.len() != 1 {
+                    continue;
+                }
+                let subject = &subject_fns[s_list[0]];
+                let ri = r_list[0];
+                if accepted.contains(&(subject.module_id, subject.name.clone()))
+                    || used_ref.contains(&ri)
+                {
+                    continue;
+                }
+                let reference = &reference_fns[ri];
+                accepted.insert((subject.module_id, subject.name.clone()));
+                used_ref.insert(ri);
+                new_rows.push(BindingNameRow {
+                    module_id: subject.module_id,
+                    subject_path: subject.subject_path.clone(),
+                    reference_file: reference.file.clone(),
+                    original_name: subject.name.clone(),
+                    semantic_name: reference.name.clone(),
+                    accepted: true,
+                    ast_hash: subject.fingerprint.primary.ast,
+                    param_count: subject.fingerprint.param_count,
+                    statement_count: subject.fingerprint.statement_count,
+                    score: 5.3,
+                });
+            }
+        }
+        rows.extend(new_rows);
+    }
+
     // PROPOSAL pass: global, for every subject function not auto-accepted.
     // Candidates come from shared AST hashes AND shared DISTINCTIVE in-body
     // string literals (the latter recovers functions whose AST drifted across
