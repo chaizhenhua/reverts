@@ -1021,6 +1021,8 @@ fn write_match_diagnostics_if_requested(
         .collect::<Vec<_>>();
     let ambiguous_report = ambiguous_runner_up_report_json(&low_rows);
     let anchor_quality_report = anchor_quality_report_json(&low_rows);
+    let dry_run_evaluator =
+        dry_run_evaluator_json(args.min_tier, plans, &low_rows, &collision_groups);
     let summary = serde_json::json!({
         "subject_modules": subject_count,
         "planned_matches": plans.len(),
@@ -1051,6 +1053,7 @@ fn write_match_diagnostics_if_requested(
         "reason_counts": reason_counts_json,
         "ambiguous_runner_up_report": ambiguous_report,
         "anchor_quality_report": anchor_quality_report,
+        "dry_run_evaluator": dry_run_evaluator,
         "low_matches_by_closeness": low_details,
     });
     if let Some(parent) = path.parent()
@@ -1543,6 +1546,134 @@ fn source_score_json(score: SourceEvidenceScore) -> serde_json::Value {
         "anchor_cooccurrence_overlap": score.anchor_cooccurrence_overlap,
         "anchor_cooccurrence_jaccard": score.anchor_cooccurrence_jaccard,
     })
+}
+
+fn dry_run_evaluator_json(
+    min_tier: MinTier,
+    plans: &[ModulePlan],
+    low_rows: &[(f64, &'static str, &ModulePlan)],
+    collision_groups: &BTreeMap<&str, Vec<&ModulePlan>>,
+) -> serde_json::Value {
+    let accepted = plans
+        .iter()
+        .filter(|plan| tier_passes(plan.matched.tier, min_tier))
+        .flat_map(|plan| {
+            match_rule_tags(&plan.matched).into_iter().map(move |rule| {
+                rule_contribution_json(plan, rule, true, min_tier, collision_groups)
+            })
+        })
+        .collect::<Vec<_>>();
+    let near_medium = low_rows
+        .iter()
+        .filter(|(closeness, _reason, _plan)| *closeness >= 0.80)
+        .flat_map(|(_closeness, _reason, plan)| {
+            match_rule_tags(&plan.matched).into_iter().map(move |rule| {
+                rule_contribution_json(plan, rule, false, min_tier, collision_groups)
+            })
+        })
+        .collect::<Vec<_>>();
+    let accepted_new_rule_counts = rule_contribution_counts(plans.iter().filter_map(|plan| {
+        if tier_passes(plan.matched.tier, min_tier) {
+            Some(&plan.matched)
+        } else {
+            None
+        }
+    }));
+    serde_json::json!({
+        "description": "Dry-run rule contribution rows for accepted and near-medium candidates. baseline_accept_proxy is an in-run approximation of pre-advanced-rule acceptance, not persisted history.",
+        "new_rule_tags": NEW_RULE_TAGS,
+        "accepted_rule_counts": accepted_new_rule_counts,
+        "accepted_rule_contributions": accepted,
+        "near_medium_rule_contributions": near_medium,
+    })
+}
+
+const NEW_RULE_TAGS: &[&str] = &[
+    "import_export_surface",
+    "object_class_shape",
+    "top_level_ts_shape",
+];
+
+fn rule_contribution_counts<'a>(
+    matches: impl Iterator<Item = &'a ModuleMatch>,
+) -> Vec<serde_json::Value> {
+    let mut counts = BTreeMap::<&'static str, (usize, usize, usize)>::new();
+    for matched in matches {
+        let baseline = baseline_acceptance_proxy(matched);
+        for tag in match_rule_tags(matched) {
+            let entry = counts.entry(tag).or_default();
+            entry.0 += 1;
+            if !baseline {
+                entry.1 += 1;
+            }
+            if is_new_rule_tag(tag) {
+                entry.2 += 1;
+            }
+        }
+    }
+    let mut rows = counts.into_iter().collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.1.0.cmp(&left.1.0).then_with(|| left.0.cmp(right.0)));
+    rows.into_iter()
+        .map(|(rule, (count, baseline_delta_count, new_rule_count))| {
+            serde_json::json!({
+                "rule": rule,
+                "count": count,
+                "baseline_delta_count": baseline_delta_count,
+                "new_rule_count": new_rule_count,
+            })
+        })
+        .collect()
+}
+
+fn rule_contribution_json(
+    plan: &ModulePlan,
+    rule: &'static str,
+    accepted: bool,
+    min_tier: MinTier,
+    collision_groups: &BTreeMap<&str, Vec<&ModulePlan>>,
+) -> serde_json::Value {
+    let collision_group = collision_groups
+        .get(plan.matched.file_path.as_str())
+        .map(|group| collision_group_json(group));
+    serde_json::json!({
+        "rule": rule,
+        "new_rule": is_new_rule_tag(rule),
+        "module_id": plan.module_id,
+        "subject_path": plan.subject_path,
+        "reference_file": plan.matched.file_path,
+        "reference_version": plan.reference_version,
+        "tier": tier_str(plan.matched.tier),
+        "accepted": accepted,
+        "passes_min_tier": tier_passes(plan.matched.tier, min_tier),
+        "baseline_accept_proxy": baseline_acceptance_proxy(&plan.matched),
+        "top_relevance": plan.top_candidate.relevance,
+        "runner_up_reference": plan
+            .runner_up
+            .as_ref()
+            .map(|runner_up| runner_up.matched.file_path.as_str()),
+        "runner_up_relevance": plan.runner_up.as_ref().map(|runner_up| runner_up.relevance),
+        "runner_up_delta": plan
+            .runner_up
+            .as_ref()
+            .map(|runner_up| candidate_delta_json(&plan.matched, &runner_up.matched)),
+        "collision_group": collision_group,
+        "source_score": source_score_json(plan.matched.source_score),
+    })
+}
+
+fn is_new_rule_tag(tag: &str) -> bool {
+    NEW_RULE_TAGS.contains(&tag)
+}
+
+fn baseline_acceptance_proxy(matched: &ModuleMatch) -> bool {
+    matched.asset_overlap > 0
+        || matched.source_score.hash_match
+        || matched.anchor_overlap > 0
+        || matched.weighted_anchor >= MEDIUM_WEIGHTED_ANCHOR
+        || matched.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR
+        || matched.function_overlap > 0
+        || matched.source_score.function_axis_overlap > 0
+        || matched.source_score.unique_string_anchor_overlap > 0
 }
 
 fn match_rule_counts<'a>(matches: impl Iterator<Item = &'a ModuleMatch>) -> Vec<serde_json::Value> {
@@ -5669,6 +5800,41 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         assert!(is_weak_diagnostic_anchor("function"));
         assert!(is_weak_diagnostic_anchor("object-key:type"));
         assert!(!is_weak_diagnostic_anchor("object-key:access_token"));
+    }
+
+    #[test]
+    fn dry_run_evaluator_reports_rule_contribution_context() {
+        let mut plan = make_plan(70, "schemas/tool-schema", MatchTier::Medium);
+        plan.matched.import_export_surface_overlap = 2;
+        plan.matched.top_level_declaration_overlap = 1;
+        plan.matched.class_member_overlap = 3;
+        plan.matched.reciprocal_best = false;
+        plan.top_candidate.matched = plan.matched.clone();
+        plan.runner_up = Some(RankedModuleMatch {
+            relevance: 0.90,
+            matched: make_plan(71, "schemas/runner", MatchTier::Low).matched,
+        });
+
+        let mut colliding = make_plan(72, "schemas/tool-schema", MatchTier::Low);
+        colliding.matched.file_path = plan.matched.file_path.clone();
+        let plans = vec![plan, colliding];
+        let collision_groups = reference_collision_groups(&plans);
+        let low_rows = Vec::new();
+        let report = dry_run_evaluator_json(MinTier::Medium, &plans, &low_rows, &collision_groups);
+
+        let contributions = report["accepted_rule_contributions"]
+            .as_array()
+            .expect("accepted contributions should be an array");
+        let surface = contributions
+            .iter()
+            .find(|row| row["rule"] == "import_export_surface")
+            .expect("import/export surface contribution should be reported");
+        assert_eq!(surface["module_id"], 70);
+        assert_eq!(surface["reference_file"], "schemas/tool-schema.ts");
+        assert_eq!(surface["new_rule"], true);
+        assert_eq!(surface["baseline_accept_proxy"], false);
+        assert_eq!(surface["runner_up_reference"], "schemas/runner.ts");
+        assert_eq!(surface["collision_group"]["size"], 2);
     }
 
     #[test]
