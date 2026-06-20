@@ -307,6 +307,10 @@ pub(crate) fn module_match_fingerprint(
         normalized_source_hashes: source_fingerprint.normalized_source_hashes,
         function_signature_hashes: source_fingerprint.function_signature_hashes,
         top_level_declaration_hashes: source_fingerprint.top_level_declaration_hashes,
+        import_export_surface_hashes: source_fingerprint.import_export_surface_hashes,
+        class_member_hashes: source_fingerprint.class_member_hashes,
+        statement_window_hashes: source_fingerprint.statement_window_hashes,
+        block_branch_hashes: source_fingerprint.block_branch_hashes,
         string_anchors: source_fingerprint.string_anchors,
         function_axis_anchors: profile.function_axis_anchors,
         jsx_react_shape_anchors: profile.jsx_react_shape_anchors,
@@ -331,6 +335,10 @@ pub(crate) fn package_source_fingerprint<'a>(
             normalized_source_hashes: cached.normalized_source_hashes.clone(),
             function_signature_hashes: cached.function_signature_hashes.clone(),
             top_level_declaration_hashes: cached.top_level_declaration_hashes.clone(),
+            import_export_surface_hashes: cached.import_export_surface_hashes.clone(),
+            class_member_hashes: cached.class_member_hashes.clone(),
+            statement_window_hashes: cached.statement_window_hashes.clone(),
+            block_branch_hashes: cached.block_branch_hashes.clone(),
             string_anchors: cached.string_anchors.clone(),
             function_axis_anchors: profile.function_axis_anchors,
             jsx_react_shape_anchors: profile.jsx_react_shape_anchors,
@@ -358,6 +366,10 @@ pub(crate) fn package_source_fingerprint_from_source<'a>(
         normalized_source_hashes: fingerprint.normalized_source_hashes,
         function_signature_hashes: fingerprint.function_signature_hashes,
         top_level_declaration_hashes: fingerprint.top_level_declaration_hashes,
+        import_export_surface_hashes: fingerprint.import_export_surface_hashes,
+        class_member_hashes: fingerprint.class_member_hashes,
+        statement_window_hashes: fingerprint.statement_window_hashes,
+        block_branch_hashes: fingerprint.block_branch_hashes,
         string_anchors: fingerprint.string_anchors,
         function_axis_anchors,
         jsx_react_shape_anchors,
@@ -382,6 +394,10 @@ mod fingerprint_cache_tests {
             normalized_source_hashes: anchors(&["deadbeef", "alt"]),
             function_signature_hashes: anchors(&["sig1"]),
             top_level_declaration_hashes: anchors(&["decl1"]),
+            import_export_surface_hashes: anchors(&["surface1"]),
+            class_member_hashes: anchors(&["member1"]),
+            statement_window_hashes: anchors(&["window1"]),
+            block_branch_hashes: anchors(&["block1"]),
             string_anchors: anchors(&["anchor"]),
         };
         // Deliberately unparseable body: if the matcher reused the cache it
@@ -402,6 +418,13 @@ mod fingerprint_cache_tests {
             fp.top_level_declaration_hashes,
             cached.top_level_declaration_hashes
         );
+        assert_eq!(
+            fp.import_export_surface_hashes,
+            cached.import_export_surface_hashes
+        );
+        assert_eq!(fp.class_member_hashes, cached.class_member_hashes);
+        assert_eq!(fp.statement_window_hashes, cached.statement_window_hashes);
+        assert_eq!(fp.block_branch_hashes, cached.block_branch_hashes);
         assert_eq!(fp.string_anchors, cached.string_anchors);
     }
 

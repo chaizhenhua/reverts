@@ -22,6 +22,14 @@ pub struct ModuleMatchFingerprint {
     pub function_signature_hashes: BTreeSet<String>,
     /// Order-insensitive hashes of normalized top-level declaration statements.
     pub top_level_declaration_hashes: BTreeSet<String>,
+    /// Order-insensitive import/export surface hashes.
+    pub import_export_surface_hashes: BTreeSet<String>,
+    /// Class/object/prototype member multiset hashes.
+    pub class_member_hashes: BTreeSet<String>,
+    /// Local statement-window hashes.
+    pub statement_window_hashes: BTreeSet<String>,
+    /// Block and branch shape hashes.
+    pub block_branch_hashes: BTreeSet<String>,
     /// string literal anchors collected from the AST.
     pub string_anchors: BTreeSet<String>,
     /// Multi-axis function structure anchors shared by package and cross-version matching.
@@ -44,6 +52,14 @@ pub struct PackageSourceFingerprint<'a> {
     pub function_signature_hashes: BTreeSet<String>,
     /// Order-insensitive hashes of normalized top-level declaration statements.
     pub top_level_declaration_hashes: BTreeSet<String>,
+    /// Order-insensitive import/export surface hashes.
+    pub import_export_surface_hashes: BTreeSet<String>,
+    /// Class/object/prototype member multiset hashes.
+    pub class_member_hashes: BTreeSet<String>,
+    /// Local statement-window hashes.
+    pub statement_window_hashes: BTreeSet<String>,
+    /// Block and branch shape hashes.
+    pub block_branch_hashes: BTreeSet<String>,
     /// string literal anchors collected from the AST.
     pub string_anchors: BTreeSet<String>,
     /// Multi-axis function structure anchors shared by package and cross-version matching.

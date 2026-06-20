@@ -51,6 +51,10 @@ fn serialize_fingerprint(fingerprint: &SourceFingerprint) -> String {
         "hs": fingerprint.normalized_source_hashes,
         "fs": fingerprint.function_signature_hashes,
         "td": fingerprint.top_level_declaration_hashes,
+        "ies": fingerprint.import_export_surface_hashes,
+        "cm": fingerprint.class_member_hashes,
+        "sw": fingerprint.statement_window_hashes,
+        "bb": fingerprint.block_branch_hashes,
         "sa": fingerprint.string_anchors,
     })
     .to_string()
@@ -75,6 +79,10 @@ fn deserialize_fingerprint(json: &str) -> Option<SourceFingerprint> {
         normalized_source_hashes: string_set("hs"),
         function_signature_hashes: string_set("fs"),
         top_level_declaration_hashes: string_set("td"),
+        import_export_surface_hashes: string_set("ies"),
+        class_member_hashes: string_set("cm"),
+        statement_window_hashes: string_set("sw"),
+        block_branch_hashes: string_set("bb"),
         string_anchors: string_set("sa"),
     })
 }
@@ -114,7 +122,7 @@ impl GlobalFingerprintCache {
             .optional()
         {
             Ok(Some(json)) => match deserialize_fingerprint(json.as_str()) {
-                Some(fingerprint) => CacheLookup::Hit(fingerprint),
+                Some(fingerprint) => CacheLookup::Hit(Box::new(fingerprint)),
                 None => CacheLookup::Corrupt,
             },
             Ok(None) => CacheLookup::Miss,
@@ -136,7 +144,7 @@ impl GlobalFingerprintCache {
 }
 
 enum CacheLookup {
-    Hit(SourceFingerprint),
+    Hit(Box<SourceFingerprint>),
     Miss,
     Corrupt,
     ReadError,
@@ -181,7 +189,7 @@ fn attach_global_fingerprints_at_root(
         match cache.get(key.as_str()) {
             CacheLookup::Hit(fingerprint) => {
                 stats.cache_hits += 1;
-                source.fingerprint = Some(fingerprint);
+                source.fingerprint = Some(*fingerprint);
                 continue;
             }
             CacheLookup::Miss => stats.cache_misses += 1,
@@ -225,6 +233,10 @@ mod tests {
             normalized_source_hashes: BTreeSet::from([tag.to_string(), format!("{tag}-alt")]),
             function_signature_hashes: BTreeSet::from([format!("{tag}-sig")]),
             top_level_declaration_hashes: BTreeSet::from([format!("{tag}-decl")]),
+            import_export_surface_hashes: BTreeSet::from([format!("{tag}-surface")]),
+            class_member_hashes: BTreeSet::from([format!("{tag}-member")]),
+            statement_window_hashes: BTreeSet::from([format!("{tag}-window")]),
+            block_branch_hashes: BTreeSet::from([format!("{tag}-block")]),
             string_anchors: BTreeSet::from([format!("{tag}-anchor")]),
         }
     }
@@ -243,7 +255,7 @@ mod tests {
         assert!(matches!(cache.get("missing"), CacheLookup::Miss));
         cache.put("h1", &sample("deadbeef")).expect("put");
         match cache.get("h1") {
-            CacheLookup::Hit(fingerprint) => assert_eq!(fingerprint, sample("deadbeef")),
+            CacheLookup::Hit(fingerprint) => assert_eq!(*fingerprint, sample("deadbeef")),
             _ => panic!("expected cached fingerprint hit"),
         }
     }
@@ -258,7 +270,7 @@ mod tests {
         // A different process / project pointing at the same cache dir sees it.
         let reopened = GlobalFingerprintCache::open_at(dir.path()).expect("reopen");
         match reopened.get("shared") {
-            CacheLookup::Hit(fingerprint) => assert_eq!(fingerprint, sample("v")),
+            CacheLookup::Hit(fingerprint) => assert_eq!(*fingerprint, sample("v")),
             _ => panic!("expected cached fingerprint hit after reopen"),
         }
         assert!(dir.path().join("fingerprints.sqlite").is_file());

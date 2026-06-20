@@ -11,15 +11,16 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     AstKind, Visit,
     ast::{
-        ArrowFunctionExpression, BindingPattern, CallExpression, Class, ClassElement, Declaration,
-        ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
-        ExportNamedDeclaration, Expression, ImportDeclaration, ImportDeclarationSpecifier,
-        MethodDefinitionKind, ObjectExpression, Program, Statement, SwitchStatement,
-        TemplateElement,
+        ArrowFunctionExpression, BindingPattern, BlockStatement, CallExpression, Class,
+        ClassElement, Declaration, ExportAllDeclaration, ExportDefaultDeclaration,
+        ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, FunctionBody,
+        ImportDeclaration, ImportDeclarationSpecifier, MethodDefinitionKind, ObjectExpression,
+        Program, Statement, SwitchStatement, TemplateElement,
     },
     visit::walk::{
-        walk_assignment_expression, walk_call_expression, walk_class, walk_export_all_declaration,
-        walk_export_default_declaration, walk_export_named_declaration, walk_import_declaration,
+        walk_assignment_expression, walk_block_statement, walk_call_expression, walk_class,
+        walk_export_all_declaration, walk_export_default_declaration,
+        walk_export_named_declaration, walk_function_body, walk_import_declaration,
         walk_object_expression, walk_switch_statement, walk_template_element,
     },
 };
@@ -52,6 +53,10 @@ pub struct SourceFingerprint {
     pub normalized_source_hashes: BTreeSet<String>,
     pub function_signature_hashes: BTreeSet<String>,
     pub top_level_declaration_hashes: BTreeSet<String>,
+    pub import_export_surface_hashes: BTreeSet<String>,
+    pub class_member_hashes: BTreeSet<String>,
+    pub statement_window_hashes: BTreeSet<String>,
+    pub block_branch_hashes: BTreeSet<String>,
     pub string_anchors: BTreeSet<String>,
 }
 
@@ -80,6 +85,10 @@ pub fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint,
         normalized_source_hashes,
         function_signature_hashes: ast.function_signature_hashes,
         top_level_declaration_hashes: ast.top_level_declaration_hashes,
+        import_export_surface_hashes: ast.import_export_surface_hashes,
+        class_member_hashes: ast.class_member_hashes,
+        statement_window_hashes: ast.statement_window_hashes,
+        block_branch_hashes: ast.block_branch_hashes,
         string_anchors: ast.string_anchors,
     })
 }
@@ -88,6 +97,10 @@ pub fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint,
 struct AstFingerprint {
     function_signature_hashes: BTreeSet<String>,
     top_level_declaration_hashes: BTreeSet<String>,
+    import_export_surface_hashes: BTreeSet<String>,
+    class_member_hashes: BTreeSet<String>,
+    statement_window_hashes: BTreeSet<String>,
+    block_branch_hashes: BTreeSet<String>,
     string_anchors: BTreeSet<String>,
     surface_anchors: BTreeSet<String>,
     prototype_members: BTreeSet<String>,
@@ -106,6 +119,8 @@ fn ast_fingerprint(path: &str, normalized_source: &str) -> Result<AstFingerprint
                 fingerprint: AstFingerprint::default(),
             };
             visitor.record_top_level_declaration_hashes(&parsed.program);
+            visitor.record_statement_window_hashes(&parsed.program.body, "program");
+            visitor.record_block_branch_hashes(&parsed.program.body, "program");
             visitor.visit_program(&parsed.program);
             return Ok(visitor.finish());
         }
@@ -178,6 +193,7 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
     }
 
     fn visit_export_default_declaration(&mut self, declaration: &ExportDefaultDeclaration<'a>) {
+        self.record_export_default_surface_anchor(declaration);
         match &declaration.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
                 if let Some(id) = &function.id {
@@ -195,6 +211,7 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
     }
 
     fn visit_export_all_declaration(&mut self, declaration: &ExportAllDeclaration<'a>) {
+        self.record_export_all_surface_anchor(declaration);
         if let Some(exported) = &declaration.exported
             && let Some(binding) = module_export_name(exported)
         {
@@ -230,6 +247,18 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
             self.record_export_member_anchor(exported.as_str());
         }
         walk_call_expression(self, call);
+    }
+
+    fn visit_function_body(&mut self, body: &FunctionBody<'a>) {
+        self.record_statement_window_hashes(&body.statements, "function");
+        self.record_block_branch_hashes(&body.statements, "function");
+        walk_function_body(self, body);
+    }
+
+    fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
+        self.record_statement_window_hashes(&block.body, "block");
+        self.record_block_branch_hashes(&block.body, "block");
+        walk_block_statement(self, block);
     }
 
     fn visit_object_expression(&mut self, object: &ObjectExpression<'a>) {
@@ -269,6 +298,37 @@ impl FingerprintVisitor<'_> {
                     .insert(format!("top-level-decl-shape:{kind}:{shape_hash}"));
             }
         }
+    }
+
+    fn record_statement_window_hashes(&mut self, statements: &[Statement<'_>], scope: &str) {
+        let shapes = statements.iter().map(statement_shape).collect::<Vec<_>>();
+        for width in [2usize, 3] {
+            if shapes.len() < width {
+                continue;
+            }
+            for window in shapes.windows(width) {
+                let hash = stable_hash(window.join("|").as_bytes());
+                self.fingerprint
+                    .statement_window_hashes
+                    .insert(format!("statement-window:{scope}:{width}:{hash}"));
+            }
+        }
+    }
+
+    fn record_block_branch_hashes(&mut self, statements: &[Statement<'_>], scope: &str) {
+        if statements.is_empty() {
+            return;
+        }
+        let mut bag = statements.iter().map(statement_shape).collect::<Vec<_>>();
+        let sequence_hash = stable_hash(bag.join("|").as_bytes());
+        self.fingerprint
+            .block_branch_hashes
+            .insert(format!("block-seq:{scope}:{}:{sequence_hash}", bag.len()));
+        bag.sort();
+        let bag_hash = stable_hash(bag.join("|").as_bytes());
+        self.fingerprint
+            .block_branch_hashes
+            .insert(format!("block-bag:{scope}:{}:{bag_hash}", bag.len()));
     }
 
     fn record_arrow_function(&mut self, arrow: &ArrowFunctionExpression<'_>) {
@@ -377,6 +437,29 @@ impl FingerprintVisitor<'_> {
         }
     }
 
+    fn record_export_default_surface_anchor(
+        &mut self,
+        _declaration: &ExportDefaultDeclaration<'_>,
+    ) {
+        self.fingerprint
+            .surface_anchors
+            .insert("export-surface:local:default".to_string());
+    }
+
+    fn record_export_all_surface_anchor(&mut self, declaration: &ExportAllDeclaration<'_>) {
+        let export_kind = declaration
+            .exported
+            .as_ref()
+            .and_then(module_export_name)
+            .map_or("all".to_string(), |exported| {
+                format!("namespace:{exported}")
+            });
+        self.fingerprint.surface_anchors.insert(format!(
+            "export-all-surface:{}:{export_kind}",
+            declaration.source.value
+        ));
+    }
+
     fn record_export_member_anchor(&mut self, member: &str) {
         if is_usable_export_member(member) {
             self.fingerprint
@@ -403,6 +486,7 @@ impl FingerprintVisitor<'_> {
             .into_iter()
             .filter(|key| is_usable_object_shape_key(key.as_str()))
             .collect::<BTreeSet<_>>();
+        self.record_member_multiset_hash("object", &keys);
         if keys.len() < 4 {
             return;
         }
@@ -423,6 +507,7 @@ impl FingerprintVisitor<'_> {
 
     fn record_class_shape_anchor(&mut self, class: &Class<'_>) {
         let methods = class_method_shape_members(class);
+        self.record_member_multiset_hash("class", &methods);
         if methods.len() < 3 {
             return;
         }
@@ -459,9 +544,34 @@ impl FingerprintVisitor<'_> {
         self.fingerprint
             .string_anchors
             .insert(format!("switch-shape:{shape}"));
+        let hash = stable_hash(shape.as_bytes());
+        self.fingerprint
+            .block_branch_hashes
+            .insert(format!("switch-branch:{}:{hash}", labels.len()));
+    }
+
+    fn record_member_multiset_hash(&mut self, kind: &str, members: &BTreeSet<String>) {
+        if members.len() < 2 {
+            return;
+        }
+        let shape = members
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        let hash = stable_hash(shape.as_bytes());
+        self.fingerprint
+            .class_member_hashes
+            .insert(format!("{kind}-member-multiset:{}:{hash}", members.len()));
     }
 
     fn finish(mut self) -> AstFingerprint {
+        for anchor in &self.fingerprint.surface_anchors {
+            let hash = stable_hash(anchor.as_bytes());
+            self.fingerprint
+                .import_export_surface_hashes
+                .insert(format!("import-export-surface:{hash}"));
+        }
         if self.fingerprint.prototype_members.len() >= 3 {
             let members = self
                 .fingerprint
@@ -473,6 +583,11 @@ impl FingerprintVisitor<'_> {
             self.fingerprint
                 .string_anchors
                 .insert(format!("prototype-shape:{members}"));
+            let hash = stable_hash(members.as_bytes());
+            self.fingerprint.class_member_hashes.insert(format!(
+                "prototype-member-multiset:{}:{hash}",
+                self.fingerprint.prototype_members.len()
+            ));
         }
         self.fingerprint
     }
@@ -493,6 +608,87 @@ fn top_level_declaration_hash_kind(statement: &Statement<'_>) -> Option<&'static
         }
         Statement::ExportDefaultDeclaration(_) => Some("export_default_decl"),
         _ => None,
+    }
+}
+
+fn statement_shape(statement: &Statement<'_>) -> String {
+    match statement {
+        Statement::BlockStatement(block) => format!("block:{}", block.body.len()),
+        Statement::BreakStatement(_) => "break".to_string(),
+        Statement::ContinueStatement(_) => "continue".to_string(),
+        Statement::DebuggerStatement(_) => "debugger".to_string(),
+        Statement::DoWhileStatement(_) => "do_while".to_string(),
+        Statement::EmptyStatement(_) => "empty".to_string(),
+        Statement::ExpressionStatement(statement) => {
+            format!("expression:{}", expression_shape(&statement.expression))
+        }
+        Statement::ForInStatement(_) => "for_in".to_string(),
+        Statement::ForOfStatement(_) => "for_of".to_string(),
+        Statement::ForStatement(_) => "for".to_string(),
+        Statement::IfStatement(statement) => format!(
+            "if:{}:{}",
+            statement_shape(&statement.consequent),
+            statement.alternate.as_ref().map_or("no_alt", |alternate| {
+                if matches!(alternate, Statement::IfStatement(_)) {
+                    "else_if"
+                } else {
+                    "else"
+                }
+            })
+        ),
+        Statement::LabeledStatement(_) => "label".to_string(),
+        Statement::ReturnStatement(statement) => statement.argument.as_ref().map_or_else(
+            || "return:none".to_string(),
+            |argument| format!("return:{}", expression_shape(argument)),
+        ),
+        Statement::SwitchStatement(statement) => format!("switch:cases={}", statement.cases.len()),
+        Statement::ThrowStatement(statement) => {
+            format!("throw:{}", expression_shape(&statement.argument))
+        }
+        Statement::TryStatement(statement) => format!(
+            "try:catch={}:finally={}",
+            u8::from(statement.handler.is_some()),
+            u8::from(statement.finalizer.is_some())
+        ),
+        Statement::WhileStatement(_) => "while".to_string(),
+        Statement::WithStatement(_) => "with".to_string(),
+        Statement::FunctionDeclaration(function) => function_shape(function),
+        Statement::ClassDeclaration(class) => class_declaration_shape(class),
+        Statement::VariableDeclaration(declaration) => format!(
+            "variable:{:?}:{}",
+            declaration.kind,
+            declaration.declarations.len()
+        ),
+        Statement::TSTypeAliasDeclaration(_) => "type_alias".to_string(),
+        Statement::TSInterfaceDeclaration(_) => "interface".to_string(),
+        Statement::TSEnumDeclaration(declaration) => {
+            format!("enum:members={}", declaration.members.len())
+        }
+        Statement::TSModuleDeclaration(_) => "module".to_string(),
+        Statement::TSImportEqualsDeclaration(_) => "import_equals".to_string(),
+        Statement::ImportDeclaration(declaration) => {
+            let specifier_count = declaration
+                .specifiers
+                .as_ref()
+                .map_or(0, |items| items.len());
+            format!("import:specifiers={specifier_count}")
+        }
+        Statement::ExportAllDeclaration(_) => "export_all".to_string(),
+        Statement::ExportDefaultDeclaration(declaration) => format!(
+            "export_default:{}",
+            declaration
+                .declaration
+                .as_expression()
+                .map(expression_shape)
+                .unwrap_or("declaration")
+        ),
+        Statement::ExportNamedDeclaration(declaration) => format!(
+            "export_named:specifiers={}:decl={}",
+            declaration.specifiers.len(),
+            u8::from(declaration.declaration.is_some())
+        ),
+        Statement::TSExportAssignment(_) => "ts_export_assignment".to_string(),
+        Statement::TSNamespaceExportDeclaration(_) => "ts_namespace_export".to_string(),
     }
 }
 
@@ -913,5 +1109,46 @@ mod tests {
             right.top_level_declaration_hashes
         );
         assert_eq!(left.top_level_declaration_hashes.len(), 6);
+    }
+
+    #[test]
+    fn surface_hashes_ignore_import_export_specifier_order() {
+        let left = fingerprint_source(
+            "a.ts",
+            "import { a, b as c } from 'pkg'; const x = a; export { x as one, c as two };",
+        )
+        .expect("left fingerprint");
+        let right = fingerprint_source(
+            "b.ts",
+            "import { b as c, a } from 'pkg'; const x = a; export { c as two, x as one };",
+        )
+        .expect("right fingerprint");
+        assert_eq!(
+            left.import_export_surface_hashes,
+            right.import_export_surface_hashes
+        );
+        assert!(!left.import_export_surface_hashes.is_empty());
+    }
+
+    #[test]
+    fn member_multiset_hashes_ignore_class_member_order() {
+        let left = fingerprint_source("a.ts", "class Widget { start() {} stop() {} reset() {} }\n")
+            .expect("left fingerprint");
+        let right =
+            fingerprint_source("b.ts", "class Widget { reset() {} start() {} stop() {} }\n")
+                .expect("right fingerprint");
+        assert_eq!(left.class_member_hashes, right.class_member_hashes);
+        assert!(!left.class_member_hashes.is_empty());
+    }
+
+    #[test]
+    fn statement_window_and_block_branch_hashes_capture_local_shape() {
+        let fingerprint = fingerprint_source(
+            "a.ts",
+            "function run(x) { const y = x + 1; log(y); if (x) { return 'yes'; } else { throw new Error('no'); } }\n",
+        )
+        .expect("fingerprint");
+        assert!(!fingerprint.statement_window_hashes.is_empty());
+        assert!(!fingerprint.block_branch_hashes.is_empty());
     }
 }
