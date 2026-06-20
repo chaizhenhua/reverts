@@ -32,6 +32,8 @@ pub struct ModuleMatchFingerprint {
     pub block_branch_hashes: BTreeSet<String>,
     /// Normalized structural PQ-Gram hashes over the statement tree.
     pub pq_gram_hashes: BTreeSet<String>,
+    /// Fused Weisfeiler-Lehman refinement hashes over the normalized statement tree.
+    pub wl_hashes: BTreeSet<String>,
     /// string literal anchors collected from the AST.
     pub string_anchors: BTreeSet<String>,
     /// Multi-axis function structure anchors shared by package and cross-version matching.
@@ -64,6 +66,8 @@ pub struct PackageSourceFingerprint<'a> {
     pub block_branch_hashes: BTreeSet<String>,
     /// Normalized structural PQ-Gram hashes over the statement tree.
     pub pq_gram_hashes: BTreeSet<String>,
+    /// Fused Weisfeiler-Lehman refinement hashes over the normalized statement tree.
+    pub wl_hashes: BTreeSet<String>,
     /// string literal anchors collected from the AST.
     pub string_anchors: BTreeSet<String>,
     /// Multi-axis function structure anchors shared by package and cross-version matching.

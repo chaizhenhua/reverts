@@ -58,6 +58,7 @@ pub struct SourceFingerprint {
     pub statement_window_hashes: BTreeSet<String>,
     pub block_branch_hashes: BTreeSet<String>,
     pub pq_gram_hashes: BTreeSet<String>,
+    pub wl_hashes: BTreeSet<String>,
     pub string_anchors: BTreeSet<String>,
 }
 
@@ -91,6 +92,7 @@ pub fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint,
         statement_window_hashes: ast.statement_window_hashes,
         block_branch_hashes: ast.block_branch_hashes,
         pq_gram_hashes: ast.pq_gram_hashes,
+        wl_hashes: ast.wl_hashes,
         string_anchors: ast.string_anchors,
     })
 }
@@ -104,6 +106,7 @@ struct AstFingerprint {
     statement_window_hashes: BTreeSet<String>,
     block_branch_hashes: BTreeSet<String>,
     pq_gram_hashes: BTreeSet<String>,
+    wl_hashes: BTreeSet<String>,
     string_anchors: BTreeSet<String>,
     surface_anchors: BTreeSet<String>,
     prototype_members: BTreeSet<String>,
@@ -125,6 +128,7 @@ fn ast_fingerprint(path: &str, normalized_source: &str) -> Result<AstFingerprint
             visitor.record_statement_window_hashes(&parsed.program.body, "program");
             visitor.record_block_branch_hashes(&parsed.program.body, "program");
             visitor.record_pq_grams(&parsed.program);
+            visitor.record_wl_hashes(&parsed.program);
             visitor.visit_program(&parsed.program);
             return Ok(visitor.finish());
         }
@@ -336,11 +340,13 @@ impl FingerprintVisitor<'_> {
     }
 
     fn record_pq_grams(&mut self, program: &Program<'_>) {
-        let tree = TreeNode {
-            label: "program".to_string(),
-            children: program.body.iter().map(statement_tree).collect(),
-        };
+        let tree = program_tree(program);
         collect_pq_grams(&tree, &mut Vec::new(), &mut self.fingerprint.pq_gram_hashes);
+    }
+
+    fn record_wl_hashes(&mut self, program: &Program<'_>) {
+        let tree = program_tree(program);
+        collect_wl_hashes(&tree, &mut self.fingerprint.wl_hashes);
     }
 
     fn record_arrow_function(&mut self, arrow: &ArrowFunctionExpression<'_>) {
@@ -713,6 +719,14 @@ struct TreeNode {
 const PQ_GRAM_P: usize = 2;
 const PQ_GRAM_Q: usize = 3;
 const PQ_PAD: &str = "*";
+const WL_ROUNDS: usize = 2;
+
+fn program_tree(program: &Program<'_>) -> TreeNode {
+    TreeNode {
+        label: "program".to_string(),
+        children: program.body.iter().map(statement_tree).collect(),
+    }
+}
 
 fn collect_pq_grams(node: &TreeNode, ancestors: &mut Vec<String>, output: &mut BTreeSet<String>) {
     let mut ancestor_window = vec![PQ_PAD.to_string(); PQ_GRAM_P];
@@ -746,6 +760,33 @@ fn stable_hash_u64(bytes: &[u8]) -> u64 {
     let mut hash = FNV_OFFSET_BASIS;
     update_stable_hash(&mut hash, bytes);
     hash
+}
+
+fn collect_wl_hashes(node: &TreeNode, output: &mut BTreeSet<String>) -> Vec<u64> {
+    let child_rounds = node
+        .children
+        .iter()
+        .map(|child| collect_wl_hashes(child, output))
+        .collect::<Vec<_>>();
+    let mut rounds = Vec::with_capacity(WL_ROUNDS + 1);
+    let round0 = stable_hash_u64(format!("wl0:{}", node.label).as_bytes());
+    rounds.push(round0);
+    for round in 1..=WL_ROUNDS {
+        let mut neighbor_labels = child_rounds
+            .iter()
+            .filter_map(|labels| labels.get(round - 1).copied())
+            .collect::<Vec<_>>();
+        neighbor_labels.sort_unstable();
+        let mut payload = format!("wl{round}:{}:{}", node.label, node.children.len());
+        for label in neighbor_labels {
+            payload.push(':');
+            payload.push_str(format!("{label:016x}").as_str());
+        }
+        let hash = stable_hash_u64(payload.as_bytes());
+        output.insert(format!("wl-round{round}:{hash:016x}"));
+        rounds.push(hash);
+    }
+    rounds
 }
 
 fn statement_tree(statement: &Statement<'_>) -> TreeNode {
@@ -1440,5 +1481,27 @@ mod tests {
         .expect("right fingerprint");
         assert_eq!(left.pq_gram_hashes, right.pq_gram_hashes);
         assert!(!left.pq_gram_hashes.is_empty());
+    }
+
+    #[test]
+    fn wl_hashes_ignore_local_names_and_refine_context() {
+        let left = fingerprint_source(
+            "a.ts",
+            "function run(x) { const y = x + 1; if (y) { return 'yes'; } return 'no'; }\n",
+        )
+        .expect("left fingerprint");
+        let right = fingerprint_source(
+            "b.ts",
+            "function run(value) { const result = value + 1; if (result) { return 'yes'; } return 'no'; }\n",
+        )
+        .expect("right fingerprint");
+        let different = fingerprint_source(
+            "c.ts",
+            "function run(value) { while (value) { value--; } return 'no'; }\n",
+        )
+        .expect("different fingerprint");
+        assert_eq!(left.wl_hashes, right.wl_hashes);
+        assert!(!left.wl_hashes.is_empty());
+        assert_ne!(left.wl_hashes, different.wl_hashes);
     }
 }
