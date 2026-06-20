@@ -4582,6 +4582,91 @@ fn match_function_lists(
         }
     }
 
+    // ACCEPT pass 3: distinctive ANCHOR-SET uniqueness (module-INDEPENDENT).
+    //
+    // The decompiler-output -> clean-source structural gap defeats the AST and
+    // composite axes (they barely fire), so passes 0/1/2 only reach the small
+    // set of modules that matched. But the NAMES a function calls and accesses
+    // plus its string literals — its "anchor set" — survive that gap. A subject
+    // function whose anchor set overlaps exactly one reference function with high
+    // Jaccard, a clear margin over the runner-up, AND shares >=2 RARE anchors
+    // (carried by <=3 reference functions, so the overlap is not just common API
+    // calls) is the same function — even in a module that never matched. This is
+    // what reaches the ~1865 unmatched modules.
+    const MIN_ANCHOR_ACCEPT_TOKENS: usize = 5;
+    const ANCHOR_ACCEPT_JACCARD: f64 = 0.65;
+    const ANCHOR_ACCEPT_MARGIN: f64 = 0.25;
+    const RARE_ANCHOR_MAX_REFS: usize = 3;
+    const MIN_RARE_SHARED_ANCHORS: usize = 2;
+    for subject in subject_fns {
+        if accepted.contains(&(subject.module_id, subject.name.clone()))
+            || subject.literals.len() < MIN_ANCHOR_ACCEPT_TOKENS
+        {
+            continue;
+        }
+        let mut candidates: BTreeSet<usize> = BTreeSet::new();
+        for anchor in &subject.literals {
+            if let Some(indices) = ref_by_literal.get(anchor.as_str()) {
+                for &ri in indices {
+                    candidates.insert(ri);
+                }
+            }
+        }
+        let (mut best, mut runner_up): (Option<(f64, usize)>, f64) = (None, 0.0);
+        for ri in candidates {
+            if used_ref.contains(&ri) || reference_fns[ri].literals.len() < 4 {
+                continue;
+            }
+            let reference = &reference_fns[ri];
+            let intersection = subject.literals.intersection(&reference.literals).count();
+            let union = subject.literals.union(&reference.literals).count().max(1);
+            let jaccard = intersection as f64 / union as f64;
+            match best {
+                Some((best_jaccard, _)) if jaccard <= best_jaccard => {
+                    runner_up = runner_up.max(jaccard);
+                }
+                Some((best_jaccard, _)) => {
+                    runner_up = runner_up.max(best_jaccard);
+                    best = Some((jaccard, ri));
+                }
+                None => best = Some((jaccard, ri)),
+            }
+        }
+        let Some((best_jaccard, ri)) = best else {
+            continue;
+        };
+        if best_jaccard < ANCHOR_ACCEPT_JACCARD || runner_up > best_jaccard - ANCHOR_ACCEPT_MARGIN {
+            continue;
+        }
+        let reference = &reference_fns[ri];
+        let rare_shared = subject
+            .literals
+            .intersection(&reference.literals)
+            .filter(|anchor| {
+                ref_by_literal
+                    .get(anchor.as_str())
+                    .is_some_and(|refs| refs.len() <= RARE_ANCHOR_MAX_REFS)
+            })
+            .count();
+        if rare_shared < MIN_RARE_SHARED_ANCHORS {
+            continue;
+        }
+        accepted.insert((subject.module_id, subject.name.clone()));
+        used_ref.insert(ri);
+        rows.push(BindingNameRow {
+            module_id: subject.module_id,
+            subject_path: subject.subject_path.clone(),
+            reference_file: reference.file.clone(),
+            original_name: subject.name.clone(),
+            semantic_name: reference.name.clone(),
+            accepted: true,
+            ast_hash: subject.fingerprint.primary.ast,
+            param_count: subject.fingerprint.param_count,
+            statement_count: subject.fingerprint.statement_count,
+            score: best_jaccard,
+        });
+    }
+
     // PROPOSAL pass: global, for every subject function not auto-accepted.
     // Candidates come from shared AST hashes AND shared DISTINCTIVE in-body
     // string literals (the latter recovers functions whose AST drifted across
