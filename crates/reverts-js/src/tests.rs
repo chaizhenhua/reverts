@@ -1865,6 +1865,50 @@ fn readability_renames_skip_root_scope_collisions() {
 }
 
 #[test]
+fn emit_rewrites_void_zero_to_undefined() {
+    let formatted = format_source_with_module_items_and_renames(
+        "export function f(x) { if (x) return void 0; return void 0; }",
+        &[],
+        &[],
+        &[],
+        Some(Path::new("src/index.ts")),
+        ParseGoal::TypeScript,
+        CompilerLowering::None,
+    )
+    .expect("fixture should format");
+
+    assert!(
+        formatted.contains("return undefined"),
+        "void 0 should be rewritten to undefined: {formatted}"
+    );
+    assert!(
+        !formatted.contains("void 0"),
+        "no void 0 should remain: {formatted}"
+    );
+}
+
+#[test]
+fn emit_keeps_void_zero_when_undefined_is_shadowed() {
+    // A local binding named `undefined` shadows the global, so the rewrite must bail
+    // out entirely (value would differ) and leave `void 0` intact.
+    let formatted = format_source_with_module_items_and_renames(
+        "export function f() { let undefined = 1; return void 0; }",
+        &[],
+        &[],
+        &[],
+        Some(Path::new("src/index.ts")),
+        ParseGoal::TypeScript,
+        CompilerLowering::None,
+    )
+    .expect("fixture should format");
+
+    assert!(
+        formatted.contains("void 0"),
+        "shadowed `undefined` must keep `void 0`: {formatted}"
+    );
+}
+
+#[test]
 fn readability_renames_all_scope_skips_catch_parameter() {
     // An All-scope rename renames every same-named binding. A reused minified name
     // used as a catch-clause parameter must NOT be captured (the source of nonsense

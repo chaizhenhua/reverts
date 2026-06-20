@@ -283,6 +283,18 @@ fn apply_emit_readability_polish<'a>(
     apply_object_property_readability(program, report);
     split_safe_namespace_imports(allocator, program, report);
     merge_and_sort_named_imports(allocator, program, report);
+    rewrite_void_zero_to_undefined(allocator, program);
+}
+
+/// Rewrite the bundler idiom `void 0` (and `void <number>`) back to the canonical
+/// `undefined` identifier for readability. Reuses the matcher's sound, scope-guarded
+/// `VoidZeroToUndefinedGuarded` normalization: it bails out entirely if `undefined`
+/// is shadowed anywhere in the file (a local binding or a `with` statement), so the
+/// rewrite is strictly value-equivalent and never changes behavior.
+fn rewrite_void_zero_to_undefined<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+    use crate::normalize::NormalizationPass;
+    crate::normalize::void_zero_to_undefined_guarded::VoidZeroToUndefinedGuarded
+        .apply(allocator, program);
 }
 
 fn normalize_imports_after_emit<'a>(program: &mut Program<'a>, builder: &AstBuilder<'a>) {
