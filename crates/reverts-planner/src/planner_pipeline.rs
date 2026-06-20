@@ -38,6 +38,11 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     PruneUnreachableFilesPass.run(context, &mut state)?;
     PruneDeadExportsPass.run(context, &mut state)?;
     PruneInvalidExportsPass.run(context, &mut state)?;
+    // Layer-2 export-name recovery: rename minified bindings to their real esbuild
+    // export names across every planned file (modules + entrypoint island + runtime
+    // helpers). Runs last so it sees the final, pruned file set.
+    let export_names = crate::compute_modules::build_namespace_export_name_map(context.program());
+    crate::compute_modules::apply_export_name_renames(&mut state.plan, &export_names);
     Ok(state.plan)
 }
 

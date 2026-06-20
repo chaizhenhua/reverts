@@ -13,6 +13,7 @@ use reverts_model::EnrichedProgram;
 
 use crate::binding_owner::BindingOwnerPlan;
 use crate::compiler_preservation::CompilerPreservationDecision;
+use crate::local_bindings::local_bindings_in_source;
 use crate::node_builtin_require::NodeBuiltinRequireRewrite;
 use crate::package_runtime::{
     PackageRuntimeHelperKey, PackageRuntimeHelperUsage, package_runtime_owner_for_module,
@@ -30,23 +31,24 @@ use crate::{
     LoweredRuntimeHelperImportArgs, LoweredRuntimeHelperUsageArgs, LoweredRuntimeModuleSource,
     MigratedExtraOwnerImportArgs, MigratedExtraRuntimeReexportImportArgs,
     MigratedRuntimeExtraAliasImportArgs, OwnerMigrationState, PlanError, PlannedFile,
-    PlannedTypeAnnotation, PostInlineLazyValueLocalizationArgs, RemainingHelpersWriteRewriteArgs,
-    RuntimeExtraDepsImportArgs, RuntimeImportPartitionArgs, RuntimeImportPartitionEmitArgs,
-    RuntimeLazyFoldPlan, RuntimePreludeDirectImport, SourceModuleImportEmitArgs,
-    SourceModuleWiring, add_migrated_local_binding_declarations, adjust_remaining_runtime_helpers,
-    adjust_written_runtime_helpers, build_lowered_module_source, build_runtime_import_partitions,
-    compute_localized_noop_runtime_helpers, compute_namespace_member_rewrite,
-    compute_node_builtin_require_helpers, compute_node_builtin_require_rewrite,
-    compute_runtime_sources_for_module, compute_source_runtime_refs, contains_call_to_identifier,
-    emit_direct_owner_import_aliases, emit_direct_owner_imports, emit_direct_prelude_imports,
-    emit_folded_direct_stub_reexports, emit_folded_runtime_stub_reexports,
-    emit_lowered_package_runtime_imports, emit_lowered_runtime_helper_import,
-    emit_migrated_extra_chunks, emit_migrated_extra_owner_imports,
-    emit_migrated_extra_runtime_reexport_imports, emit_migrated_locally_var_declarations,
-    emit_migrated_runtime_extra_alias_imports, emit_module_definition_bindings,
-    emit_node_builtin_default_imports, emit_runtime_extra_alias_imports,
-    emit_runtime_extra_deps_imports, emit_runtime_import_partitions, emit_source_import_bindings,
-    emit_source_module_imports, external_package_adapter_emit, extra_exports_for_module,
+    PlannedRename, PlannedTypeAnnotation, PostInlineLazyValueLocalizationArgs,
+    RemainingHelpersWriteRewriteArgs, RuntimeExtraDepsImportArgs, RuntimeImportPartitionArgs,
+    RuntimeImportPartitionEmitArgs, RuntimeLazyFoldPlan, RuntimePreludeDirectImport,
+    SourceModuleImportEmitArgs, SourceModuleWiring, add_migrated_local_binding_declarations,
+    adjust_remaining_runtime_helpers, adjust_written_runtime_helpers, build_lowered_module_source,
+    build_runtime_import_partitions, compute_localized_noop_runtime_helpers,
+    compute_namespace_member_rewrite, compute_node_builtin_require_helpers,
+    compute_node_builtin_require_rewrite, compute_runtime_sources_for_module,
+    compute_source_runtime_refs, contains_call_to_identifier, emit_direct_owner_import_aliases,
+    emit_direct_owner_imports, emit_direct_prelude_imports, emit_folded_direct_stub_reexports,
+    emit_folded_runtime_stub_reexports, emit_lowered_package_runtime_imports,
+    emit_lowered_runtime_helper_import, emit_migrated_extra_chunks,
+    emit_migrated_extra_owner_imports, emit_migrated_extra_runtime_reexport_imports,
+    emit_migrated_locally_var_declarations, emit_migrated_runtime_extra_alias_imports,
+    emit_module_definition_bindings, emit_node_builtin_default_imports,
+    emit_runtime_extra_alias_imports, emit_runtime_extra_deps_imports,
+    emit_runtime_import_partitions, emit_source_import_bindings, emit_source_module_imports,
+    external_package_adapter_emit, extra_exports_for_module,
     filter_remaining_helpers_by_write_rewrite, filter_remaining_helpers_namespace_and_require,
     filter_unreferenced_namespace_helpers, folded_runtime_required_bindings, group_runtime_imports,
     implicit_global_declarations_for_module, lazy_helper_import_names_for_source,
@@ -1030,6 +1032,78 @@ impl NormalModuleBodyPass<'_> {
         file.push_source(normalized);
         Ok(())
     }
+}
+
+/// Build the layer-2 export-name map once per run: minified binding -> real
+/// esbuild export name, from every `RuntimeNamespaceExport` table
+/// (`__export(NS,{realName:()=>binding})`). A binding exported under more than one
+/// real name maps to `None` (ambiguous reused minified name → dropped for soundness).
+pub(crate) fn build_namespace_export_name_map(
+    program: &EnrichedProgram,
+) -> BTreeMap<String, Option<String>> {
+    let mut map: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for prelude in program.model().graph().runtime_preludes().values() {
+        for namespace_export in &prelude.namespace_exports {
+            for (real_name, binding) in &namespace_export.exports {
+                if real_name.as_str() == binding.as_str() || !is_plain_js_identifier(real_name) {
+                    continue;
+                }
+                map.entry(binding.as_str().to_string())
+                    .and_modify(|existing| {
+                        if existing.as_deref() != Some(real_name.as_str()) {
+                            *existing = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(real_name.to_string()));
+            }
+        }
+    }
+    map
+}
+
+/// Layer-2 export-name recovery (post-emission pass over EVERY planned file).
+/// For each file, parse its actual local bindings and rename any that the bundle's
+/// `__export` tables map to a real export name. Covers functions wherever they were
+/// emitted — regular modules, the entrypoint island, runtime-helper files — because
+/// it reads the file's real bindings, not graph definitions/migrations (the bulk of
+/// exported functions land in the prelude-derived island, not in module definitions).
+/// Sound + safe: ambiguous reused names are dropped (`None`); the rename machinery's
+/// collision guard skips clashes; esbuild exports by namespace PROPERTY name so the
+/// local binding rename never affects importers.
+pub(crate) fn apply_export_name_renames(
+    plan: &mut EmitPlan,
+    export_names: &BTreeMap<String, Option<String>>,
+) {
+    if export_names.is_empty() {
+        return;
+    }
+    for file in &mut plan.files {
+        let body = file.body.join("\n");
+        for binding in local_bindings_in_source(&body) {
+            let Some(Some(real_name)) = export_names.get(&binding) else {
+                continue;
+            };
+            if real_name != &binding {
+                file.add_readability_rename(PlannedRename::new(
+                    BindingName::new(binding),
+                    BindingName::new(real_name.clone()),
+                ));
+            }
+        }
+    }
+}
+
+/// A plain JS identifier of length >= 2 (single-char names are too low-entropy to
+/// be a meaningful recovered export name): starts letter/`_`/`$`, rest word chars.
+fn is_plain_js_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+        return false;
+    }
+    name.len() >= 2 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 fn emit_normal_module_exports(
