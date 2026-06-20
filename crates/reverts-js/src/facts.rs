@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use oxc_allocator::Allocator;
@@ -19,7 +19,7 @@ use oxc_ast::{
 };
 use oxc_parser::Parser;
 use oxc_span::GetSpan;
-use oxc_syntax::operator::UnaryOperator;
+use oxc_syntax::operator::{LogicalOperator, UnaryOperator};
 
 use crate::errors::{JsError, ParseError, ParseGoal, Result};
 use crate::parse::{parse_options_for, source_type_candidates};
@@ -259,13 +259,14 @@ pub fn lazy_value_sub_snippets(
         if arrow.expression || arrow.body.statements.is_empty() {
             return None;
         }
+        let memoizers = lazy_memoizer_names(&arrow.body.statements);
         let slices = arrow
             .body
             .statements
             .iter()
             .map(|statement| {
                 let span = statement.span();
-                let (kind, bindings) = top_level_statement_kind_and_bindings(statement);
+                let (kind, bindings) = top_level_statement_kind_and_bindings(statement, &memoizers);
                 LazyValueSubSnippet {
                     source: source
                         .get(span.start as usize..span.end as usize)
@@ -303,11 +304,12 @@ pub fn collect_top_level_statement_facts(
             continue;
         }
 
+        let memoizers = lazy_memoizer_names(&parsed.program.body);
         return Ok(parsed
             .program
             .body
             .iter()
-            .map(top_level_statement_fact)
+            .map(|statement| top_level_statement_fact(statement, &memoizers))
             .collect());
     }
 
@@ -559,9 +561,12 @@ fn matches_void_numeric_expression(expression: &Expression<'_>) -> bool {
         && matches!(&unary.argument, Expression::NumericLiteral(_))
 }
 
-pub(crate) fn top_level_statement_fact(statement: &Statement<'_>) -> TopLevelStatementFact {
+pub(crate) fn top_level_statement_fact(
+    statement: &Statement<'_>,
+    memoizers: &BTreeSet<String>,
+) -> TopLevelStatementFact {
     let span = statement.span();
-    let (kind, bindings) = top_level_statement_kind_and_bindings(statement);
+    let (kind, bindings) = top_level_statement_kind_and_bindings(statement, memoizers);
     TopLevelStatementFact {
         kind,
         bindings,
@@ -570,8 +575,87 @@ pub(crate) fn top_level_statement_fact(statement: &Statement<'_>) -> TopLevelSta
     }
 }
 
+/// True if `expr` is the esbuild `__esm` memoizer helper by structural
+/// signature: `(a, b) => () => (a && (b = a(a = 0)), b)`. Name-independent — the
+/// var it is bound to and both params may carry any (minified) identifiers. This
+/// lets the classifier tag the planner's inlined per-file memoizer (`_$l`) the
+/// same as the imported `lazyValue`, without hard-coding the name.
+fn strip_parens<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    match expr {
+        Expression::ParenthesizedExpression(inner) => strip_parens(&inner.expression),
+        other => other,
+    }
+}
+
+fn is_lazy_memoizer_init(expr: &Expression<'_>) -> bool {
+    let Expression::ArrowFunctionExpression(outer) = strip_parens(expr) else {
+        return false;
+    };
+    let params: Vec<&str> = outer
+        .params
+        .items
+        .iter()
+        .filter_map(|param| match &param.pattern.kind {
+            BindingPatternKind::BindingIdentifier(id) => Some(id.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let [a, b] = params.as_slice() else {
+        return false;
+    };
+    let Some(Expression::ArrowFunctionExpression(inner)) = outer.get_expression().map(strip_parens)
+    else {
+        return false;
+    };
+    if !inner.params.items.is_empty() {
+        return false;
+    }
+    let Some(Expression::SequenceExpression(seq)) = inner.get_expression().map(strip_parens) else {
+        return false;
+    };
+    let [first, last] = seq.expressions.as_slice() else {
+        return false;
+    };
+    // last operand is the cached value identifier `b`
+    let Expression::Identifier(last_id) = strip_parens(last) else {
+        return false;
+    };
+    if last_id.name.as_str() != *b {
+        return false;
+    }
+    // first operand is `a && (…)`
+    let Expression::LogicalExpression(logical) = strip_parens(first) else {
+        return false;
+    };
+    matches!(logical.operator, LogicalOperator::And)
+        && matches!(strip_parens(&logical.left), Expression::Identifier(left) if left.name.as_str() == *a)
+}
+
+/// Names of file-local lazy memoizers, found by [`is_lazy_memoizer_init`]
+/// signature over a program's top-level declarations.
+pub(crate) fn lazy_memoizer_names(body: &[Statement<'_>]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for statement in body {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            continue;
+        };
+        for declarator in &declaration.declarations {
+            let (BindingPatternKind::BindingIdentifier(id), Some(init)) =
+                (&declarator.id.kind, declarator.init.as_ref())
+            else {
+                continue;
+            };
+            if is_lazy_memoizer_init(init) {
+                names.insert(id.name.as_str().to_string());
+            }
+        }
+    }
+    names
+}
+
 pub(crate) fn top_level_statement_kind_and_bindings(
     statement: &Statement<'_>,
+    memoizers: &BTreeSet<String>,
 ) -> (TopLevelStatementKind, Vec<String>) {
     match statement {
         Statement::ImportDeclaration(_) => (TopLevelStatementKind::Import, Vec::new()),
@@ -614,6 +698,11 @@ pub(crate) fn top_level_statement_kind_and_bindings(
                     match expression_identifier(&call.callee) {
                         Some("lazyValue") => Some(TopLevelStatementKind::LazyValue),
                         Some("lazyModule") => Some(TopLevelStatementKind::LazyModule),
+                        // Inlined per-file memoizer (`_$l` etc.), recognized by
+                        // signature rather than name.
+                        Some(name) if memoizers.contains(name) => {
+                            Some(TopLevelStatementKind::LazyValue)
+                        }
                         _ => None,
                     }
                 })

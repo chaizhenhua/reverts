@@ -1688,9 +1688,8 @@ mod tests {
         let run = generate_project_from_input(input).expect("fixture should emit");
 
         assert!(run.audit.is_clean());
-        // The CommonJS wrapper and the remaining zero-arg lazyValue thunk are
-        // both local now, so this fixture no longer needs a shared runtime
-        // helper file at all.
+        // The CommonJS wrapper is local now, so this fixture no longer needs a
+        // shared runtime helper file at all.
         assert_eq!(run.project.files.len(), 1);
         let entry = run
             .project
@@ -1702,9 +1701,13 @@ mod tests {
         assert!(!entry.source.contains("_lazy9"));
         assert!(!entry.source.contains("lazyModule("));
         assert!(!entry.source.contains("lazyValue("));
-        assert!(entry.source.contains("var _$l ="));
-        // The CommonJS memoization temps and the tiny lazyValue memoizer are
-        // local to the recovered module.
+        // `init`'s body (`entry();`) has no top-level return and `init` is
+        // invoked, so the global de-lazify post-pass hoists it to eager
+        // module-eval, stubs it, and drops the now-dead local `_$l` memoizer.
+        assert!(!entry.source.contains("_$l"));
+        assert!(entry.source.contains("entry();"));
+        assert!(entry.source.contains("function init() {}"));
+        // The CommonJS memoization temps remain local to the recovered module.
         assert!(entry.source.contains("_$cached"));
         assert!(!entry.source.contains("_$init"));
         assert!(

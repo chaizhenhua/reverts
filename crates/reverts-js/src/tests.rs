@@ -133,6 +133,39 @@ fn collects_top_level_statement_facts_for_runtime_attribution() {
 }
 
 #[test]
+fn classifies_inlined_signature_memoizer_thunks_as_lazy_value() {
+    // The planner inlines esbuild's `__esm` memoizer per file as `_$l`; the
+    // classifier must tag `var X = _$l(() => {…})` as LazyValue by recognizing
+    // the memoizer DEFINITION by signature — not by the name `lazyValue`.
+    let source = "var _$l = (_$f, _$v) => () => (_$f && (_$v = _$f(_$f = 0)), _$v);\n\
+                  var thunk = _$l(() => { sideEffect(); });\n\
+                  var plain = helper(() => 1);\n\
+                  export { thunk };\n";
+
+    let facts = collect_top_level_statement_facts(
+        source,
+        Some(Path::new("3671-esbuild-JvK.ts")),
+        ParseGoal::TypeScript,
+    )
+    .expect("runtime statements should parse");
+
+    let kinds = facts.iter().map(|fact| fact.kind).collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            // the memoizer definition itself is a plain variable
+            TopLevelStatementKind::Variable,
+            // recognized as a lazy thunk via the captured `_$l` name
+            TopLevelStatementKind::LazyValue,
+            // `helper(...)` is not a memoizer → stays a plain variable
+            TopLevelStatementKind::Variable,
+            TopLevelStatementKind::Export,
+        ]
+    );
+    assert_eq!(facts[1].bindings, vec!["thunk"]);
+}
+
+#[test]
 fn collects_void_zero_expression_statement_spans() {
     let source = "function f() { void 0; return void 0; }\nif (ok) void 0;\n{ void 0; }\nvoid 0;\n";
 
