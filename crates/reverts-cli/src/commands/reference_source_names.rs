@@ -285,9 +285,12 @@ fn calibrate_global_reference_uniqueness(
             let matched = &plans[index].matched;
             let independently_strong = matched.reciprocal_best
                 || matched.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR
+                || has_high_unique_anchor_mass(matched)
                 || guarded_graph_placement_promotion(matched);
-            let covers_distinct_part =
-                !anchors.is_empty() && kept_anchors.iter().all(|kept| kept.is_disjoint(anchors));
+            let covers_distinct_part = !anchors.is_empty()
+                && kept_anchors
+                    .iter()
+                    .all(|kept| anchor_sets_cover_distinct_parts(anchors, kept));
             if kept_anchors.is_empty() {
                 kept_anchors.push(anchors); // strongest is always kept
             } else if covers_distinct_part && independently_strong {
@@ -297,6 +300,18 @@ fn calibrate_global_reference_uniqueness(
             }
         }
     }
+}
+
+fn anchor_sets_cover_distinct_parts(left: &BTreeSet<String>, right: &BTreeSet<String>) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    let intersection = left.intersection(right).count();
+    if intersection == 0 {
+        return true;
+    }
+    let smaller = left.len().min(right.len());
+    intersection * 4 <= smaller
 }
 
 fn strip_source_extension(path: &str) -> String {
@@ -983,12 +998,19 @@ fn low_boundary_row_json(
             "pq_gram_overlap": matched.pq_gram_overlap,
             "wl_overlap": matched.wl_overlap,
             "granular_hash_overlap": granular_match_overlap(matched),
+            "granular_hash_containment": matched.granular_hash_containment,
+            "statement_window_containment": matched.statement_window_containment,
+            "block_branch_containment": matched.block_branch_containment,
             "structural_score": matched.structural_score,
             "graph_support": matched.graph_support,
             "graph_known_edges": matched.graph_known_edges,
             "matched_neighbor_ratio": matched_neighbor_ratio(matched),
         },
         "graph_structure": graph_structure_json(matched.graph_structure),
+        "runner_up_delta": plan
+            .runner_up
+            .as_ref()
+            .map(|candidate| candidate_delta_json(matched, &candidate.matched)),
         "shortfalls": {
             "strong_normalized_anchor": positive_shortfall(MEDIUM_STRONG_NANCHOR, matched.normalized_anchor),
             "guarded_strong_normalized_anchor": positive_shortfall(MEDIUM_GUARDED_STRONG_NANCHOR, matched.normalized_anchor),
@@ -1289,6 +1311,9 @@ fn candidate_diagnostic_json(relevance: f64, matched: &ModuleMatch) -> serde_jso
             "pq_gram_overlap": matched.pq_gram_overlap,
             "wl_overlap": matched.wl_overlap,
             "granular_hash_overlap": granular_match_overlap(matched),
+            "granular_hash_containment": matched.granular_hash_containment,
+            "statement_window_containment": matched.statement_window_containment,
+            "block_branch_containment": matched.block_branch_containment,
             "structural_score": matched.structural_score,
             "graph_support": matched.graph_support,
             "graph_known_edges": matched.graph_known_edges,
@@ -1296,6 +1321,31 @@ fn candidate_diagnostic_json(relevance: f64, matched: &ModuleMatch) -> serde_jso
         },
         "graph_structure": graph_structure_json(matched.graph_structure),
         "source_score": source_score_json(matched.source_score),
+    })
+}
+
+fn candidate_delta_json(top: &ModuleMatch, runner_up: &ModuleMatch) -> serde_json::Value {
+    serde_json::json!({
+        "weighted_anchor": top.weighted_anchor - runner_up.weighted_anchor,
+        "normalized_anchor": top.normalized_anchor - runner_up.normalized_anchor,
+        "statement_window_overlap": top.statement_window_overlap as isize
+            - runner_up.statement_window_overlap as isize,
+        "block_branch_overlap": top.block_branch_overlap as isize
+            - runner_up.block_branch_overlap as isize,
+        "granular_hash_overlap": granular_match_overlap(top) as isize
+            - granular_match_overlap(runner_up) as isize,
+        "granular_hash_containment": top.granular_hash_containment
+            - runner_up.granular_hash_containment,
+        "statement_window_containment": top.statement_window_containment
+            - runner_up.statement_window_containment,
+        "block_branch_containment": top.block_branch_containment
+            - runner_up.block_branch_containment,
+        "graph_support": top.graph_support as isize - runner_up.graph_support as isize,
+        "matched_neighbor_ratio": matched_neighbor_ratio(top) - matched_neighbor_ratio(runner_up),
+        "unique_string_anchor_overlap": top.source_score.unique_string_anchor_overlap as isize
+            - runner_up.source_score.unique_string_anchor_overlap as isize,
+        "function_axis_overlap": top.source_score.function_axis_overlap as isize
+            - runner_up.source_score.function_axis_overlap as isize,
     })
 }
 
@@ -2304,6 +2354,12 @@ pub(crate) struct ModuleMatch {
     pub block_branch_overlap: usize,
     pub pq_gram_overlap: usize,
     pub wl_overlap: usize,
+    /// Coverage of the smaller granular-hash set by the overlap. This acts as a
+    /// partial/region match signal for bundle slices that correspond to only a
+    /// subregion of a larger reference file.
+    pub granular_hash_containment: f64,
+    pub statement_window_containment: f64,
+    pub block_branch_containment: f64,
     /// Aggregate structural-bag score produced by the shared package matcher
     /// scorer. This reuses package matcher matching mechanics for first-party
     /// source matching instead of maintaining a separate, weaker source-only
@@ -2415,6 +2471,15 @@ fn granular_match_overlap(matched: &ModuleMatch) -> usize {
         + matched.block_branch_overlap
         + matched.pq_gram_overlap
         + matched.wl_overlap
+}
+
+fn containment_ratio(overlap: usize, left_size: usize, right_size: usize) -> f64 {
+    let denominator = left_size.min(right_size);
+    if denominator == 0 {
+        0.0
+    } else {
+        overlap as f64 / denominator as f64
+    }
 }
 
 /// Sum of IDF weights over the anchors shared by `subject` and `reference`.
@@ -2616,6 +2681,9 @@ fn guarded_ambiguous_promotion(top: &ModuleMatch, runner_up: &ModuleMatch) -> bo
     if has_clear_granular_delta(top, runner_up) {
         return true;
     }
+    if has_clear_region_containment_delta(top, runner_up) {
+        return true;
+    }
     has_clear_graph_delta(top, runner_up)
 }
 
@@ -2664,6 +2732,31 @@ fn has_ambiguous_promotion_content(matched: &ModuleMatch) -> bool {
             && matched.source_score.function_axis_containment >= 0.25)
 }
 
+fn has_high_unique_anchor_mass(matched: &ModuleMatch) -> bool {
+    has_high_unique_anchor_mass_values(
+        matched.source_score.unique_string_anchor_overlap,
+        matched.weighted_anchor,
+        matched.normalized_anchor,
+        matched.margin,
+    )
+}
+
+fn has_high_unique_anchor_mass_values(
+    unique_string_anchor_overlap: usize,
+    weighted_anchor: f64,
+    normalized_anchor: f64,
+    margin: f64,
+) -> bool {
+    (unique_string_anchor_overlap >= 5
+        && weighted_anchor >= 50.0
+        && normalized_anchor >= 0.18
+        && margin >= MEDIUM_SCORE_MARGIN)
+        || (unique_string_anchor_overlap >= 5
+            && weighted_anchor >= 80.0
+            && normalized_anchor >= 0.12
+            && margin >= MEDIUM_SCORE_MARGIN)
+}
+
 fn has_clear_anchor_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
     top.normalized_anchor >= runner_up.normalized_anchor + AMBIGUOUS_PROMOTION_NANCHOR_DELTA
         && top.weighted_anchor >= runner_up.weighted_anchor + AMBIGUOUS_PROMOTION_WEIGHTED_DELTA
@@ -2702,6 +2795,19 @@ fn has_clear_granular_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool 
         && (top.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
             || top.source_score.unique_string_anchor_overlap >= 1
             || top.source_score.function_axis_containment >= 0.25)
+}
+
+fn has_clear_region_containment_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
+    top.granular_hash_containment >= 0.65
+        && top.statement_window_containment >= 0.30
+        && top.block_branch_containment >= 0.30
+        && top.granular_hash_containment >= runner_up.granular_hash_containment + 0.20
+        && (top.statement_window_containment >= runner_up.statement_window_containment + 0.15
+            || top.block_branch_containment >= runner_up.block_branch_containment + 0.15)
+        && (top.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
+            || top.weighted_anchor >= AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR
+            || top.source_score.unique_string_anchor_overlap >= 1
+            || top.graph_support >= 1)
 }
 
 fn has_clear_graph_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
@@ -2786,6 +2892,36 @@ fn ranked_module_matches(
             &module.fingerprint.pq_gram_hashes,
         );
         let wl_overlap = overlap_len(&fingerprint.wl_hashes, &module.fingerprint.wl_hashes);
+        let granular_hash_containment = containment_ratio(
+            import_export_surface_overlap
+                + class_member_overlap
+                + statement_window_overlap
+                + block_branch_overlap
+                + pq_gram_overlap
+                + wl_overlap,
+            fingerprint.import_export_surface_hashes.len()
+                + fingerprint.class_member_hashes.len()
+                + fingerprint.statement_window_hashes.len()
+                + fingerprint.block_branch_hashes.len()
+                + fingerprint.pq_gram_hashes.len()
+                + fingerprint.wl_hashes.len(),
+            module.fingerprint.import_export_surface_hashes.len()
+                + module.fingerprint.class_member_hashes.len()
+                + module.fingerprint.statement_window_hashes.len()
+                + module.fingerprint.block_branch_hashes.len()
+                + module.fingerprint.pq_gram_hashes.len()
+                + module.fingerprint.wl_hashes.len(),
+        );
+        let statement_window_containment = containment_ratio(
+            statement_window_overlap,
+            fingerprint.statement_window_hashes.len(),
+            module.fingerprint.statement_window_hashes.len(),
+        );
+        let block_branch_containment = containment_ratio(
+            block_branch_overlap,
+            fingerprint.block_branch_hashes.len(),
+            module.fingerprint.block_branch_hashes.len(),
+        );
         let anchor_overlap = overlap_len(
             &fingerprint.string_anchors,
             &module.fingerprint.string_anchors,
@@ -2865,6 +3001,9 @@ fn ranked_module_matches(
                 block_branch_overlap,
                 pq_gram_overlap,
                 wl_overlap,
+                granular_hash_containment,
+                statement_window_containment,
+                block_branch_containment,
                 structural_score,
                 graph_support: graph.matched_edges,
                 graph_known_edges: graph.known_edges,
@@ -3887,6 +4026,9 @@ fn apply_module_promotions(
                 block_branch_overlap: 0,
                 pq_gram_overlap: 0,
                 wl_overlap: 0,
+                granular_hash_containment: 0.0,
+                statement_window_containment: 0.0,
+                block_branch_containment: 0.0,
                 structural_score: 0.0,
                 graph_support: 0,
                 graph_known_edges: 0,
@@ -4580,6 +4722,9 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             block_branch_overlap: 0,
             pq_gram_overlap: 0,
             wl_overlap: 0,
+            granular_hash_containment: 0.0,
+            statement_window_containment: 0.0,
+            block_branch_containment: 0.0,
             structural_score: 0.0,
             graph_support: 0,
             graph_known_edges: 0,
@@ -4726,6 +4871,50 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
     }
 
     #[test]
+    fn high_unique_anchor_mass_is_only_split_module_support() {
+        let mut matched = make_plan(20, "features/high-unique", MatchTier::Medium).matched;
+        matched.source_score.unique_string_anchor_overlap = 5;
+        matched.weighted_anchor = 80.0;
+        matched.normalized_anchor = 0.12;
+        matched.margin = MEDIUM_SCORE_MARGIN;
+        assert!(
+            has_high_unique_anchor_mass(&matched),
+            "high unique-anchor mass can support split-module uniqueness retention"
+        );
+
+        matched.source_score.unique_string_anchor_overlap = 4;
+        assert!(
+            !has_high_unique_anchor_mass(&matched),
+            "raw anchor mass without enough unique anchors is not split-module support"
+        );
+    }
+
+    #[test]
+    fn split_module_anchor_sets_allow_small_overlap() {
+        let left = BTreeSet::from([
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ]);
+        let mostly_distinct = BTreeSet::from([
+            "a".to_string(),
+            "x".to_string(),
+            "y".to_string(),
+            "z".to_string(),
+        ]);
+        let overlapping = BTreeSet::from([
+            "a".to_string(),
+            "b".to_string(),
+            "x".to_string(),
+            "y".to_string(),
+        ]);
+
+        assert!(anchor_sets_cover_distinct_parts(&left, &mostly_distinct));
+        assert!(!anchor_sets_cover_distinct_parts(&left, &overlapping));
+    }
+
+    #[test]
     fn ambiguous_promotion_requires_content_and_runner_up_axis_delta() {
         let mut top = make_plan(10, "features/top", MatchTier::Low).matched;
         top.margin = AMBIGUOUS_PROMOTION_MIN_MARGIN;
@@ -4765,6 +4954,36 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         assert!(
             !guarded_ambiguous_promotion(&top, &no_delta),
             "ambiguous rows stay Low when the runner-up has equivalent evidence"
+        );
+    }
+
+    #[test]
+    fn region_containment_promotes_only_with_runner_up_delta_and_content() {
+        let mut top = make_plan(13, "features/region", MatchTier::Low).matched;
+        top.margin = AMBIGUOUS_PROMOTION_MIN_MARGIN;
+        top.normalized_anchor = AMBIGUOUS_PROMOTION_MIN_NANCHOR;
+        top.granular_hash_containment = 0.80;
+        top.statement_window_containment = 0.50;
+        top.block_branch_containment = 0.45;
+
+        let mut runner_up = make_plan(14, "features/runner", MatchTier::Low).matched;
+        runner_up.granular_hash_containment = 0.45;
+        runner_up.statement_window_containment = 0.20;
+        runner_up.block_branch_containment = 0.20;
+
+        assert!(
+            guarded_ambiguous_promotion(&top, &runner_up),
+            "partial reference-region coverage should promote when it clearly beats the runner-up"
+        );
+
+        let mut no_content = top.clone();
+        no_content.normalized_anchor = 0.0;
+        no_content.weighted_anchor = 0.0;
+        no_content.source_score = SourceEvidenceScore::default();
+        no_content.graph_support = 0;
+        assert!(
+            !guarded_ambiguous_promotion(&no_content, &runner_up),
+            "region containment still needs content/source/graph corroboration"
         );
     }
 
