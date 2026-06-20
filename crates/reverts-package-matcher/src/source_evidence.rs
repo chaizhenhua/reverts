@@ -29,6 +29,7 @@ pub struct SourceEvidenceProfile {
     pub fingerprint: SourceFingerprint,
     pub function_axis_anchors: BTreeSet<String>,
     pub jsx_react_shape_anchors: BTreeSet<String>,
+    pub anchor_cooccurrence_anchors: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -42,6 +43,8 @@ pub struct SourceEvidenceScore {
     pub unique_string_anchor_overlap: usize,
     pub jsx_react_shape_overlap: usize,
     pub jsx_react_shape_jaccard: f64,
+    pub anchor_cooccurrence_overlap: usize,
+    pub anchor_cooccurrence_jaccard: f64,
 }
 
 impl SourceEvidenceScore {
@@ -55,6 +58,8 @@ impl SourceEvidenceScore {
             + (self.unique_string_anchor_overlap as f64) * 18.0
             + self.jsx_react_shape_jaccard * 80.0
             + (self.jsx_react_shape_overlap as f64) * 8.0
+            + self.anchor_cooccurrence_jaccard * 70.0
+            + (self.anchor_cooccurrence_overlap as f64) * 4.0
     }
 
     #[must_use]
@@ -64,6 +69,7 @@ impl SourceEvidenceScore {
             || self.weighted_string_anchor >= 1.0
             || self.unique_string_anchor_overlap > 0
             || self.jsx_react_shape_overlap > 0
+            || self.anchor_cooccurrence_overlap > 0
     }
 }
 
@@ -94,11 +100,13 @@ pub fn build_source_evidence_profile_with_fingerprint(
     let functions = FunctionExtractor::fingerprint_primary(ModuleId(0), source);
     let function_axis_anchors = function_axis_anchors(&functions);
     let jsx_react_shape_anchors = jsx_react_shape_anchors(path, source);
+    let anchor_cooccurrence_anchors = anchor_cooccurrence_anchors(&fingerprint.string_anchors);
     SourceEvidenceProfile {
         path: path.to_string(),
         fingerprint,
         function_axis_anchors,
         jsx_react_shape_anchors,
+        anchor_cooccurrence_anchors,
     }
 }
 
@@ -178,6 +186,14 @@ pub fn score_source_evidence(
         &subject.jsx_react_shape_anchors,
         &reference.jsx_react_shape_anchors,
     );
+    let anchor_cooccurrence_overlap = subject
+        .anchor_cooccurrence_anchors
+        .intersection(&reference.anchor_cooccurrence_anchors)
+        .count();
+    let anchor_cooccurrence_jaccard = set_jaccard(
+        &subject.anchor_cooccurrence_anchors,
+        &reference.anchor_cooccurrence_anchors,
+    );
     SourceEvidenceScore {
         hash_match,
         function_axis_overlap,
@@ -188,7 +204,40 @@ pub fn score_source_evidence(
         unique_string_anchor_overlap,
         jsx_react_shape_overlap,
         jsx_react_shape_jaccard,
+        anchor_cooccurrence_overlap,
+        anchor_cooccurrence_jaccard,
     }
+}
+
+#[must_use]
+pub fn anchor_cooccurrence_anchors(string_anchors: &BTreeSet<String>) -> BTreeSet<String> {
+    let selected = string_anchors
+        .iter()
+        .filter(|anchor| cooccurrence_anchor_is_specific(anchor))
+        .take(48)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut cooccurrences = BTreeSet::new();
+    let mut emitted = 0usize;
+    for (left_index, left) in selected.iter().enumerate() {
+        for right in selected.iter().skip(left_index + 1) {
+            cooccurrences.insert(format!("anchor-pair:{left}|{right}"));
+            emitted += 1;
+            if emitted >= 256 {
+                return cooccurrences;
+            }
+        }
+    }
+    cooccurrences
+}
+
+fn cooccurrence_anchor_is_specific(anchor: &str) -> bool {
+    let normalized = normalize_hint_text(anchor);
+    normalized.len() >= 4
+        && !matches!(
+            normalized.as_str(),
+            "function" | "string" | "number" | "object" | "boolean" | "default" | "return"
+        )
 }
 
 #[must_use]
@@ -278,6 +327,7 @@ pub fn jsx_react_shape_anchors(path: &str, source: &str) -> BTreeSet<String> {
         }
         let mut visitor = JsxReactShapeVisitor::default();
         visitor.visit_program(&parsed.program);
+        visitor.finish();
         return visitor.anchors;
     }
     BTreeSet::new()
@@ -286,6 +336,9 @@ pub fn jsx_react_shape_anchors(path: &str, source: &str) -> BTreeSet<String> {
 #[derive(Default)]
 struct JsxReactShapeVisitor {
     anchors: BTreeSet<String>,
+    tag_sequence: Vec<String>,
+    attr_sequence: Vec<String>,
+    hook_sequence: Vec<String>,
 }
 
 impl<'a> Visit<'a> for JsxReactShapeVisitor {
@@ -322,7 +375,7 @@ impl<'a> Visit<'a> for JsxReactShapeVisitor {
                     self.anchors.insert(format!("jsx-create:{tag}"));
                 }
             } else if is_react_hook_name(&callee) {
-                self.anchors.insert(format!("react-hook:{callee}"));
+                self.record_hook(&callee);
             }
         }
         walk_call_expression(self, call);
@@ -334,6 +387,7 @@ impl JsxReactShapeVisitor {
         let normalized = normalize_hint_text(tag);
         if normalized.len() >= 2 {
             self.anchors.insert(format!("jsx-tag:{tag}"));
+            self.tag_sequence.push(tag.to_string());
         }
     }
 
@@ -341,8 +395,52 @@ impl JsxReactShapeVisitor {
         let normalized = normalize_hint_text(attr);
         if normalized.len() >= 2 {
             self.anchors.insert(format!("jsx-attr:{attr}"));
+            self.attr_sequence.push(attr.to_string());
         }
     }
+
+    fn record_hook(&mut self, hook: &str) {
+        self.anchors.insert(format!("react-hook:{hook}"));
+        self.hook_sequence.push(hook.to_string());
+    }
+
+    fn finish(&mut self) {
+        record_sequence_windows(&mut self.anchors, "jsx-tag-seq", &self.tag_sequence, 4);
+        record_sequence_windows(&mut self.anchors, "jsx-attr-seq", &self.attr_sequence, 4);
+        record_sequence_windows(&mut self.anchors, "react-hook-seq", &self.hook_sequence, 5);
+        record_multiset_signature(&mut self.anchors, "jsx-tag-bag", &self.tag_sequence);
+        record_multiset_signature(&mut self.anchors, "jsx-attr-bag", &self.attr_sequence);
+        record_multiset_signature(&mut self.anchors, "react-hook-bag", &self.hook_sequence);
+    }
+}
+
+fn record_sequence_windows(
+    anchors: &mut BTreeSet<String>,
+    prefix: &str,
+    sequence: &[String],
+    max_window: usize,
+) {
+    for window_size in 2..=max_window.min(sequence.len()) {
+        for window in sequence.windows(window_size) {
+            anchors.insert(format!("{prefix}:{}", window.join(">")));
+        }
+    }
+}
+
+fn record_multiset_signature(anchors: &mut BTreeSet<String>, prefix: &str, values: &[String]) {
+    if values.len() < 2 {
+        return;
+    }
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for value in values {
+        *counts.entry(value.as_str()).or_default() += 1;
+    }
+    let signature = counts
+        .into_iter()
+        .map(|(value, count)| format!("{value}#{count}"))
+        .collect::<Vec<_>>()
+        .join("|");
+    anchors.insert(format!("{prefix}:{signature}"));
 }
 
 fn jsx_element_name(name: &JSXElementName<'_>) -> String {
@@ -521,11 +619,14 @@ mod tests {
     fn jsx_react_shape_extracts_raw_jsx_and_runtime_calls() {
         let raw = jsx_react_shape_anchors(
             "view.tsx",
-            "export function View(){ useEffect(() => {}, []); return <Panel title=\"x\" />; }",
+            "export function View(){ useEffect(() => {}, []); useMemo(() => 1, []); return <Panel title=\"x\"><Text color=\"red\" /></Panel>; }",
         );
         assert!(raw.contains("jsx-tag:Panel"));
+        assert!(raw.contains("jsx-tag:Text"));
         assert!(raw.contains("jsx-attr:title"));
         assert!(raw.contains("react-hook:useEffect"));
+        assert!(raw.contains("react-hook-seq:useEffect>useMemo"));
+        assert!(raw.contains("jsx-tag-seq:Panel>Text"));
 
         let lowered = jsx_react_shape_anchors(
             "view.js",
@@ -533,5 +634,21 @@ mod tests {
         );
         assert!(lowered.contains("jsx-runtime:Panel"));
         assert!(lowered.contains("jsx-tag:Panel"));
+    }
+
+    #[test]
+    fn source_evidence_scores_anchor_cooccurrence() {
+        let reference = profile(
+            "shape.ts",
+            "export const config = ['alpha-token-long', 'beta-token-long', 'gamma-token-long'];",
+        );
+        let subject = profile(
+            "bundle.js",
+            "export const a = ['alpha-token-long', 'beta-token-long', 'gamma-token-long'];",
+        );
+        let idf = source_evidence_idf([&reference]);
+        let score = score_source_evidence(&subject, &reference, &idf);
+        assert!(score.anchor_cooccurrence_overlap >= 3);
+        assert!(score.anchor_cooccurrence_jaccard > 0.0);
     }
 }

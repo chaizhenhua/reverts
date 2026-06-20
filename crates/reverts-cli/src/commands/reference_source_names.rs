@@ -332,11 +332,16 @@ fn split_module_cluster_candidate(
 
 fn has_split_module_cluster_support(matched: &ModuleMatch, anchors: &BTreeSet<String>) -> bool {
     has_high_unique_anchor_mass(matched)
+        || has_high_cooccurrence_source_mass(matched)
         || guarded_graph_placement_promotion(matched)
         || (matched.weighted_anchor >= AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR
             && matched.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR)
         || (matched.source_score.unique_string_anchor_overlap >= 1
             && (matched.weighted_anchor >= 4.0 || !anchors.is_empty()))
+        || (matched.source_score.anchor_cooccurrence_overlap >= 3
+            && matched.source_score.anchor_cooccurrence_jaccard >= 0.15)
+        || (matched.source_score.jsx_react_shape_overlap >= 3
+            && matched.source_score.jsx_react_shape_jaccard >= 0.15)
         || has_split_module_structural_region(matched)
 }
 
@@ -401,6 +406,7 @@ fn calibrate_global_reference_uniqueness(
             let independently_strong = matched.reciprocal_best
                 || matched.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR
                 || has_high_unique_anchor_mass(matched)
+                || has_high_cooccurrence_source_mass(matched)
                 || has_split_module_cluster_support(matched, anchors)
                 || guarded_graph_placement_promotion(matched);
             let covers_distinct_part = !anchors.is_empty()
@@ -1309,6 +1315,7 @@ fn is_promising_ambiguous_diagnostic(plan: &ModulePlan) -> bool {
         && plan.matched.margin >= 0.10)
         || score.unique_string_anchor_overlap >= 2
         || score.jsx_react_shape_jaccard >= 0.20
+        || score.anchor_cooccurrence_jaccard >= 0.12
 }
 
 fn diagnostic_path_family(path: &str) -> String {
@@ -1463,6 +1470,14 @@ fn candidate_delta_json(top: &ModuleMatch, runner_up: &ModuleMatch) -> serde_jso
             - runner_up.source_score.unique_string_anchor_overlap as isize,
         "function_axis_overlap": top.source_score.function_axis_overlap as isize
             - runner_up.source_score.function_axis_overlap as isize,
+        "function_axis_jaccard": top.source_score.function_axis_jaccard
+            - runner_up.source_score.function_axis_jaccard,
+        "jsx_react_shape_overlap": top.source_score.jsx_react_shape_overlap as isize
+            - runner_up.source_score.jsx_react_shape_overlap as isize,
+        "anchor_cooccurrence_overlap": top.source_score.anchor_cooccurrence_overlap as isize
+            - runner_up.source_score.anchor_cooccurrence_overlap as isize,
+        "anchor_cooccurrence_jaccard": top.source_score.anchor_cooccurrence_jaccard
+            - runner_up.source_score.anchor_cooccurrence_jaccard,
     })
 }
 
@@ -1517,6 +1532,8 @@ fn source_score_json(score: SourceEvidenceScore) -> serde_json::Value {
         "unique_string_anchor_overlap": score.unique_string_anchor_overlap,
         "jsx_react_shape_overlap": score.jsx_react_shape_overlap,
         "jsx_react_shape_jaccard": score.jsx_react_shape_jaccard,
+        "anchor_cooccurrence_overlap": score.anchor_cooccurrence_overlap,
+        "anchor_cooccurrence_jaccard": score.anchor_cooccurrence_jaccard,
     })
 }
 
@@ -2456,6 +2473,7 @@ const AMBIGUOUS_PROMOTION_GRANULAR_DELTA: usize = 8;
 const AMBIGUOUS_PROMOTION_WINDOW_DELTA: usize = 2;
 const AMBIGUOUS_PROMOTION_STRUCTURAL_SCORE: f64 = 0.10;
 const AMBIGUOUS_PROMOTION_STRUCTURAL_DELTA: f64 = 0.06;
+const AMBIGUOUS_PROMOTION_FUNCTION_AXIS_DELTA: usize = 8;
 const SPLIT_CLUSTER_MIN_MARGIN: f64 = 0.03;
 const SPLIT_CLUSTER_STRUCTURAL_SCORE: f64 = 0.10;
 
@@ -2737,6 +2755,8 @@ fn candidate_relevance(evidence: MatchEvidence) -> f64 {
         + evidence.source_score.function_axis_containment * 60.0
         + evidence.source_score.jsx_react_shape_jaccard * 80.0
         + (evidence.source_score.jsx_react_shape_overlap as f64) * 8.0
+        + evidence.source_score.anchor_cooccurrence_jaccard * 70.0
+        + (evidence.source_score.anchor_cooccurrence_overlap as f64) * 4.0
         + structural_relevance_score(evidence)
         + (evidence.graph.matched_edges as f64) * 35.0
         + evidence.graph.coverage() * 75.0
@@ -2787,6 +2807,12 @@ fn raw_match_tier(evidence: MatchEvidence) -> MatchTier {
             && (evidence.normalized_anchor >= 0.08
                 || evidence.source_score.unique_string_anchor_overlap >= 1
                 || evidence.source_score.function_axis_containment >= 0.35))
+        || (evidence.source_score.anchor_cooccurrence_jaccard >= 0.18
+            && evidence.source_score.anchor_cooccurrence_overlap >= 3
+            && (evidence.normalized_anchor >= 0.03
+                || evidence.source_score.unique_string_anchor_overlap >= 1
+                || evidence.source_score.function_axis_containment >= 0.25
+                || evidence.source_score.jsx_react_shape_jaccard >= 0.15))
         || (evidence.top_level_declaration_overlap >= 2
             && (evidence.normalized_anchor >= 0.03
                 || evidence.source_score.unique_string_anchor_overlap >= 1
@@ -2902,6 +2928,9 @@ fn guarded_ambiguous_promotion(top: &ModuleMatch, runner_up: &ModuleMatch) -> bo
     if has_clear_structural_delta(top, runner_up) {
         return true;
     }
+    if has_clear_function_axis_delta(top, runner_up) {
+        return true;
+    }
     has_clear_graph_delta(top, runner_up)
 }
 
@@ -2946,6 +2975,10 @@ fn has_ambiguous_promotion_content(matched: &ModuleMatch) -> bool {
     matched.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
         || matched.weighted_anchor >= AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR
         || matched.source_score.unique_string_anchor_overlap >= 1
+        || (matched.source_score.anchor_cooccurrence_overlap >= 3
+            && matched.source_score.anchor_cooccurrence_jaccard >= 0.12)
+        || (matched.source_score.jsx_react_shape_overlap >= 3
+            && matched.source_score.jsx_react_shape_jaccard >= 0.12)
         || (matched.source_score.function_axis_overlap >= 4
             && matched.source_score.function_axis_containment >= 0.25)
 }
@@ -2975,6 +3008,15 @@ fn has_high_unique_anchor_mass_values(
             && margin >= MEDIUM_SCORE_MARGIN)
 }
 
+fn has_high_cooccurrence_source_mass(matched: &ModuleMatch) -> bool {
+    matched.source_score.anchor_cooccurrence_overlap >= 8
+        && matched.source_score.anchor_cooccurrence_jaccard >= 0.03
+        && matched.margin >= MEDIUM_SCORE_MARGIN
+        && (matched.normalized_anchor >= 0.12
+            || matched.weighted_anchor >= MEDIUM_RECIPROCAL_WEIGHTED_ANCHOR
+            || matched.source_score.unique_string_anchor_overlap >= 1)
+}
+
 fn has_clear_anchor_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
     top.normalized_anchor >= runner_up.normalized_anchor + AMBIGUOUS_PROMOTION_NANCHOR_DELTA
         && top.weighted_anchor >= runner_up.weighted_anchor + AMBIGUOUS_PROMOTION_WEIGHTED_DELTA
@@ -2989,14 +3031,32 @@ fn has_clear_source_axis_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bo
         .source_score
         .function_axis_overlap
         .saturating_sub(runner_up.source_score.function_axis_overlap);
-    unique_delta >= 1
+    let jsx_delta = top
+        .source_score
+        .jsx_react_shape_overlap
+        .saturating_sub(runner_up.source_score.jsx_react_shape_overlap);
+    let cooccurrence_delta = top
+        .source_score
+        .anchor_cooccurrence_overlap
+        .saturating_sub(runner_up.source_score.anchor_cooccurrence_overlap);
+    (unique_delta >= 1
         && (function_delta >= 4
             || top.source_score.function_axis_jaccard
                 >= runner_up.source_score.function_axis_jaccard + 0.05
             || positive_metric_delta(top, runner_up, |matched| matched.statement_window_overlap)
                 >= AMBIGUOUS_PROMOTION_WINDOW_DELTA
             || positive_metric_delta(top, runner_up, |matched| matched.block_branch_overlap)
-                >= AMBIGUOUS_PROMOTION_WINDOW_DELTA)
+                >= AMBIGUOUS_PROMOTION_WINDOW_DELTA))
+        || (jsx_delta >= 3
+            && top.source_score.jsx_react_shape_jaccard
+                >= runner_up.source_score.jsx_react_shape_jaccard + 0.05
+            && (unique_delta >= 1 || top.source_score.function_axis_containment >= 0.20))
+        || (cooccurrence_delta >= 3
+            && top.source_score.anchor_cooccurrence_jaccard
+                >= runner_up.source_score.anchor_cooccurrence_jaccard + 0.05
+            && (unique_delta >= 1
+                || top.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
+                || top.source_score.function_axis_containment >= 0.20))
 }
 
 fn has_clear_granular_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
@@ -3044,6 +3104,23 @@ fn has_clear_structural_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> boo
             || top.graph_support >= 1)
 }
 
+fn has_clear_function_axis_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
+    let function_delta = top
+        .source_score
+        .function_axis_overlap
+        .saturating_sub(runner_up.source_score.function_axis_overlap);
+    function_delta >= AMBIGUOUS_PROMOTION_FUNCTION_AXIS_DELTA
+        && top.source_score.function_axis_containment >= 0.30
+        && top.source_score.function_axis_jaccard
+            >= runner_up.source_score.function_axis_jaccard + 0.03
+        && (top.structural_score >= 0.08
+            || top.graph_support >= 1
+            || top.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
+            || top.weighted_anchor >= AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR
+            || top.source_score.unique_string_anchor_overlap >= 1
+            || top.source_score.anchor_cooccurrence_overlap >= 3)
+}
+
 fn has_clear_graph_delta(top: &ModuleMatch, runner_up: &ModuleMatch) -> bool {
     if top.graph_known_edges == 0 {
         return false;
@@ -3068,6 +3145,8 @@ fn positive_metric_delta(
 fn has_sourced_near_strong_support(score: SourceEvidenceScore) -> bool {
     score.unique_string_anchor_overlap >= 1
         || (score.function_axis_overlap >= 4 && score.function_axis_containment >= 0.40)
+        || (score.jsx_react_shape_overlap >= 3 && score.jsx_react_shape_jaccard >= 0.15)
+        || (score.anchor_cooccurrence_overlap >= 3 && score.anchor_cooccurrence_jaccard >= 0.15)
 }
 
 fn has_sourced_reciprocal_shortfall_support(score: SourceEvidenceScore) -> bool {
@@ -3378,6 +3457,7 @@ pub(crate) fn best_module_match(
         fingerprint: subject.clone(),
         function_axis_anchors: BTreeSet::new(),
         jsx_react_shape_anchors: BTreeSet::new(),
+        anchor_cooccurrence_anchors: BTreeSet::new(),
     };
     let ranked = ranked_module_matches(&profile, index, None, None);
     let mut best = ranked.first()?.matched.clone();
@@ -4752,6 +4832,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             fingerprint,
             function_axis_anchors: BTreeSet::new(),
             jsx_react_shape_anchors: BTreeSet::new(),
+            anchor_cooccurrence_anchors: BTreeSet::new(),
         }
     }
 
@@ -5022,6 +5103,68 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         assert!(
             !guarded_ambiguous_promotion(&no_content, &runner_up),
             "structural shape alone is too generic to promote"
+        );
+    }
+
+    #[test]
+    fn function_axis_delta_requires_independent_corroboration() {
+        let mut top = make_plan(32, "features/function-top", MatchTier::Low).matched;
+        top.margin = AMBIGUOUS_PROMOTION_MIN_MARGIN;
+        top.source_score.function_axis_overlap = 20;
+        top.source_score.function_axis_containment = 0.35;
+        top.source_score.function_axis_jaccard = 0.12;
+        top.structural_score = 0.09;
+
+        let mut runner_up = make_plan(33, "features/function-runner", MatchTier::Low).matched;
+        runner_up.source_score.function_axis_overlap =
+            top.source_score.function_axis_overlap - AMBIGUOUS_PROMOTION_FUNCTION_AXIS_DELTA;
+        runner_up.source_score.function_axis_jaccard = 0.08;
+
+        assert!(
+            guarded_ambiguous_promotion(&top, &runner_up),
+            "clear function-axis separation should promote only when another axis corroborates"
+        );
+
+        let mut no_corroboration = top.clone();
+        no_corroboration.structural_score = 0.0;
+        no_corroboration.normalized_anchor = 0.0;
+        no_corroboration.weighted_anchor = 0.0;
+        no_corroboration.source_score.unique_string_anchor_overlap = 0;
+        no_corroboration.source_score.anchor_cooccurrence_overlap = 0;
+        assert!(!guarded_ambiguous_promotion(&no_corroboration, &runner_up));
+    }
+
+    #[test]
+    fn high_cooccurrence_mass_is_split_support_not_standalone_tier() {
+        let mut matched = make_plan(34, "features/cooccur", MatchTier::Low).matched;
+        matched.source_score.anchor_cooccurrence_overlap = 8;
+        matched.source_score.anchor_cooccurrence_jaccard = 0.04;
+        matched.normalized_anchor = 0.12;
+        matched.margin = MEDIUM_SCORE_MARGIN;
+        assert!(has_high_cooccurrence_source_mass(&matched));
+
+        let evidence = MatchEvidence {
+            hash_match: false,
+            asset_overlap: 0,
+            export_overlap: 0,
+            function_overlap: 0,
+            top_level_declaration_overlap: 0,
+            import_export_surface_overlap: 0,
+            class_member_overlap: 0,
+            statement_window_overlap: 0,
+            block_branch_overlap: 0,
+            pq_gram_overlap: 0,
+            wl_overlap: 0,
+            source_score: matched.source_score,
+            structural_score: 0.0,
+            graph: GraphEvidence::default(),
+            weighted_anchor: 0.0,
+            normalized_anchor: 0.0,
+        };
+        assert_eq!(
+            raw_match_tier(evidence),
+            MatchTier::Low,
+            "co-occurrence alone is not a direct Medium-tier proof"
         );
     }
 
