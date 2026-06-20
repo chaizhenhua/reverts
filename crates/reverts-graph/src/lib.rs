@@ -8,6 +8,8 @@ pub use fingerprint::{
 
 mod function_call_graph;
 pub use function_call_graph::FunctionCallGraph;
+mod module_init_graph;
+pub use module_init_graph::{InitEdgeFilter, InitEdgeKinds, ModuleInitGraph};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
