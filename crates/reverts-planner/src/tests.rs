@@ -5452,6 +5452,73 @@ fn entrypoint_island_does_not_inline_phantom_of_module_owned_var() {
 }
 
 #[test]
+fn entrypoint_island_writes_occupied_runtime_var_through_setter_not_import_assignment() {
+    // A runtime var (`st`) is kept in the runtime helper because a helper-resident
+    // reader (`peekSt`, pulled in by a module) reads it — so the entrypoint island
+    // imports it rather than inlining it. But a snippet the island DID inline
+    // (`resetSt`, reachable from `main`) WRITES it. Assigning to an ESM import is
+    // illegal (`TypeError: Assignment to constant variable` — the real cc-2.1.89
+    // `R14` doing `zh1 = sl6, sl6 = []` that aborted every Ink frame). The island
+    // must route the write through the helper's `__reverts_set_st` setter, import
+    // that setter, and the helper must declare+export it.
+    let planner = ImportExportPlanner;
+    let prelude = "var st;\nfunction resetSt() { st = []; }\n";
+    let module_body = "function api() { return st.length; }\nexport { api };\n";
+    let tail = "function main() { resetSt(); return api(); }\nmain();\n";
+    let source = format!("{prelude}{module_body}{tail}");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "api", "modules/api.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                prelude.len() as u32,
+                (prelude.len() + module_body.len()) as u32,
+            )),
+    );
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let enriched = reverts_model::EnrichedProgram::new(
+        model,
+        reverts_model::SemanticNameMap::default(),
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
+    let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+    // The island's write is rewritten to a setter call, never a raw assignment to
+    // the imported binding.
+    assert!(
+        entrypoint_source.contains("__reverts_set_st("),
+        "island must route its write to the imported runtime var through a setter:\n{entrypoint_source}",
+    );
+    assert!(
+        !entrypoint_source.contains("st = []"),
+        "island must not assign to an imported binding directly:\n{entrypoint_source}",
+    );
+    // The setter is imported into the island...
+    assert!(
+        entrypoint_source.contains("__reverts_set_st")
+            && entrypoint_source.contains("source-1-helpers.js"),
+        "island must import the setter from the runtime helper:\n{entrypoint_source}",
+    );
+    // ...and the owner helper declares + still holds the real mutable var.
+    assert!(
+        helper_source.contains("function __reverts_set_st"),
+        "runtime helper must declare the setter:\n{helper_source}",
+    );
+    assert!(
+        helper_source.contains("var st"),
+        "runtime helper must still own the mutable var:\n{helper_source}",
+    );
+}
+
+#[test]
 fn entrypoint_runtime_preserves_side_effect_order_before_later_runtime_declarations() {
     let planner = ImportExportPlanner;
     let prelude = concat!(

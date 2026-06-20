@@ -21,11 +21,16 @@ use crate::relative_paths::relative_import_specifier;
 use crate::runtime_helper_source_closure::{
     close_runtime_helper_source_excluding, runtime_helper_source,
 };
+use crate::runtime_helper_writes::rewrite_runtime_helper_writes;
 use crate::runtime_source_scan::{
     call_identifiers_in_source, runtime_import_identifiers_in_source,
 };
 use crate::runtime_var_migration::RuntimeVarMigrationPlan;
-use crate::statements::{named_export_statement, named_import_statement, runtime_helpers_path};
+use crate::statements::{
+    named_export_statement, named_import_statement, runtime_helper_setter_name,
+    runtime_helpers_path,
+};
+use crate::top_level_definitions::implicit_global_writes_in_source;
 use crate::{
     EmitPlan, PlannedBinding, PlannedFile, emit_direct_owner_imports, emit_direct_prelude_imports,
     erase_rewritable_package_init_shim_calls, module_output_path, partition_runtime_owner_bindings,
@@ -256,6 +261,58 @@ pub(crate) fn entrypoint_island_plan(
     })
 }
 
+/// Imported runtime-helper bindings that the inlined island source ASSIGNS to.
+/// The island excludes these from inlining (they stay in the helper file and are
+/// imported), but a snippet it DID inline — e.g. the per-frame render-state reset
+/// `R14` doing `zh1 = sl6, sl6 = []` — writes them. Assigning to an ESM import is
+/// illegal (`TypeError: Assignment to constant variable`), so the write must go
+/// through the helper's `__reverts_set_X` setter, exactly like normal modules do
+/// via `record_lowered_runtime_helper_usage`. The island bypasses that path, so
+/// we recover the written set here from the island source's implicit writes.
+fn island_written_runtime_setter_bindings(island: &EntrypointIslandPlan) -> BTreeSet<BindingName> {
+    implicit_global_writes_in_source(island.source.as_str())
+        .into_iter()
+        .filter(|binding| island.runtime_bindings.contains(binding))
+        .collect()
+}
+
+/// Register the island's writes to imported runtime bindings as setter targets on
+/// their owner runtime-helper file. MUST run before the helper file is emitted,
+/// otherwise the helper never declares/exports `__reverts_set_X` for the state the
+/// island mutates and the island's setter calls dangle. Mirrors the branch logic
+/// of `emit_cli_entrypoint`: only the island path needs this (the direct-owner
+/// path imports the entrypoint from a real module and inlines nothing).
+pub(crate) fn register_entrypoint_island_setters(
+    program: &EnrichedProgram,
+    runtime_var_migrations: &RuntimeVarMigrationPlan,
+    binding_owners: &BindingOwnerPlan,
+    occupied_runtime_bindings: &BTreeSet<BindingName>,
+    externalized_packages: &BTreeSet<ModuleId>,
+    plan: &EmitPlan,
+    used_runtime_helper_setters: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+) {
+    if entrypoint_direct_owner_path(program, runtime_var_migrations).is_some() {
+        return;
+    }
+    let Some(island) = entrypoint_island_plan(
+        program,
+        binding_owners,
+        occupied_runtime_bindings,
+        externalized_packages,
+        Some(plan),
+    ) else {
+        return;
+    };
+    let written = island_written_runtime_setter_bindings(&island);
+    if written.is_empty() {
+        return;
+    }
+    used_runtime_helper_setters
+        .entry(island.source_file_id)
+        .or_default()
+        .extend(written);
+}
+
 pub(crate) fn emit_entrypoint_island(
     program: &EnrichedProgram,
     binding_owners: &BindingOwnerPlan,
@@ -308,16 +365,29 @@ pub(crate) fn emit_planned_entrypoint_island(
         &mut planned_bindings,
         &island.direct_prelude_imports,
     );
-    if !island.runtime_bindings.is_empty() {
+    // An imported runtime binding the island also WRITES (e.g. `R14` doing
+    // `zh1 = sl6`) cannot be assigned directly — ESM imports are read-only. Route
+    // those writes through the helper's `__reverts_set_X` setter and import the
+    // setter alongside the (still-read) raw binding. The setter is declared and
+    // exported by the owner helper because `register_entrypoint_island_setters`
+    // recorded the same write set before the helper file was emitted.
+    let written_runtime_bindings = island_written_runtime_setter_bindings(&island);
+    let mut runtime_imports = island.runtime_bindings.clone();
+    runtime_imports.extend(
+        written_runtime_bindings
+            .iter()
+            .map(|binding| BindingName::new(runtime_helper_setter_name(binding))),
+    );
+    if !runtime_imports.is_empty() {
         let specifier = relative_import_specifier(
             ENTRYPOINT_ISLAND_PATH,
             runtime_helpers_path(island.source_file_id).as_str(),
         );
         file.push_source(named_import_statement(
-            island.runtime_bindings.iter(),
+            runtime_imports.iter(),
             specifier.as_str(),
         ));
-        for binding in &island.runtime_bindings {
+        for binding in &runtime_imports {
             planned_bindings.insert(binding.clone());
             file.add_binding(PlannedBinding::new(
                 binding.clone(),
@@ -327,7 +397,12 @@ pub(crate) fn emit_planned_entrypoint_island(
             ));
         }
     }
-    file.push_source(island.source);
+    let island_source = if written_runtime_bindings.is_empty() {
+        island.source
+    } else {
+        rewrite_runtime_helper_writes(island.source.as_str(), &written_runtime_bindings)
+    };
+    file.push_source(island_source);
     file.push_source(named_export_statement([&entrypoint.callee].into_iter()));
     file.add_binding(PlannedBinding::new(
         entrypoint.callee.clone(),

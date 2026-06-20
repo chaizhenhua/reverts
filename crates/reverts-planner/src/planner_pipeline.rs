@@ -33,6 +33,7 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     EmitPackageRuntimePass.run(context, &mut state)?;
     MarkEntrypointRuntimePass.run(context, &mut state)?;
     RerouteRuntimeBarrelImportsPass.run(context, &mut state)?;
+    RegisterEntrypointIslandSettersPass.run(context, &mut state)?;
     EmitRuntimeHelpersPass.run(context, &mut state)?;
     EmitCliEntrypointPass.run(context, &mut state)?;
     PruneUnreachableFilesPass.run(context, &mut state)?;
@@ -155,6 +156,38 @@ impl PlanningPass for MarkEntrypointRuntimePass {
                     .mark_entrypoint(entrypoint.source_file_id, &entrypoint.callee);
             }
         }
+        Ok(())
+    }
+}
+
+/// Record the entrypoint island's writes to imported runtime bindings as setter
+/// targets BEFORE the runtime helper file is emitted, so the helper declares and
+/// exports `__reverts_set_X` for state the island mutates. The island itself
+/// (emitted later by `EmitCliEntrypointPass`) rewrites those writes to setter
+/// calls. Without this pass the island assigns to read-only ESM imports →
+/// `TypeError: Assignment to constant variable` at runtime (silent paint abort).
+struct RegisterEntrypointIslandSettersPass;
+
+impl PlanningPass for RegisterEntrypointIslandSettersPass {
+    fn run(
+        &self,
+        context: &PlannerContext<'_>,
+        state: &mut PlanningState,
+    ) -> Result<(), PlanError> {
+        let occupied = runtime_entrypoint(context.program())
+            .map(|(_prelude, entrypoint)| {
+                occupied_runtime_bindings_for_entrypoint(context, state, entrypoint.source_file_id)
+            })
+            .unwrap_or_default();
+        cli_entrypoint::register_entrypoint_island_setters(
+            context.program(),
+            &state.runtime.runtime_var_migrations,
+            &state.runtime.binding_owners,
+            &occupied,
+            &context.analysis().externalized_packages,
+            &state.plan,
+            &mut state.runtime_helpers.used_runtime_helper_setters,
+        );
         Ok(())
     }
 }
