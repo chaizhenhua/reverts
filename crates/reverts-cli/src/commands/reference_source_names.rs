@@ -10,8 +10,8 @@ use std::time::Instant;
 use clap::{Args, ValueEnum};
 use reverts_graph::{
     FunctionExtractor, IdentifierStreams, extract_import_specifiers, function_anchor_tokens,
-    function_callee_names, function_names, function_param_names, function_referenced_names,
-    identifier_streams,
+    function_call_edges, function_callee_names, function_names, function_param_names,
+    function_referenced_names, identifier_streams,
 };
 use reverts_input::sqlite::{load_project_rows_from_connection, load_project_rows_from_sqlite};
 use reverts_input::{InputBundle, InputRows, ModuleDependencyTarget, PackageAttributionStatus};
@@ -4327,12 +4327,16 @@ fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFun
         let mut callees = function_callee_names(module.source.as_str());
         let mut references = function_referenced_names(module.source.as_str());
         let mut param_names = function_param_names(module.source.as_str());
+        let aggregated_callees = top_level_call_tokens(module.source.as_str());
         for fingerprint in
             FunctionExtractor::fingerprint_primary(ModuleId(0), module.source.as_str())
         {
             if let Some(name) = names.get(&fingerprint.id.span) {
                 let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
-                let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
+                let mut function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
+                if let Some(extra) = aggregated_callees.get(name) {
+                    function_callees.extend(extra.iter().cloned());
+                }
                 let function_references =
                     references.remove(&fingerprint.id.span).unwrap_or_default();
                 let function_param_names =
@@ -4496,6 +4500,27 @@ fn collect_island_functions(island_source: &str) -> Vec<SubjectFunction> {
 /// [`SubjectFunction`] per function. Shared by the per-module subject collection
 /// and the entrypoint-island collection so both use identical fingerprint/anchor
 /// extraction.
+/// Top-level call edges as the matcher's `c:`-prefixed callee tokens, keyed by
+/// top-level function name. Aggregates calls made inside a top-level function's
+/// NESTED closures — which the per-span `function_callee_names` attributes to the
+/// anonymous closure and so drops from the enclosing function's signal (e.g. the
+/// `foo()`/`bar()` calls inside a React component's `useEffect(() => …)`). Unioned
+/// into each top-level function's `.callees` so call-graph propagation sees them.
+fn top_level_call_tokens(source: &str) -> BTreeMap<String, BTreeSet<String>> {
+    function_call_edges(source)
+        .into_iter()
+        .map(|(caller, callees)| {
+            (
+                caller,
+                callees
+                    .into_iter()
+                    .map(|callee| format!("c:{callee}"))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 fn push_subject_functions_from_source(
     out: &mut Vec<SubjectFunction>,
     module_id: u32,
@@ -4507,10 +4532,14 @@ fn push_subject_functions_from_source(
     let mut callees = function_callee_names(source);
     let mut references = function_referenced_names(source);
     let mut param_names = function_param_names(source);
+    let aggregated_callees = top_level_call_tokens(source);
     for fingerprint in FunctionExtractor::fingerprint_primary(ModuleId(module_id), source) {
         if let Some(name) = names.get(&fingerprint.id.span) {
             let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
-            let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
+            let mut function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
+            if let Some(extra) = aggregated_callees.get(name) {
+                function_callees.extend(extra.iter().cloned());
+            }
             let function_references = references.remove(&fingerprint.id.span).unwrap_or_default();
             let function_param_names = param_names.remove(&fingerprint.id.span).unwrap_or_default();
             out.push(SubjectFunction {
