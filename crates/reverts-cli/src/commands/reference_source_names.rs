@@ -621,8 +621,11 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     drop_real_name_remaps(&mut binding_rows);
 
     // Entrypoint-island functions: matched in ISOLATION with an empty
-    // `module_matched_file` so only the module-INDEPENDENT accept passes
-    // (0/3/4/5/6) fire — the island aggregates functions from across the app and
+    // `module_matched_file` and `island_mode=true`, so only the distinctive
+    // per-function passes (0 composite / 3 anchor-set / 4 AST×rare-anchor) accept —
+    // the graded-structure (5) and call-graph (6) passes are disabled because run
+    // globally over the island they reach the least-distinctive functions with no
+    // way to validate them. The island aggregates functions from across the app and
     // has no single owner reference file. This recovers names for the thousands of
     // root-scope first-party functions that carry no model ModuleId and so never
     // enter the per-module subject set. Kept separate from the per-module flow so
@@ -4574,19 +4577,23 @@ fn match_function_lists(
     match_function_lists_inner(subject_fns, reference_fns, module_matched_file, false)
 }
 
-/// Core matcher. `precise_anchor_only` restricts acceptance to the passes that
-/// require DISTINCTIVE-ANCHOR evidence (pass 3 anchor-set uniqueness, pass 4
-/// AST×rare-anchor joint) and disables the structural/topology passes (0 composite,
-/// 5 global within-pair, 6 call-graph). Those weaker passes are safe inside a
-/// confirmed module pair but over-fire on low-entropy functions (getters,
-/// `cleanup`, `constructor`) when run GLOBALLY with no module constraint — which is
-/// exactly the entrypoint-island case. Anchor-gated only holds the ~0-FP guarantee
-/// there. The per-module flow keeps `false` (full pass set).
+/// Core matcher. `island_mode` keeps the passes that carry a DISTINCTIVE
+/// per-function signature — pass 0 (globally-unique composite with exact param/stmt
+/// agreement), pass 3 (anchor-set uniqueness), pass 4 (AST×rare-anchor joint) — and
+/// disables the two that accept on graded structure or topology WITHOUT a
+/// distinctive per-function signature: pass 5 (global within-pair similarity) and
+/// pass 6 (call-graph propagation). Those two are safe inside a confirmed module
+/// pair (a tiny candidate set, seeded by prior accepts) but when run GLOBALLY over
+/// the entrypoint island with no module constraint they reach the least-distinctive
+/// functions — where there is no ground truth to validate them and the
+/// false-positive risk is unbounded (measured: 0/3/4 are 100% precise on the
+/// real-named ground-truth set; 5/6 touch zero of it). The per-module flow keeps
+/// `false` (full pass set, where 5/6 earn their recall under module corroboration).
 fn match_function_lists_inner(
     subject_fns: &[SubjectFunction],
     reference_fns: &[ReferenceFunction],
     module_matched_file: &BTreeMap<u32, String>,
-    precise_anchor_only: bool,
+    island_mode: bool,
 ) -> Vec<BindingNameRow> {
     let mut ref_by_file: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     let mut ref_by_any: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
@@ -4639,9 +4646,6 @@ fn match_function_lists_inner(
     // with no module match, so it names functions in unmatched modules too.
     for (subject_index, subject) in subject_fns.iter().enumerate() {
         let _ = subject_index;
-        if precise_anchor_only {
-            continue; // composite/structural pass — disabled for global island matching
-        }
         // Corroboration-free acceptance rests entirely on the composite signature
         // being one-of-a-kind in both corpora. A trivial body carries too little
         // structural entropy for that global uniqueness to imply identity:
@@ -5086,7 +5090,7 @@ fn match_function_lists_inner(
     // the same function.
     const PASS5_MIN_STATEMENTS: u32 = 3;
     for subject in subject_fns {
-        if precise_anchor_only
+        if island_mode
             || accepted.contains(&(subject.module_id, subject.name.clone()))
             || subject.fingerprint.statement_count < PASS5_MIN_STATEMENTS
         {
@@ -5168,7 +5172,7 @@ fn match_function_lists_inner(
                 .push(index);
         }
     }
-    let propagate_rounds = if precise_anchor_only {
+    let propagate_rounds = if island_mode {
         0 // call-graph topology pass — disabled for global island matching
     } else {
         PROPAGATE_MAX_ROUNDS
@@ -8216,7 +8220,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
     }
 
     #[test]
-    fn island_precise_anchor_only_accepts_distinctive_anchor_match() {
+    fn island_mode_accepts_distinctive_anchor_match() {
         // Entrypoint-island case: a function with no module match (empty
         // module_matched_file) but a distinctive 4-anchor set that overlaps exactly
         // one reference function is accepted by the anchor-set-uniqueness pass.
@@ -8239,12 +8243,10 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
     }
 
     #[test]
-    fn island_precise_anchor_only_rejects_low_entropy_structural_match() {
-        // The composite/structural passes (0/5/6) accept this unique-composite body
-        // in normal matching, but it has NO distinctive anchors. Under
-        // precise_anchor_only they are disabled, so a globally-applied island match
-        // must NOT accept it — this is the low-entropy FP class (getters, `cleanup`)
-        // the gating exists to suppress.
+    fn island_mode_keeps_unique_composite_pass() {
+        // A globally-unique composite with exact param/stmt agreement (pass 0)
+        // carries a distinctive per-function signature, so island_mode KEEPS it —
+        // this is the bulk of island recall. No module match, no anchors needed.
         let subjects = subject_fn(
             ISLAND_MODULE_ID,
             ENTRYPOINT_ISLAND_PATH,
@@ -8254,19 +8256,46 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             "util/inc.ts",
             "function increment(x) { let y = x + 1; return y; }",
         );
-        // Sanity: the full pass set DOES accept it (composite pass 0).
+        assert!(
+            match_function_lists_inner(&subjects, &references, &BTreeMap::new(), true)
+                .iter()
+                .any(|r| r.accepted && r.semantic_name == "increment"),
+            "island_mode must keep the unique-composite pass"
+        );
+    }
+
+    #[test]
+    fn island_mode_disables_global_structural_pass() {
+        // Two subject functions share the SAME shape, so the composite is NOT
+        // globally unique (pass 0 cannot fire) and there are no anchors (passes 3/4
+        // cannot fire). The ONLY pass that can accept is pass 5 (graded within-pair
+        // similarity on the shared AST hash). The full pass set accepts via pass 5;
+        // island_mode disables it, so a global island match must NOT accept — the
+        // guarantee that island naming never rests on unvalidatable graded structure.
+        let subjects = subject_fn(
+            ISLAND_MODULE_ID,
+            ENTRYPOINT_ISLAND_PATH,
+            "function aB(x) { let y = x * 2; let z = y + 1; return z; } \
+             function cD(x) { let y = x * 2; let z = y + 1; return z; }",
+        );
+        let references = reference_fn(
+            "util/calc.ts",
+            "function compute(x) { let y = x * 2; let z = y + 1; return z; }",
+        );
+        // Full pass set accepts (pass 5 graded within-pair on the shared AST hash).
         assert!(
             match_function_lists(&subjects, &references, &BTreeMap::new())
                 .iter()
-                .any(|r| r.accepted),
-            "full pass set should accept the unique composite"
+                .any(|r| r.accepted && r.semantic_name == "compute"),
+            "full pass set should accept via the global structural pass"
         );
-        // Anchor-gated island matching must NOT.
+        // island_mode disables pass 5/6, and pass 0 cannot fire (composite shared by
+        // aB/cD, not globally unique), so nothing is accepted.
         assert!(
             !match_function_lists_inner(&subjects, &references, &BTreeMap::new(), true)
                 .iter()
                 .any(|r| r.accepted),
-            "anchor-gated island matching must reject anchorless low-entropy match"
+            "island_mode must not accept via graded structural similarity"
         );
     }
 
