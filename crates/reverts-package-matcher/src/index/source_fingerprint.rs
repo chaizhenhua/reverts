@@ -256,6 +256,7 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
     }
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        self.record_callee_anchor(&call.callee);
         if expression_identifier(&call.callee) == Some("require")
             && let Some(Argument::StringLiteral(source)) = call.arguments.first()
         {
@@ -274,6 +275,7 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
     }
 
     fn visit_static_member_expression(&mut self, expression: &StaticMemberExpression<'a>) {
+        self.record_distinctive_anchor("member", expression.property.name.as_str());
         if let Expression::CallExpression(call) = &expression.object
             && expression_identifier(&call.callee) == Some("require")
             && let Some(Argument::StringLiteral(source)) = call.arguments.first()
@@ -428,6 +430,28 @@ impl FingerprintVisitor<'_> {
         if trimmed.len() >= MIN_STRING_ANCHOR_LEN {
             self.fingerprint.string_anchors.insert(trimmed.to_string());
         }
+    }
+
+    /// Record a distinctive call/member name as a module anchor. Minified bundle
+    /// code preserves the names of imported/global callees and method calls
+    /// (`createElement`, `setTimeout`, `.serializeConfig`) even when local
+    /// helper names are mangled — so these recover modules that carry few string
+    /// literals. Corpus IDF down-weights common names; the length+noise filter
+    /// just keeps the anchor set from bloating.
+    fn record_distinctive_anchor(&mut self, kind: &str, name: &str) {
+        if is_distinctive_anchor_name(name) {
+            self.fingerprint
+                .string_anchors
+                .insert(format!("{kind}:{name}"));
+        }
+    }
+
+    fn record_callee_anchor(&mut self, callee: &Expression<'_>) {
+        if let Expression::Identifier(identifier) = callee {
+            self.record_distinctive_anchor("call", identifier.name.as_str());
+        }
+        // Method-call names (`obj.method()`) are captured when their callee
+        // static-member expression is visited, recorded as a `member:` anchor.
     }
 
     fn record_regex_anchor(&mut self, pattern: &str, flags: &str) {
@@ -1510,6 +1534,58 @@ fn expression_is_prototype_member(expression: &Expression<'_>) -> bool {
 
 fn is_usable_property_shape_member(member: &str) -> bool {
     !matches!(member, "constructor" | "__proto__" | "prototype") && is_identifier_name(member)
+}
+
+/// Whether a call/member name is distinctive enough to anchor module matching.
+/// At least 5 chars (drops `map`/`get`/`push`) and not a ubiquitous JS/DOM/
+/// Promise builtin that recurs across unrelated modules.
+fn is_distinctive_anchor_name(name: &str) -> bool {
+    name.len() >= 5
+        && is_identifier_name(name)
+        && !matches!(
+            name,
+            "length"
+                | "toString"
+                | "valueOf"
+                | "forEach"
+                | "filter"
+                | "reduce"
+                | "concat"
+                | "slice"
+                | "splice"
+                | "indexOf"
+                | "lastIndexOf"
+                | "includes"
+                | "entries"
+                | "values"
+                | "prototype"
+                | "constructor"
+                | "hasOwnProperty"
+                | "charCodeAt"
+                | "charAt"
+                | "substring"
+                | "substr"
+                | "replace"
+                | "split"
+                | "resolve"
+                | "reject"
+                | "finally"
+                | "apply"
+                | "props"
+                | "state"
+                | "children"
+                | "current"
+                | "default"
+                | "target"
+                | "message"
+                | "console"
+                | "window"
+                | "global"
+                | "process"
+                | "require"
+                | "module"
+                | "exports"
+        )
 }
 
 fn is_usable_object_shape_key(key: &str) -> bool {
