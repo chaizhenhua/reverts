@@ -34,6 +34,25 @@ fn hash_statement(hash: &mut u64, stmt: &Statement<'_>) {
             update_fnv1a(hash, b")");
         }
         Statement::ExpressionStatement(e) => {
+            // Cross-build control-flow normalization: a short-circuit statement
+            // `a && b()` / `a || b()` is esbuild's minified form of `if (a) b()` /
+            // `if (!a) b()`. Canonicalize it to the same shape the `IfStatement`
+            // arm produces (a single-statement consequent), so the guarded-call
+            // idiom matches across minify/decompile.
+            if let Expression::LogicalExpression(logical) = &e.expression {
+                use oxc_syntax::operator::LogicalOperator;
+                if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) {
+                    update_fnv1a(hash, b"if(");
+                    hash_expression(hash, &logical.left);
+                    update_fnv1a(hash, b",");
+                    // Mirror `hash_statement` of `ExpressionStatement(right)`.
+                    update_fnv1a(hash, b"|stmt:expr(");
+                    hash_expression(hash, &logical.right);
+                    update_fnv1a(hash, b")");
+                    update_fnv1a(hash, b")");
+                    return;
+                }
+            }
             update_fnv1a(hash, b"expr(");
             hash_expression(hash, &e.expression);
             update_fnv1a(hash, b")");
@@ -245,6 +264,19 @@ mod tests {
         let const_decl = hash_first_function("function f() { const x = 1; return x; }");
         assert_eq!(var_decl, let_decl);
         assert_eq!(let_decl, const_decl);
+    }
+
+    #[test]
+    fn ast_hash_unifies_short_circuit_and_if_guarded_call() {
+        // `a && g(a)` is esbuild's minified form of `if (a) g(a)`.
+        let short_circuit = hash_first_function("function f(a) { a && g(a); }");
+        let if_stmt = hash_first_function("function f(a) { if (a) g(a); }");
+        assert_eq!(short_circuit, if_stmt);
+        let if_block = hash_first_function("function f(a) { if (a) { g(a); } }");
+        assert_eq!(
+            short_circuit, if_block,
+            "single-statement block unwraps too"
+        );
     }
 
     #[test]
