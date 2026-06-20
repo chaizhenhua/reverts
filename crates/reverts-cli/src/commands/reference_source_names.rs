@@ -4715,6 +4715,11 @@ fn match_function_lists(
         }
         let ri = corroborated[0];
         let reference = &reference_fns[ri];
+        // Arity must agree: a shared AST hash ignores parameter count, so a
+        // 1-param and 2-param function can collide — that is not a match.
+        if subject.fingerprint.param_count != reference.fingerprint.param_count {
+            continue;
+        }
         accepted.insert((subject.module_id, subject.name.clone()));
         used_ref.insert(ri);
         rows.push(BindingNameRow {
@@ -4728,6 +4733,81 @@ fn match_function_lists(
             param_count: subject.fingerprint.param_count,
             statement_count: subject.fingerprint.statement_count,
             score: 3.0,
+        });
+    }
+
+    // ACCEPT pass 5: global anchor-seeded WITHIN-PAIR similarity (module-INDEPENDENT).
+    //
+    // Generalizes the module-gated within-pair assignment (pass 2) to the whole
+    // corpus: gather candidate references by shared AST hash OR shared anchor,
+    // score each with `within_pair_similarity` (AST + composite + anchor Jaccard +
+    // arity), and accept the best reference iff the evidence is HARD (a real
+    // structural or content agreement, never arity alone), clears a score floor,
+    // and beats the runner-up by a decisive margin. This catches functions whose
+    // combined-axis similarity is strong but that no single earlier pass pinned.
+    const PASS5_SCORE_FLOOR: i64 = 420;
+    const PASS5_MARGIN: i64 = 200;
+    // Tiny bodies (1-2 statements) recur identically across unrelated helpers, so
+    // a bare AST-hash agreement on them is ambiguous, not identity. Require a
+    // body with enough structural entropy that a within-pair agreement implies
+    // the same function.
+    const PASS5_MIN_STATEMENTS: u32 = 3;
+    for subject in subject_fns {
+        if accepted.contains(&(subject.module_id, subject.name.clone()))
+            || subject.fingerprint.statement_count < PASS5_MIN_STATEMENTS
+        {
+            continue;
+        }
+        let mut candidates: BTreeSet<usize> = BTreeSet::new();
+        for hash in function_ast_hashes(&subject.fingerprint) {
+            if let Some(indices) = ref_by_any.get(&hash) {
+                candidates.extend(indices.iter().copied());
+            }
+        }
+        for anchor in &subject.literals {
+            if let Some(indices) = ref_by_literal.get(anchor.as_str()) {
+                candidates.extend(indices.iter().copied());
+            }
+        }
+        let mut scored: Vec<(i64, bool, usize)> = candidates
+            .into_iter()
+            .filter(|ri| !used_ref.contains(ri))
+            .map(|ri| {
+                let reference = &reference_fns[ri];
+                let (score, hard) = within_pair_similarity(
+                    &subject.fingerprint,
+                    &subject.literals,
+                    &reference.fingerprint,
+                    &reference.literals,
+                );
+                (score, hard, ri)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let Some(&(best_score, hard, ri)) = scored.first() else {
+            continue;
+        };
+        let runner_up = scored.get(1).map_or(0, |entry| entry.0);
+        if !hard || best_score < PASS5_SCORE_FLOOR || best_score - runner_up < PASS5_MARGIN {
+            continue;
+        }
+        let reference = &reference_fns[ri];
+        if subject.fingerprint.param_count != reference.fingerprint.param_count {
+            continue;
+        }
+        accepted.insert((subject.module_id, subject.name.clone()));
+        used_ref.insert(ri);
+        rows.push(BindingNameRow {
+            module_id: subject.module_id,
+            subject_path: subject.subject_path.clone(),
+            reference_file: reference.file.clone(),
+            original_name: subject.name.clone(),
+            semantic_name: reference.name.clone(),
+            accepted: true,
+            ast_hash: subject.fingerprint.primary.ast,
+            param_count: subject.fingerprint.param_count,
+            statement_count: subject.fingerprint.statement_count,
+            score: 4.0,
         });
     }
 
