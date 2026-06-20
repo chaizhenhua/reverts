@@ -4736,6 +4736,88 @@ fn match_function_lists(
         }
     }
 
+    // ACCEPT pass 2b: module-prior RELAXED bijective assignment. Prior: the two
+    // builds are the same app, so within a confirmed module pair functions
+    // correspond ~1:1. That over-constrains the optimal assignment, so a soft
+    // per-pair signal (shared normalized control flow / expression shape /
+    // partial anchor overlap) is trustworthy when it is the unique best 1:1 match
+    // in the matched module. Drop pass 2's HARD requirement, keep arity + margin.
+    const RELAXED_ASSIGN_FLOOR: i64 = 150;
+    for (module_id, subject_indices) in &subject_by_module {
+        let Some(file) = module_matched_file.get(module_id) else {
+            continue;
+        };
+        let Some(reference_indices) = ref_by_file.get(file.as_str()) else {
+            continue;
+        };
+        let s_pool: Vec<usize> = subject_indices
+            .iter()
+            .copied()
+            .filter(|&si| {
+                let s = &subject_fns[si];
+                s.fingerprint.statement_count >= MIN_WITHIN_PAIR_ASSIGN_STATEMENTS
+                    && !accepted.contains(&(s.module_id, s.name.clone()))
+            })
+            .collect();
+        let r_pool: Vec<usize> = reference_indices
+            .iter()
+            .copied()
+            .filter(|&ri| !used_ref.contains(&ri))
+            .collect();
+        if s_pool.is_empty()
+            || r_pool.is_empty()
+            || s_pool.len().min(r_pool.len()) > WITHIN_PAIR_ASSIGN_LIMIT
+        {
+            continue;
+        }
+        let (n, m) = (s_pool.len(), r_pool.len());
+        let mut sim = vec![vec![0i64; m]; n];
+        for (a, &si) in s_pool.iter().enumerate() {
+            for (b, &ri) in r_pool.iter().enumerate() {
+                sim[a][b] = within_pair_similarity(
+                    &subject_fns[si].fingerprint,
+                    &subject_fns[si].literals,
+                    &reference_fns[ri].fingerprint,
+                    &reference_fns[ri].literals,
+                )
+                .0;
+            }
+        }
+        for (a, b_opt) in hungarian_max(&sim).iter().enumerate() {
+            let Some(b) = *b_opt else { continue };
+            if sim[a][b] < RELAXED_ASSIGN_FLOOR {
+                continue;
+            }
+            let runner_up = (0..m)
+                .filter(|&b2| b2 != b)
+                .map(|b2| sim[a][b2])
+                .max()
+                .unwrap_or(0);
+            if sim[a][b] * 5 < runner_up * 6 {
+                continue; // require >=1.2x margin over the runner-up
+            }
+            let subject = &subject_fns[s_pool[a]];
+            let reference = &reference_fns[r_pool[b]];
+            if subject.fingerprint.param_count != reference.fingerprint.param_count {
+                continue;
+            }
+            accepted.insert((subject.module_id, subject.name.clone()));
+            used_ref.insert(r_pool[b]);
+            rows.push(BindingNameRow {
+                module_id: subject.module_id,
+                subject_path: subject.subject_path.clone(),
+                reference_file: reference.file.clone(),
+                original_name: subject.name.clone(),
+                semantic_name: reference.name.clone(),
+                accepted: true,
+                ast_hash: subject.fingerprint.primary.ast,
+                param_count: subject.fingerprint.param_count,
+                statement_count: subject.fingerprint.statement_count,
+                score: 1.7,
+            });
+        }
+    }
+
     // ACCEPT pass 3: distinctive ANCHOR-SET uniqueness (module-INDEPENDENT).
     //
     // The decompiler-output -> clean-source structural gap defeats the AST and
