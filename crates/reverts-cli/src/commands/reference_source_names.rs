@@ -4593,10 +4593,10 @@ fn match_function_lists(
     // (carried by <=3 reference functions, so the overlap is not just common API
     // calls) is the same function — even in a module that never matched. This is
     // what reaches the ~1865 unmatched modules.
-    const MIN_ANCHOR_ACCEPT_TOKENS: usize = 5;
-    const ANCHOR_ACCEPT_JACCARD: f64 = 0.65;
-    const ANCHOR_ACCEPT_MARGIN: f64 = 0.25;
-    const RARE_ANCHOR_MAX_REFS: usize = 3;
+    const MIN_ANCHOR_ACCEPT_TOKENS: usize = 4;
+    const ANCHOR_ACCEPT_JACCARD: f64 = 0.6;
+    const ANCHOR_ACCEPT_MARGIN: f64 = 0.2;
+    const RARE_ANCHOR_MAX_REFS: usize = 4;
     const MIN_RARE_SHARED_ANCHORS: usize = 2;
     for subject in subject_fns {
         if accepted.contains(&(subject.module_id, subject.name.clone()))
@@ -4664,6 +4664,70 @@ fn match_function_lists(
             param_count: subject.fingerprint.param_count,
             statement_count: subject.fingerprint.statement_count,
             score: best_jaccard,
+        });
+    }
+
+    // ACCEPT pass 4: AST-hash + rare-anchor JOINT corroboration (module-INDEPENDENT).
+    //
+    // A shared AST hash alone is too collision-prone to accept (esbuild helpers,
+    // generic one-line shapes), and a single rare anchor alone can be a
+    // coincidence. But a subject that shares an AST hash with a reference AND
+    // shares a RARE anchor with that SAME reference has two INDEPENDENT
+    // agreements — structural and semantic. Requiring exactly one reference to
+    // satisfy both makes the joint signal decisive, converting the strongest
+    // proposals to accepts and reaching drifted functions in unmatched modules.
+    const PASS4_RARE_MAX_REFS: usize = 4;
+    for subject in subject_fns {
+        if accepted.contains(&(subject.module_id, subject.name.clone())) {
+            continue;
+        }
+        let mut ast_candidates: BTreeSet<usize> = BTreeSet::new();
+        for hash in function_ast_hashes(&subject.fingerprint) {
+            if let Some(indices) = ref_by_any.get(&hash) {
+                for &ri in indices {
+                    ast_candidates.insert(ri);
+                }
+            }
+        }
+        let mut corroborated: Vec<usize> = Vec::new();
+        for &ri in &ast_candidates {
+            if used_ref.contains(&ri) {
+                continue;
+            }
+            let reference = &reference_fns[ri];
+            let rare_shared = subject
+                .literals
+                .intersection(&reference.literals)
+                .filter(|anchor| {
+                    ref_by_literal
+                        .get(anchor.as_str())
+                        .is_some_and(|refs| refs.len() <= PASS4_RARE_MAX_REFS)
+                })
+                .count();
+            if rare_shared >= 1 {
+                corroborated.push(ri);
+            }
+        }
+        // Unique joint match only — two functions agreeing on BOTH axes with the
+        // subject would be ambiguous, so leave those as proposals.
+        if corroborated.len() != 1 {
+            continue;
+        }
+        let ri = corroborated[0];
+        let reference = &reference_fns[ri];
+        accepted.insert((subject.module_id, subject.name.clone()));
+        used_ref.insert(ri);
+        rows.push(BindingNameRow {
+            module_id: subject.module_id,
+            subject_path: subject.subject_path.clone(),
+            reference_file: reference.file.clone(),
+            original_name: subject.name.clone(),
+            semantic_name: reference.name.clone(),
+            accepted: true,
+            ast_hash: subject.fingerprint.primary.ast,
+            param_count: subject.fingerprint.param_count,
+            statement_count: subject.fingerprint.statement_count,
+            score: 3.0,
         });
     }
 
