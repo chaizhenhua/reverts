@@ -35,9 +35,11 @@ pub mod logical_short_circuit_expanded;
 pub mod nullish_assignment_compacted;
 pub mod nullish_equality_compacted;
 pub mod parenthesized_expression_unwrapped;
+pub mod relational_operand_canonicalised;
 pub mod return_conditional_expanded;
 pub mod sequence_expression_split;
 pub mod shadow_check;
+pub mod statement_body_blocked;
 pub mod template_no_substitution_lowered;
 pub mod trailing_return_void_removed;
 pub mod ts_runtime_erased;
@@ -45,7 +47,7 @@ pub mod typeof_local_undefined_guarded;
 pub mod void_zero_to_undefined_guarded;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 34] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 36] {
     [
         // Strip syntactic-only paren wrappers FIRST so every later
         // pass sees the bare expression and the existing
@@ -77,6 +79,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 34] {
         Box::new(logical_compound_assignment_canonical::LogicalCompoundAssignmentCanonical),
         Box::new(if_return_else_flattened::IfReturnElseFlattened),
         Box::new(equality_negation_flattened::EqualityNegationFlattened),
+        Box::new(relational_operand_canonicalised::RelationalOperandCanonicalised),
         Box::new(constant_string_concat_folded::ConstantStringConcatFolded),
         Box::new(logical_not_chain_flattened::LogicalNotChainFlattened),
         Box::new(template_no_substitution_lowered::TemplateNoSubstitutionLowered),
@@ -90,6 +93,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 34] {
         Box::new(typeof_local_undefined_guarded::TypeofLocalUndefinedGuarded),
         Box::new(nullish_assignment_compacted::NullishAssignmentCompacted),
         Box::new(empty_else_block_removed::EmptyElseBlockRemoved),
+        Box::new(statement_body_blocked::StatementBodyBlocked),
     ]
 }
 
@@ -140,6 +144,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 34);
+        assert_eq!(ids.len(), 36);
     }
 }

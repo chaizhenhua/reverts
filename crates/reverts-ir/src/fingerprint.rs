@@ -117,6 +117,8 @@ pub enum NormalizationPassId {
     EmptyElseBlockRemoved,
     ParenthesizedExpressionUnwrapped,
     LogicalCompoundAssignmentCanonical,
+    RelationalOperandCanonicalised,
+    StatementBodyBlocked,
 }
 
 impl NormalizationPassId {
@@ -158,6 +160,8 @@ impl NormalizationPassId {
             Self::EmptyElseBlockRemoved => "empty_else_block_removed",
             Self::ParenthesizedExpressionUnwrapped => "parenthesized_expression_unwrapped",
             Self::LogicalCompoundAssignmentCanonical => "logical_compound_assignment_canonical",
+            Self::RelationalOperandCanonicalised => "relational_operand_canonicalised",
+            Self::StatementBodyBlocked => "statement_body_blocked",
         }
     }
 }
