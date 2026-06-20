@@ -13,7 +13,7 @@ use reverts_graph::{
     function_string_literals, identifier_streams,
 };
 use reverts_input::sqlite::{load_project_rows_from_connection, load_project_rows_from_sqlite};
-use reverts_input::{InputRows, PackageAttributionStatus};
+use reverts_input::{InputRows, ModuleDependencyTarget, PackageAttributionStatus};
 use reverts_ir::{AxisHashes, FunctionFingerprint, ModuleId};
 use reverts_js::sanitize_identifier;
 use reverts_package_matcher::{
@@ -122,6 +122,11 @@ fn plan_modules(
     } else {
         BTreeMap::new()
     };
+    let graph_structure = if use_structural_graph_support {
+        source_graph_structure(subjects, index)
+    } else {
+        GraphStructureContext::default()
+    };
     trace_reference_source_names(trace_start, "plan.source_graph_support");
     let subject_best_matches =
         best_ranked_by_subject(subjects, index, &structural_support, &graph_support);
@@ -137,6 +142,11 @@ fn plan_modules(
             continue;
         };
         let mut matched = ranked.best.matched.clone();
+        matched.graph_structure = graph_structure_evidence(
+            subject.module_id,
+            matched.file_path.as_str(),
+            &graph_structure,
+        );
         matched.reciprocal_best = reference_best_subjects
             .get(matched.file_path.as_str())
             .is_some_and(|best_subject_id| *best_subject_id == subject.module_id);
@@ -165,6 +175,14 @@ fn plan_modules(
                     .collect()
             })
             .unwrap_or_default();
+        let runner_up = ranked.runner_up.clone().map(|mut runner_up| {
+            runner_up.matched.graph_structure = graph_structure_evidence(
+                subject.module_id,
+                runner_up.matched.file_path.as_str(),
+                &graph_structure,
+            );
+            runner_up
+        });
         plans.push(ModulePlan {
             module_id: subject.module_id,
             subject_path: subject.file_path.clone(),
@@ -175,7 +193,7 @@ fn plan_modules(
                 matched: matched.clone(),
             },
             matched,
-            runner_up: ranked.runner_up.clone(),
+            runner_up,
             shared_string_anchors: anchors.clone(),
             subject_bindings: subject.bindings.clone(),
             reference_exports,
@@ -518,6 +536,7 @@ struct SubjectModule {
     source: String,
     fingerprint: SourceFingerprint,
     profile: SourceEvidenceProfile,
+    dependencies: BTreeSet<u32>,
     bindings: Vec<(String, String)>, // (original_name, emitted_name)
 }
 
@@ -580,6 +599,7 @@ fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>
             source: file.source.clone(),
             fingerprint,
             profile,
+            dependencies: BTreeSet::new(),
             bindings: bindings_for_path
                 .remove(file.path.as_str())
                 .unwrap_or_default(),
@@ -619,6 +639,7 @@ fn subject_modules_from_prepared_rows(
     package_owned_modules: &BTreeSet<u32>,
 ) -> Vec<SubjectModule> {
     let mut modules = Vec::new();
+    let dependency_map = subject_dependency_map(rows, package_owned_modules);
     for module in &rows.modules {
         if package_owned_modules.contains(&module.id.0) {
             continue;
@@ -641,10 +662,43 @@ fn subject_modules_from_prepared_rows(
             source: slice.source.to_string(),
             fingerprint,
             profile,
+            dependencies: dependency_map
+                .get(&module.id.0)
+                .cloned()
+                .unwrap_or_default(),
             bindings: Vec::new(),
         });
     }
     modules
+}
+
+fn subject_dependency_map(
+    rows: &InputRows,
+    package_owned_modules: &BTreeSet<u32>,
+) -> BTreeMap<u32, BTreeSet<u32>> {
+    rows.dependencies
+        .iter()
+        .filter_map(|dependency| {
+            let from = dependency.from_module_id.0;
+            if package_owned_modules.contains(&from) {
+                return None;
+            }
+            let ModuleDependencyTarget::Module(module_id) = dependency.target else {
+                return None;
+            };
+            let to = module_id.0;
+            if package_owned_modules.contains(&to) {
+                return None;
+            }
+            Some((from, to))
+        })
+        .fold(
+            BTreeMap::<u32, BTreeSet<u32>>::new(),
+            |mut acc, (from, to)| {
+                acc.entry(from).or_default().insert(to);
+                acc
+            },
+        )
 }
 
 fn write_match_summary_if_requested(
@@ -869,7 +923,9 @@ fn low_boundary_row_json(
             "structural_score": matched.structural_score,
             "graph_support": matched.graph_support,
             "graph_known_edges": matched.graph_known_edges,
+            "matched_neighbor_ratio": matched_neighbor_ratio(matched),
         },
+        "graph_structure": graph_structure_json(matched.graph_structure),
         "shortfalls": {
             "strong_normalized_anchor": positive_shortfall(MEDIUM_STRONG_NANCHOR, matched.normalized_anchor),
             "guarded_strong_normalized_anchor": positive_shortfall(MEDIUM_GUARDED_STRONG_NANCHOR, matched.normalized_anchor),
@@ -1165,7 +1221,9 @@ fn candidate_diagnostic_json(relevance: f64, matched: &ModuleMatch) -> serde_jso
             "structural_score": matched.structural_score,
             "graph_support": matched.graph_support,
             "graph_known_edges": matched.graph_known_edges,
+            "matched_neighbor_ratio": matched_neighbor_ratio(matched),
         },
+        "graph_structure": graph_structure_json(matched.graph_structure),
         "source_score": source_score_json(matched.source_score),
     })
 }
@@ -1222,6 +1280,37 @@ fn source_score_json(score: SourceEvidenceScore) -> serde_json::Value {
         "jsx_react_shape_overlap": score.jsx_react_shape_overlap,
         "jsx_react_shape_jaccard": score.jsx_react_shape_jaccard,
     })
+}
+
+fn graph_structure_json(evidence: GraphStructureEvidence) -> serde_json::Value {
+    serde_json::json!({
+        "subject_role_signature": graph_role_signature(
+            evidence.subject_in_degree,
+            evidence.subject_out_degree
+        ),
+        "reference_role_signature": graph_role_signature(
+            evidence.reference_in_degree,
+            evidence.reference_out_degree
+        ),
+        "role_match": evidence.role_match,
+        "subject_has_edges": evidence.subject_has_edges,
+        "reference_has_edges": evidence.reference_has_edges,
+        "subject_in_degree": evidence.subject_in_degree,
+        "subject_out_degree": evidence.subject_out_degree,
+        "reference_in_degree": evidence.reference_in_degree,
+        "reference_out_degree": evidence.reference_out_degree,
+        "subject_neighborhood_hash": format!("{:016x}", evidence.subject_neighborhood_hash),
+        "reference_neighborhood_hash": format!("{:016x}", evidence.reference_neighborhood_hash),
+        "neighborhood_hash_match": evidence.neighborhood_hash_match,
+    })
+}
+
+fn matched_neighbor_ratio(matched: &ModuleMatch) -> f64 {
+    if matched.graph_known_edges == 0 {
+        0.0
+    } else {
+        matched.graph_support as f64 / matched.graph_known_edges as f64
+    }
 }
 
 fn low_boundary_reason(matched: &ModuleMatch) -> &'static str {
@@ -1606,6 +1695,46 @@ fn source_graph_support(
     // The dependency graphs are invariant across propagation rounds, so build
     // them once. Only `graph_neighborhood_support` (which reads the evolving
     // assignment) is recomputed each round.
+    let edges = build_source_graph_edges(subjects, index);
+
+    // Iterative label propagation. Seed from content + structural only (no
+    // graph), then feed each round's graph-aware assignment back as the seed so
+    // confidently-placed modules anchor their neighbors. Stops at a fixpoint.
+    let mut assignment =
+        graph_seed_assignment(subjects, index, structural_support, &BTreeMap::new());
+    let mut support = BTreeMap::new();
+    for _ in 0..MAX_PROPAGATION_ROUNDS {
+        if assignment.is_empty() {
+            break;
+        }
+        support = graph_neighborhood_support(
+            &edges.subject_deps,
+            &edges.subject_incoming,
+            &edges.reference_deps,
+            &edges.reference_incoming,
+            &assignment,
+        );
+        let next = graph_seed_assignment(subjects, index, structural_support, &support);
+        if next == assignment {
+            break;
+        }
+        assignment = next;
+    }
+    support
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceGraphEdges {
+    subject_deps: BTreeMap<u32, BTreeSet<u32>>,
+    subject_incoming: BTreeMap<u32, BTreeSet<u32>>,
+    reference_deps: BTreeMap<String, BTreeSet<String>>,
+    reference_incoming: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn build_source_graph_edges(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+) -> SourceGraphEdges {
     let subject_paths = subjects
         .iter()
         .map(|subject| subject.file_path.as_str())
@@ -1623,17 +1752,21 @@ fn source_graph_support(
     let subject_deps = subjects
         .iter()
         .map(|subject| {
-            let deps = extract_import_specifiers(subject.source.as_str())
-                .into_iter()
-                .filter_map(|specifier| {
-                    resolve_relative_source_path(
-                        subject.file_path.as_str(),
-                        specifier.as_str(),
-                        &subject_paths,
-                    )
-                })
-                .filter_map(|path| subject_id_by_path.get(path.as_str()).copied())
-                .collect::<BTreeSet<_>>();
+            let deps = if subject.dependencies.is_empty() {
+                extract_import_specifiers(subject.source.as_str())
+                    .into_iter()
+                    .filter_map(|specifier| {
+                        resolve_relative_source_path(
+                            subject.file_path.as_str(),
+                            specifier.as_str(),
+                            &subject_paths,
+                        )
+                    })
+                    .filter_map(|path| subject_id_by_path.get(path.as_str()).copied())
+                    .collect::<BTreeSet<_>>()
+            } else {
+                subject.dependencies.clone()
+            };
             (subject.module_id, deps)
         })
         .collect::<BTreeMap<_, _>>();
@@ -1656,31 +1789,155 @@ fn source_graph_support(
         .collect::<BTreeMap<_, _>>();
     let subject_incoming = reverse_id_graph(&subject_deps);
     let reference_incoming = reverse_path_graph(&reference_deps);
-
-    // Iterative label propagation. Seed from content + structural only (no
-    // graph), then feed each round's graph-aware assignment back as the seed so
-    // confidently-placed modules anchor their neighbors. Stops at a fixpoint.
-    let mut assignment =
-        graph_seed_assignment(subjects, index, structural_support, &BTreeMap::new());
-    let mut support = BTreeMap::new();
-    for _ in 0..MAX_PROPAGATION_ROUNDS {
-        if assignment.is_empty() {
-            break;
-        }
-        support = graph_neighborhood_support(
-            &subject_deps,
-            &subject_incoming,
-            &reference_deps,
-            &reference_incoming,
-            &assignment,
-        );
-        let next = graph_seed_assignment(subjects, index, structural_support, &support);
-        if next == assignment {
-            break;
-        }
-        assignment = next;
+    SourceGraphEdges {
+        subject_deps,
+        subject_incoming,
+        reference_deps,
+        reference_incoming,
     }
-    support
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GraphStructureProfile {
+    in_degree: usize,
+    out_degree: usize,
+    neighborhood_hash: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GraphStructureContext {
+    subjects: BTreeMap<u32, GraphStructureProfile>,
+    references: BTreeMap<String, GraphStructureProfile>,
+}
+
+fn source_graph_structure(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+) -> GraphStructureContext {
+    let edges = build_source_graph_edges(subjects, index);
+    GraphStructureContext {
+        subjects: graph_structure_profiles(&edges.subject_deps, &edges.subject_incoming),
+        references: graph_structure_profiles(&edges.reference_deps, &edges.reference_incoming),
+    }
+}
+
+fn graph_structure_profiles<T>(
+    outgoing: &BTreeMap<T, BTreeSet<T>>,
+    incoming: &BTreeMap<T, BTreeSet<T>>,
+) -> BTreeMap<T, GraphStructureProfile>
+where
+    T: Ord + Clone,
+{
+    let mut nodes = BTreeSet::<T>::new();
+    nodes.extend(outgoing.keys().cloned());
+    nodes.extend(incoming.keys().cloned());
+    for targets in outgoing.values() {
+        nodes.extend(targets.iter().cloned());
+    }
+    for sources in incoming.values() {
+        nodes.extend(sources.iter().cloned());
+    }
+    nodes
+        .into_iter()
+        .map(|node| {
+            let out_degree = outgoing.get(&node).map_or(0, BTreeSet::len);
+            let in_degree = incoming.get(&node).map_or(0, BTreeSet::len);
+            let mut tokens = vec![format!(
+                "self:{}",
+                graph_role_signature(in_degree, out_degree)
+            )];
+            for target in outgoing.get(&node).into_iter().flatten() {
+                tokens.push(format!(
+                    "out:{}",
+                    graph_role_signature(
+                        incoming.get(target).map_or(0, BTreeSet::len),
+                        outgoing.get(target).map_or(0, BTreeSet::len)
+                    )
+                ));
+            }
+            for source in incoming.get(&node).into_iter().flatten() {
+                tokens.push(format!(
+                    "in:{}",
+                    graph_role_signature(
+                        incoming.get(source).map_or(0, BTreeSet::len),
+                        outgoing.get(source).map_or(0, BTreeSet::len)
+                    )
+                ));
+            }
+            tokens.sort();
+            (
+                node,
+                GraphStructureProfile {
+                    in_degree,
+                    out_degree,
+                    neighborhood_hash: stable_diagnostic_hash(tokens.join("|").as_str()),
+                },
+            )
+        })
+        .collect()
+}
+
+fn graph_structure_evidence(
+    subject_id: u32,
+    reference_path: &str,
+    context: &GraphStructureContext,
+) -> GraphStructureEvidence {
+    let subject = context
+        .subjects
+        .get(&subject_id)
+        .copied()
+        .unwrap_or_default();
+    let reference = context
+        .references
+        .get(reference_path)
+        .copied()
+        .unwrap_or_default();
+    let subject_has_edges = subject.in_degree + subject.out_degree > 0;
+    let reference_has_edges = reference.in_degree + reference.out_degree > 0;
+    let comparable = subject_has_edges && reference_has_edges;
+    GraphStructureEvidence {
+        subject_in_degree: subject.in_degree,
+        subject_out_degree: subject.out_degree,
+        reference_in_degree: reference.in_degree,
+        reference_out_degree: reference.out_degree,
+        subject_neighborhood_hash: subject.neighborhood_hash,
+        reference_neighborhood_hash: reference.neighborhood_hash,
+        subject_has_edges,
+        reference_has_edges,
+        role_match: comparable
+            && graph_role_signature(subject.in_degree, subject.out_degree)
+                == graph_role_signature(reference.in_degree, reference.out_degree),
+        neighborhood_hash_match: comparable
+            && subject.neighborhood_hash == reference.neighborhood_hash,
+    }
+}
+
+fn graph_role_signature(in_degree: usize, out_degree: usize) -> String {
+    format!(
+        "in:{};out:{}",
+        graph_degree_bucket(in_degree),
+        graph_degree_bucket(out_degree)
+    )
+}
+
+fn graph_degree_bucket(degree: usize) -> &'static str {
+    match degree {
+        0 => "0",
+        1 => "1",
+        2 => "2",
+        3..=4 => "3-4",
+        5..=9 => "5-9",
+        _ => "10+",
+    }
+}
+
+fn stable_diagnostic_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 fn reverse_id_graph(graph: &BTreeMap<u32, BTreeSet<u32>>) -> BTreeMap<u32, BTreeSet<u32>> {
@@ -1918,6 +2175,7 @@ pub(crate) struct ModuleMatch {
     /// Number of subject neighbor edges that had preliminary source matches and
     /// therefore could participate in graph-neighborhood evidence.
     pub graph_known_edges: usize,
+    pub graph_structure: GraphStructureEvidence,
     pub anchor_overlap: usize,
     pub source_score: SourceEvidenceScore,
     /// Sum of per-anchor IDF over shared string anchors - the size/hub-robust
@@ -1935,6 +2193,20 @@ pub(crate) struct ModuleMatch {
     /// file. Reciprocal-best is strong evidence for first-party source matches
     /// and suppresses hub files that attract many unrelated subjects.
     pub reciprocal_best: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct GraphStructureEvidence {
+    pub subject_in_degree: usize,
+    pub subject_out_degree: usize,
+    pub reference_in_degree: usize,
+    pub reference_out_degree: usize,
+    pub subject_neighborhood_hash: u64,
+    pub reference_neighborhood_hash: u64,
+    pub subject_has_edges: bool,
+    pub reference_has_edges: bool,
+    pub role_match: bool,
+    pub neighborhood_hash_match: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2212,6 +2484,7 @@ fn ranked_module_matches(
                 structural_score,
                 graph_support: graph.matched_edges,
                 graph_known_edges: graph.known_edges,
+                graph_structure: GraphStructureEvidence::default(),
                 anchor_overlap,
                 source_score,
                 weighted_anchor,
@@ -3197,6 +3470,7 @@ fn apply_module_promotions(
                 structural_score: 0.0,
                 graph_support: 0,
                 graph_known_edges: 0,
+                graph_structure: GraphStructureEvidence::default(),
                 anchor_overlap: 0,
                 source_score: SourceEvidenceScore::default(),
                 weighted_anchor: 0.0,
@@ -3868,6 +4142,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             structural_score: 0.0,
             graph_support: 0,
             graph_known_edges: 0,
+            graph_structure: GraphStructureEvidence::default(),
             anchor_overlap: 0,
             source_score: SourceEvidenceScore::default(),
             weighted_anchor: 0.0,
@@ -4020,6 +4295,32 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         assert!(is_weak_diagnostic_anchor("function"));
         assert!(is_weak_diagnostic_anchor("object-key:type"));
         assert!(!is_weak_diagnostic_anchor("object-key:access_token"));
+    }
+
+    #[test]
+    fn graph_structure_profile_hashes_local_role_neighborhood() {
+        let outgoing = BTreeMap::from([
+            ("subject", BTreeSet::from(["dep"])),
+            ("parent", BTreeSet::from(["subject"])),
+            ("dep", BTreeSet::new()),
+        ]);
+        let incoming = BTreeMap::from([
+            ("subject", BTreeSet::from(["parent"])),
+            ("parent", BTreeSet::new()),
+            ("dep", BTreeSet::from(["subject"])),
+        ]);
+        let profiles = graph_structure_profiles(&outgoing, &incoming);
+        let subject = profiles["subject"];
+
+        assert_eq!(
+            graph_role_signature(subject.in_degree, subject.out_degree),
+            "in:1;out:1"
+        );
+        assert_ne!(subject.neighborhood_hash, 0);
+        assert_ne!(
+            subject.neighborhood_hash, profiles["dep"].neighborhood_hash,
+            "different graph roles/neighborhoods should not collapse"
+        );
     }
 
     fn high_plan(id: u32, name: &str) -> ModulePlan {
@@ -4621,6 +4922,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
                 source: src.into(),
                 profile: test_profile("modules/a.ts", fp.clone()),
                 fingerprint: fp,
+                dependencies: BTreeSet::new(),
                 bindings: vec![],
             }
         };
