@@ -5073,6 +5073,62 @@ fn match_function_lists_inner(
         });
     }
 
+    // ACCEPT pass 4b: GLOBALLY-UNIQUE single anchor + exact arity/stmt
+    // (module-INDEPENDENT). A string literal carried by EXACTLY ONE reference
+    // function (a distinctive error message / URL / config key) that also appears in
+    // a subject function is decisive identity evidence on its own. Pass 3 requires
+    // >=2 rare shared anchors and pass 4 requires an AST-hash agreement, so a
+    // function with a single decisive anchor whose body drifted past the AST hash
+    // falls through both and stays a proposal. Promote it when (a) the subject shares
+    // a globally-unique reference literal with exactly ONE reference function (no
+    // cross-function ambiguity), (b) param AND statement counts agree EXACTLY
+    // (structural corroboration that the lone anchor is not a coincidence), and (c)
+    // the body is non-trivial. This mines the strongest tail of the proposal pool.
+    const PASS4B_MIN_STATEMENTS: u32 = 2;
+    for subject in subject_fns {
+        if accepted.contains(&(subject.module_id, subject.name.clone()))
+            || subject.fingerprint.statement_count < PASS4B_MIN_STATEMENTS
+        {
+            continue;
+        }
+        let mut targets: BTreeSet<usize> = BTreeSet::new();
+        for anchor in &subject.literals {
+            if let Some(indices) = ref_by_literal.get(anchor.as_str())
+                && indices.len() == 1
+                && !used_ref.contains(&indices[0])
+            {
+                targets.insert(indices[0]);
+            }
+        }
+        if targets.len() != 1 {
+            continue; // no decisive anchor, or ambiguous across reference functions
+        }
+        let ri = *targets
+            .iter()
+            .next()
+            .expect("exactly one target checked above");
+        let reference = &reference_fns[ri];
+        if subject.fingerprint.param_count != reference.fingerprint.param_count
+            || subject.fingerprint.statement_count != reference.fingerprint.statement_count
+        {
+            continue;
+        }
+        accepted.insert((subject.module_id, subject.name.clone()));
+        used_ref.insert(ri);
+        rows.push(BindingNameRow {
+            module_id: subject.module_id,
+            subject_path: subject.subject_path.clone(),
+            reference_file: reference.file.clone(),
+            original_name: subject.name.clone(),
+            semantic_name: reference.name.clone(),
+            accepted: true,
+            ast_hash: subject.fingerprint.primary.ast,
+            param_count: subject.fingerprint.param_count,
+            statement_count: subject.fingerprint.statement_count,
+            score: 3.5,
+        });
+    }
+
     // ACCEPT pass 5: global anchor-seeded WITHIN-PAIR similarity (module-INDEPENDENT).
     //
     // Generalizes the module-gated within-pair assignment (pass 2) to the whole
@@ -8296,6 +8352,48 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
                 .iter()
                 .any(|r| r.accepted),
             "island_mode must not accept via graded structural similarity"
+        );
+    }
+
+    #[test]
+    fn unique_anchor_with_exact_arity_promotes_drifted_function() {
+        // Bodies differ structurally (different statements -> different AST hash, so
+        // pass 4 cannot fire) but share ONE globally-unique reference literal and
+        // agree on param + statement counts. Pass 4b promotes it.
+        let subjects = subject_fn(
+            7,
+            "modules/m.ts",
+            r#"function aB(x){ let q = "kSliceMarkerZQX_unique"; return q + x; }"#,
+        );
+        let references = reference_fn(
+            "util/slice.ts",
+            r#"function sliceWithMarker(x){ let q = "kSliceMarkerZQX_unique"; return x + q; }"#,
+        );
+        let rows = match_function_lists(&subjects, &references, &BTreeMap::new());
+        assert!(
+            rows.iter()
+                .any(|r| r.accepted && r.semantic_name == "sliceWithMarker"),
+            "unique anchor + exact arity/stmt should promote: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn unique_anchor_blocks_on_arity_mismatch() {
+        // Same decisive unique anchor, but the parameter counts disagree -> the lone
+        // anchor is not corroborated, so pass 4b must NOT accept (stays a proposal).
+        let subjects = subject_fn(
+            7,
+            "modules/m.ts",
+            r#"function aB(x){ let q = "kSliceMarkerZQX_unique"; return q + x; }"#,
+        );
+        let references = reference_fn(
+            "util/slice.ts",
+            r#"function sliceWithMarker(x, y){ let q = "kSliceMarkerZQX_unique"; return x + q + y; }"#,
+        );
+        let rows = match_function_lists(&subjects, &references, &BTreeMap::new());
+        assert!(
+            !rows.iter().any(|r| r.accepted),
+            "arity mismatch must block the unique-anchor promotion: {rows:?}"
         );
     }
 
