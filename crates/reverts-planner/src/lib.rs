@@ -45,6 +45,7 @@ use runtime_source_read::{
 };
 mod decompose_namespace;
 mod delazify;
+mod delazify_init_chains;
 mod external_adapters;
 mod helper_declarations;
 mod identifier_facts;

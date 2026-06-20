@@ -39,6 +39,7 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     PruneUnreachableFilesPass.run(context, &mut state)?;
     PruneDeadExportsPass.run(context, &mut state)?;
     PruneInvalidExportsPass.run(context, &mut state)?;
+    crate::delazify_init_chains::delazify_init_chains(&mut state.plan);
     // Layer-2 export-name recovery: rename minified bindings to their real esbuild
     // export names across every planned file (modules + entrypoint island + runtime
     // helpers). Runs last so it sees the final, pruned file set.
