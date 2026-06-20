@@ -46,9 +46,13 @@ classify-modules
   ↓
 match-packages
   ↓
+reference-source-names   (auto-name from a first-party source tree, optional)
+  ↓
+ownership-source-names   (auto-name owned-but-inlined package modules from package source)
+  ↓
 public-surface extraction
   ↓
-agent semantic naming
+agent semantic naming    (fills the remaining public surface)
   ↓
 public-surface naming gate
   ↓
@@ -289,6 +293,36 @@ Required behavior in the full workflow:
 - Accepted package modules may emit as external imports or internal-to-externalized package modules.
 - Internal third-party modules must not be queued for semantic naming.
 - The emitted output should expose the package public import surface rather than renamed internal package implementation details.
+
+### 5a. Ownership-Driven Source Naming
+
+`match-packages` records module→package@version "ownership" matches that it
+cannot safely externalize (the inlined esbuild bundle does not prove a clean
+single external import). Those attributions persist as `status='rejected'` and
+their modules stay inlined and decompiled — but they ARE the published source of
+a known package, so the package source file is an authoritative naming
+reference. Run this after `match-packages` (and after the optional
+`reference-source-names` first-party pass), before agent naming:
+
+```bash
+reverts-cli ownership-source-names \
+  --input <db> \
+  --project-id <id> \
+  --apply
+```
+
+- Loads each owned module's matched package source from the global package
+  source cache (`$HOME/.reverts/.reverts.db`, override with `--cache-db`),
+  resolving the requested version to the best available cached version.
+- Matches bundle functions against the package source with the same engine
+  `reference-source-names` uses, then writes recovered names to
+  `semantic_binding_names` with a non-automated `package-source:` origin (so the
+  vocabulary gate stays bypassed and package domain names pass).
+- Independent of externalization: a module that can never become an `import`
+  still gets real function names (e.g. `cmp`, `compareBuild`, `modulate`).
+- File-pinned matches use the precise module-corroborated / within-pair passes;
+  file-less (package-only) matches rely on the global composite-unique pass and
+  otherwise remain proposals.
 
 ### 6. Public Surface Extraction
 
