@@ -27,8 +27,9 @@ use crate::recover::{
     recover_function_declarations, recover_object_destructuring,
 };
 use crate::rename_apply::{
-    ReadabilityRenameHint, ReadabilityRenameSource, apply_all_scope_readability_renames,
-    apply_emit_safety_renames, apply_readability_renames, resolve_readability_rename_hints,
+    FunctionParamRename, ReadabilityRenameHint, ReadabilityRenameSource,
+    apply_all_scope_readability_renames, apply_emit_safety_renames, apply_function_param_renames,
+    apply_readability_renames, resolve_readability_rename_hints,
 };
 use crate::rename_hints::collect_late_readability_rename_hints;
 use crate::type_annotations::{
@@ -45,6 +46,10 @@ pub struct FormatSourceRequest<'a> {
     pub generated_imports: &'a [GeneratedImport],
     pub generated_exports: &'a [GeneratedExport],
     pub readability_renames: &'a [GeneratedRename],
+    /// Per-function positional parameter renames (matched functions' minified
+    /// params → real reference names). Applied before name-scope renames, while
+    /// function and parameter names are still minified.
+    pub function_param_renames: &'a [FunctionParamRename],
     pub type_annotations: &'a [GeneratedTypeAnnotation],
     pub infer_literal_types: bool,
     pub path_hint: Option<&'a Path>,
@@ -85,6 +90,7 @@ pub fn format_source_with_module_items_and_renames(
         generated_imports,
         generated_exports,
         readability_renames,
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: false,
         path_hint,
@@ -111,6 +117,7 @@ pub fn format_source_with_module_items_and_renames_with_report(
         generated_imports,
         generated_exports,
         readability_renames,
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: false,
         path_hint,
@@ -127,6 +134,7 @@ pub fn format_source_with_module_items_request_with_report(
         generated_imports,
         generated_exports,
         readability_renames,
+        function_param_renames,
         type_annotations,
         infer_literal_types,
         path_hint,
@@ -222,6 +230,15 @@ pub fn format_source_with_module_items_request_with_report(
                         ReadabilityRenameSource::ExplicitSemantic,
                     )
                 }),
+        );
+        // Parameter-name transfer runs first, while function and parameter names
+        // are still minified — it locates functions by their minified name and
+        // renames params positionally, before name-scope renames rewrite either.
+        apply_function_param_renames(
+            &allocator,
+            &mut parsed.program,
+            function_param_renames,
+            &mut report,
         );
         let readability_renames_with_imports =
             resolve_readability_rename_hints(readability_hints, &mut report);

@@ -3,10 +3,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use oxc_allocator::Allocator;
 use oxc_ast::{
     AstBuilder, Visit, VisitMut,
-    ast::{BindingIdentifier, IdentifierReference, Program},
+    ast::{
+        BindingIdentifier, BindingPatternKind, Expression, FormalParameters, Function,
+        IdentifierReference, Program, VariableDeclarator,
+    },
 };
 use oxc_semantic::SemanticBuilder;
-use oxc_syntax::{reference::ReferenceId, symbol::SymbolId};
+use oxc_syntax::{reference::ReferenceId, scope::ScopeFlags, symbol::SymbolId};
 
 use crate::identifier::sanitize_identifier;
 use crate::{GeneratedRename, ReadabilityReport};
@@ -462,6 +465,230 @@ pub(crate) fn apply_emit_safety_renames<'a>(
     renamer.visit_program(program);
 }
 
+/// A request to rename the `param_index`-th formal parameter of the (uniquely
+/// named) function `function` to `renamed`. Produced by cross-version matching:
+/// a matched function's minified positional parameters take the matched
+/// reference's real parameter names. Keyed by function name + position — NOT a
+/// file-global binding ordinal — so it is immune to the import-insertion and
+/// earlier-rename ordinal drift that makes `BindingIndex` unreliable for params.
+#[derive(Debug, Clone)]
+pub struct FunctionParamRename {
+    pub function: String,
+    pub param_index: u32,
+    pub renamed: String,
+}
+
+/// Rename matched functions' minified positional parameters to real names.
+///
+/// Soundness: a parameter is renamed only when (a) exactly one function in the
+/// file resolves to the requested name (no ambiguity), (b) the parameter at that
+/// position is a plain identifier binding with a resolved symbol, and (c) the new
+/// name does not already occur anywhere inside that function — so the rename can
+/// never merge two distinct bindings or capture a free reference. Functions whose
+/// name resolves through forms this pass does not model (object/class methods,
+/// member assignments) are simply left untouched. The rename targets the
+/// parameter's `SymbolId` and every resolved reference, so all in-scope uses move
+/// together.
+pub(crate) fn apply_function_param_renames<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    renames: &[FunctionParamRename],
+    report: &mut ReadabilityReport,
+) {
+    if renames.is_empty() {
+        return;
+    }
+    let mut wanted: BTreeMap<&str, BTreeMap<u32, &str>> = BTreeMap::new();
+    for rename in renames {
+        wanted
+            .entry(rename.function.as_str())
+            .or_default()
+            .insert(rename.param_index, rename.renamed.as_str());
+    }
+
+    let (symbol_renames, reference_renames) = {
+        let semantic = SemanticBuilder::new().build(program).semantic;
+        let symbols = semantic.symbols();
+
+        let mut locator = FunctionParamLocator {
+            wanted: &wanted,
+            functions: BTreeMap::new(),
+            ambiguous: BTreeSet::new(),
+        };
+        locator.visit_program(program);
+
+        let mut symbol_renames = BTreeMap::<SymbolId, String>::new();
+        let mut reference_renames = BTreeMap::<ReferenceId, String>::new();
+        for (&function_name, indices) in &wanted {
+            if locator.ambiguous.contains(function_name) {
+                continue;
+            }
+            let Some(located) = locator.functions.get(function_name) else {
+                continue;
+            };
+            for (&index, &new_name) in indices {
+                let Some(Some(symbol_id)) = located.param_symbols.get(index as usize).copied()
+                else {
+                    continue;
+                };
+                let original = symbols.get_name(symbol_id);
+                if original == new_name {
+                    continue;
+                }
+                // Collision guard: the new name must not already appear anywhere
+                // inside this function, else the rename would merge or capture it.
+                if located.used_names.contains(new_name) {
+                    report.push(format!(
+                        "skipped param rename {original} -> {new_name} in {function_name}, source=function_param, reason=name_in_use"
+                    ));
+                    continue;
+                }
+                symbol_renames.insert(symbol_id, new_name.to_string());
+                for reference_id in symbols.get_resolved_reference_ids(symbol_id) {
+                    reference_renames.insert(*reference_id, new_name.to_string());
+                }
+                report.push(format!(
+                    "renamed param {original} -> {new_name} in {function_name}, source=function_param"
+                ));
+            }
+        }
+        (symbol_renames, reference_renames)
+    };
+
+    if symbol_renames.is_empty() && reference_renames.is_empty() {
+        return;
+    }
+    let mut renamer = ReadabilityRenamer {
+        builder: AstBuilder::new(allocator),
+        symbol_renames,
+        reference_renames,
+    };
+    renamer.visit_program(program);
+}
+
+struct LocatedFunction {
+    /// Symbol id of each formal parameter in source order (`None` for a
+    /// destructured/rest param, or one without a resolved symbol).
+    param_symbols: Vec<Option<SymbolId>>,
+    /// Every identifier name appearing anywhere inside the function — used to
+    /// reject renames that would collide with an existing binding or reference.
+    used_names: BTreeSet<String>,
+}
+
+/// Resolves function names the way the matcher's `function_names` does for the
+/// two dominant first-party forms — `function NAME(params){}` and
+/// `const NAME = function/arrow(params)` — recording each requested function's
+/// parameter symbols. A name seen more than once is marked ambiguous and skipped.
+struct FunctionParamLocator<'r> {
+    wanted: &'r BTreeMap<&'r str, BTreeMap<u32, &'r str>>,
+    functions: BTreeMap<String, LocatedFunction>,
+    ambiguous: BTreeSet<String>,
+}
+
+impl<'r> FunctionParamLocator<'r> {
+    fn record(&mut self, name: &str, params: &FormalParameters<'_>, used_names: BTreeSet<String>) {
+        if !self.wanted.contains_key(name) {
+            return;
+        }
+        if self.functions.contains_key(name) {
+            self.ambiguous.insert(name.to_string());
+            return;
+        }
+        let param_symbols = params
+            .items
+            .iter()
+            .map(|param| simple_param_symbol(&param.pattern.kind))
+            .collect();
+        self.functions.insert(
+            name.to_string(),
+            LocatedFunction {
+                param_symbols,
+                used_names,
+            },
+        );
+    }
+}
+
+impl<'a, 'r> Visit<'a> for FunctionParamLocator<'r> {
+    fn visit_function(&mut self, function: &Function<'a>, flags: ScopeFlags) {
+        if let Some(id) = &function.id {
+            let used = collect_used_identifier_names(|collector| {
+                collector.visit_function(function, flags);
+            });
+            self.record(id.name.as_str(), &function.params, used);
+        }
+        oxc_ast::visit::walk::walk_function(self, function, flags);
+    }
+
+    fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+        if let BindingPatternKind::BindingIdentifier(id) = &declarator.id.kind
+            && let Some(init) = &declarator.init
+            && let Some((params, used)) = function_like_params_and_uses(init)
+        {
+            self.record(id.name.as_str(), params, used);
+        }
+        oxc_ast::visit::walk::walk_variable_declarator(self, declarator);
+    }
+}
+
+/// Parameters and in-function identifier names of a `function`/arrow expression
+/// (peeling parentheses), or `None` if the expression is not function-like.
+fn function_like_params_and_uses<'a>(
+    expr: &'a Expression<'a>,
+) -> Option<(&'a FormalParameters<'a>, BTreeSet<String>)> {
+    match expr {
+        Expression::FunctionExpression(function) => {
+            let used = collect_used_identifier_names(|collector| {
+                collector.visit_function(function, ScopeFlags::empty());
+            });
+            Some((&function.params, used))
+        }
+        Expression::ArrowFunctionExpression(arrow) => {
+            let used = collect_used_identifier_names(|collector| {
+                collector.visit_arrow_function_expression(arrow);
+            });
+            Some((&arrow.params, used))
+        }
+        Expression::ParenthesizedExpression(paren) => {
+            function_like_params_and_uses(&paren.expression)
+        }
+        _ => None,
+    }
+}
+
+fn simple_param_symbol(kind: &BindingPatternKind<'_>) -> Option<SymbolId> {
+    match kind {
+        BindingPatternKind::BindingIdentifier(ident) => ident.symbol_id.get(),
+        BindingPatternKind::AssignmentPattern(assignment) => {
+            simple_param_symbol(&assignment.left.kind)
+        }
+        BindingPatternKind::ObjectPattern(_) | BindingPatternKind::ArrayPattern(_) => None,
+    }
+}
+
+fn collect_used_identifier_names(
+    walk: impl FnOnce(&mut IdentifierNameCollector),
+) -> BTreeSet<String> {
+    let mut collector = IdentifierNameCollector {
+        names: BTreeSet::new(),
+    };
+    walk(&mut collector);
+    collector.names
+}
+
+struct IdentifierNameCollector {
+    names: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for IdentifierNameCollector {
+    fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
+        self.names.insert(identifier.name.to_string());
+    }
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        self.names.insert(identifier.name.to_string());
+    }
+}
+
 fn unique_safe_identifier(base: &str, used_names: &mut BTreeSet<String>) -> String {
     if !used_names.contains(base) {
         used_names.insert(base.to_string());
@@ -502,5 +729,117 @@ impl<'a> VisitMut<'a> for ReadabilityRenamer<'a> {
             return;
         };
         identifier.name = self.builder.atom(renamed);
+    }
+}
+
+#[cfg(test)]
+mod function_param_rename_tests {
+    use super::*;
+    use oxc_codegen::CodeGenerator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    fn run(source: &str, renames: &[FunctionParamRename]) -> String {
+        let allocator = Allocator::default();
+        let source_type = SourceType::default().with_typescript(true);
+        let mut parsed = Parser::new(&allocator, source, source_type).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        let mut report = ReadabilityReport::default();
+        apply_function_param_renames(&allocator, &mut parsed.program, renames, &mut report);
+        CodeGenerator::new().build(&parsed.program).code
+    }
+
+    fn rename(function: &str, index: u32, renamed: &str) -> FunctionParamRename {
+        FunctionParamRename {
+            function: function.to_string(),
+            param_index: index,
+            renamed: renamed.to_string(),
+        }
+    }
+
+    #[test]
+    fn renames_positional_params_and_their_references() {
+        let out = run(
+            "function rFz(q, K) { return q + K; }",
+            &[rename("rFz", 0, "value"), rename("rFz", 1, "count")],
+        );
+        assert!(out.contains("function rFz(value, count)"), "got: {out}");
+        assert!(out.contains("return value + count"), "got: {out}");
+        assert!(!out.contains('q') && !out.contains('K'), "got: {out}");
+    }
+
+    #[test]
+    fn renames_arrow_assigned_to_a_const_binding() {
+        let out = run(
+            "const handler = (a, b) => a.use(b);",
+            &[
+                rename("handler", 0, "node"),
+                rename("handler", 1, "options"),
+            ],
+        );
+        assert!(out.contains("(node, options) =>"), "got: {out}");
+        assert!(out.contains("node.use(options)"), "got: {out}");
+    }
+
+    #[test]
+    fn skips_ambiguous_function_name() {
+        // Two functions named `g` — renaming either is unsafe, so neither moves.
+        let out = run(
+            "function g(q) { return q; } function g(K) { return K; }",
+            &[rename("g", 0, "value")],
+        );
+        assert!(out.contains("function g(q)"), "got: {out}");
+        assert!(out.contains("function g(K)"), "got: {out}");
+        assert!(!out.contains("value"), "got: {out}");
+    }
+
+    #[test]
+    fn skips_rename_when_new_name_already_used_in_function() {
+        // `value` already exists as a local — renaming `q` to it would merge them.
+        let out = run(
+            "function h(q) { let value = 1; return q + value; }",
+            &[rename("h", 0, "value")],
+        );
+        assert!(
+            out.contains("function h(q)"),
+            "collision not skipped: {out}"
+        );
+        assert!(out.contains("let value = 1"), "got: {out}");
+    }
+
+    #[test]
+    fn renames_only_the_targeted_function_scopes_param_not_a_nested_shadow() {
+        // `outer` and `inner` each bind `q`; they are distinct symbols. Renaming
+        // outer's param 0 must move only outer's `q`, leaving inner's intact.
+        let out = run(
+            "function outer(q) { function inner(q) { return q; } return q + inner(1); }",
+            &[rename("outer", 0, "root")],
+        );
+        assert!(out.contains("function outer(root)"), "got: {out}");
+        assert!(
+            out.contains("function inner(q)"),
+            "nested shadow moved: {out}"
+        );
+        assert!(out.contains("return root + inner(1)"), "got: {out}");
+        assert!(out.contains("return q"), "inner body shadow moved: {out}");
+    }
+
+    #[test]
+    fn leaves_destructured_param_slot_untouched_but_renames_a_sibling() {
+        let out = run(
+            "function d({ mode: m }, q) { return m + q; }",
+            &[rename("d", 0, "config"), rename("d", 1, "value")],
+        );
+        // index 0 is destructured -> no transferable symbol -> unchanged key.
+        assert!(
+            out.contains("{ mode: m }"),
+            "destructured slot changed: {out}"
+        );
+        assert!(out.contains(", value)"), "sibling not renamed: {out}");
+        assert!(out.contains("return m + value"), "got: {out}");
     }
 }

@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use super::{
-    CompilerLowering, FormatSourceRequest, GeneratedExport, GeneratedImport, GeneratedRename,
-    ImportUsageScope, JsError, LazyBodyClassification, ParseGoal, TopLevelStatementKind,
-    classify_import_usage_scope, classify_lazy_module_body,
+    CompilerLowering, FormatSourceRequest, FunctionParamRename, GeneratedExport, GeneratedImport,
+    GeneratedRename, ImportUsageScope, JsError, LazyBodyClassification, ParseGoal,
+    TopLevelStatementKind, classify_import_usage_scope, classify_lazy_module_body,
     collect_file_url_source_location_rewrites, collect_identifier_inventory,
     collect_identifier_read_facts, collect_path_builder_calls, collect_static_resource_specifiers,
     collect_static_template_literals, collect_string_literals, collect_top_level_statement_facts,
@@ -339,6 +339,7 @@ fn module_item_formatting_infers_safe_literal_variable_types_when_requested() {
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -359,6 +360,7 @@ fn module_item_formatting_skips_reassigned_literal_variable_types_when_requested
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -378,6 +380,7 @@ fn module_item_formatting_infers_minified_unary_literal_types_when_requested() {
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -398,6 +401,7 @@ fn module_item_formatting_infers_fixed_operator_result_types_when_requested() {
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -419,6 +423,7 @@ fn module_item_formatting_infers_builtin_api_result_types_when_requested() {
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -446,6 +451,7 @@ fn module_item_formatting_infers_default_parameter_and_return_types_when_request
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -465,6 +471,7 @@ fn module_item_formatting_infers_parameters_from_call_sites_when_requested() {
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -484,6 +491,7 @@ fn module_item_formatting_propagates_identifier_types_when_requested() {
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -526,6 +534,7 @@ fn module_item_formatting_infers_union_call_site_parameters_when_requested() {
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -544,6 +553,7 @@ fn module_item_formatting_infers_union_return_types_when_requested() {
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -563,6 +573,7 @@ fn module_item_formatting_infers_structural_return_types_when_requested() {
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -583,6 +594,7 @@ fn module_item_formatting_infers_object_and_array_literal_types_when_requested()
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -604,6 +616,7 @@ fn module_item_formatting_infers_structural_array_literal_types_when_requested()
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -626,6 +639,7 @@ fn module_item_formatting_recovers_package_member_type_query() {
         generated_imports: &[GeneratedImport::new("__pkg", "pkg")],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
@@ -662,6 +676,7 @@ fn formatting_does_not_generate_placeholder_semantic_names() {
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
+        function_param_renames: &[],
         type_annotations: &[],
         infer_literal_types: false,
         path_hint: Some(Path::new("fixture.ts")),
@@ -2852,4 +2867,49 @@ fn binding_index_rename_targets_one_same_named_binding() {
     assert!(output.contains("return a + 1;"));
     assert!(output.contains("function second(secondInput)"));
     assert!(output.contains("return secondInput + 2;"));
+}
+
+#[test]
+fn format_source_transfers_function_param_names_through_full_emit_path() {
+    // Exercises the wiring: a generated import is inserted and a module-scope
+    // readability rename is requested, yet the function-param pass still locates
+    // `handler` by its minified name and renames its positional params before any
+    // name-scope rename runs.
+    let output = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "function handler(q, K) { return io.read(q) + K; }",
+        generated_imports: &[GeneratedImport::new("io", "./io.js")],
+        generated_exports: &[],
+        readability_renames: &[GeneratedRename {
+            original: "handler".to_string(),
+            renamed: "processRequest".to_string(),
+            scope: super::GeneratedRenameScope::All,
+        }],
+        function_param_renames: &[
+            FunctionParamRename {
+                function: "handler".to_string(),
+                param_index: 0,
+                renamed: "request".to_string(),
+            },
+            FunctionParamRename {
+                function: "handler".to_string(),
+                param_index: 1,
+                renamed: "count".to_string(),
+            },
+        ],
+        type_annotations: &[],
+        infer_literal_types: false,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+    // Params renamed, their uses moved, and the function-name rename still applied.
+    assert!(
+        output.contains("function processRequest(request, count)"),
+        "got: {output}"
+    );
+    // (The namespace import `io.read` is flattened to a named `read` by the emit
+    // import passes — the point here is that the renamed param `request` rides
+    // along into the call.)
+    assert!(output.contains("read(request) + count"), "got: {output}");
 }

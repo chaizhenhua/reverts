@@ -38,6 +38,7 @@ pub use format_module_items::{
     format_source_with_module_items_request,
 };
 pub use lowering::CompilerLowering;
+pub use rename_apply::FunctionParamRename;
 
 pub use errors::{JsError, ParseError, ParseGoal, Result, parse_error_message};
 pub use facts::{
