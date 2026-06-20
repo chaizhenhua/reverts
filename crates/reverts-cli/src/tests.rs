@@ -1207,6 +1207,7 @@ fn runtime_inventory_selects_project_source_sizes_with_limit_ordering() {
         runtime_attribution: false,
         package_source_blockers: false,
         finding_clusters: false,
+        init_cycles: false,
     };
     let selections =
         runtime_inventory_project_selections(&newest_args).expect("select newest projects");
@@ -1228,6 +1229,7 @@ fn runtime_inventory_selects_project_source_sizes_with_limit_ordering() {
         runtime_attribution: false,
         package_source_blockers: false,
         finding_clusters: false,
+        init_cycles: false,
     };
     let selections =
         runtime_inventory_project_selections(&single_project_args).expect("select single project");

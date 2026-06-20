@@ -348,6 +348,40 @@ pub(crate) struct RuntimeSourceSpanOwner {
     pub(crate) label: String,
 }
 
+/// Read-only diagnostic: build the AST-derived module init-dependency graph over
+/// the emitted modules and report how the cycle structure refines from the raw
+/// import graph (over-approximate) down to the init-time data-read core (the
+/// genuine irreducible cyclic-init dependencies). No code is changed; this only
+/// surfaces what [`ModuleInitGraph`] sees, e.g. for de-lazification analysis.
+fn print_init_cycle_report(project_id: u32, files: &[EmittedFile]) {
+    use reverts_graph::{InitEdgeFilter, ModuleInitGraph};
+    let graph = ModuleInitGraph::from_emitted_modules(
+        files
+            .iter()
+            .map(|file| (file.path.clone(), file.source.as_str())),
+    );
+    let largest = |sccs: &[Vec<usize>]| sccs.iter().map(Vec::len).max().unwrap_or(0);
+    println!(
+        "  init_cycles project {project_id}: modules={}, import_edges={}, init_call_edges={}, init_read_edges={}",
+        graph.node_count(),
+        graph.import_edge_count(),
+        graph.edge_count(InitEdgeFilter::CallOnly),
+        graph.edge_count(InitEdgeFilter::ReadOnly),
+    );
+    println!(
+        "    largest SCC: import={}, init_all={}, init_read={}",
+        largest(&graph.import_strongly_connected_components()),
+        largest(&graph.strongly_connected_components(InitEdgeFilter::All)),
+        largest(&graph.strongly_connected_components(InitEdgeFilter::ReadOnly)),
+    );
+    println!(
+        "    cyclic modules: import={}, init_all={}, init_read={} (the init_read core is the irreducible cyclic-init dependency)",
+        graph.import_cyclic_modules().len(),
+        graph.cyclic_modules(InitEdgeFilter::All).len(),
+        graph.cyclic_modules(InitEdgeFilter::ReadOnly).len(),
+    );
+}
+
 pub(crate) fn run(args: RuntimeInventoryArgs) -> Result<(), CliRunError> {
     let outcome = runtime_inventory_from_sqlite(&args).map_err(CliRunError::RuntimeInventory)?;
     println!(
@@ -765,6 +799,9 @@ pub fn runtime_inventory_from_sqlite(
         let run = generate_project_inventory_from_prepared(prepared)
             .map_err(RuntimeInventoryError::Pipeline)?;
         mark_timing!("generate_project_inventory");
+        if args.init_cycles {
+            print_init_cycle_report(selection.project_id, &run.project.files);
+        }
         let project_finding_clusters = cluster_program
             .as_ref()
             .map(|program| audit_finding_cluster_report(program, &run.audit));

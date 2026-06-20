@@ -76,8 +76,11 @@ pub enum InitEdgeFilter {
 pub struct ModuleInitGraph {
     paths: Vec<String>,
     index: BTreeMap<String, usize>,
-    /// Forward adjacency: `node → (neighbor → edge kinds)`.
+    /// Forward INIT-dependency adjacency: `node → (neighbor → edge kinds)`.
     adj: Vec<BTreeMap<usize, InitEdgeKinds>>,
+    /// Forward RAW import adjacency: every relative import, whether or not it is
+    /// used at init time. The init graph's cycles are a subset of these.
+    imports: Vec<BTreeSet<usize>>,
 }
 
 impl ModuleInitGraph {
@@ -101,8 +104,11 @@ impl ModuleInitGraph {
         }
         for (path, source) in &modules {
             let from = graph.index[path];
-            let edges = extract_init_edges(source, path, &graph.index);
-            for (to, kinds) in edges {
+            let (import_targets, init_edges) = extract_module_edges(source, path, &graph.index);
+            for to in import_targets {
+                graph.imports[from].insert(to);
+            }
+            for (to, kinds) in init_edges {
                 graph.record_edge(from, to, kinds);
             }
         }
@@ -117,6 +123,7 @@ impl ModuleInitGraph {
         self.paths.push(path.to_string());
         self.index.insert(path.to_string(), idx);
         self.adj.push(BTreeMap::new());
+        self.imports.push(BTreeSet::new());
         idx
     }
 
@@ -179,6 +186,38 @@ impl ModuleInitGraph {
             })
             .collect();
         tarjan_scc(&adjacency)
+    }
+
+    /// Total number of raw import edges.
+    #[must_use]
+    pub fn import_edge_count(&self) -> usize {
+        self.imports.iter().map(BTreeSet::len).sum()
+    }
+
+    /// Strongly-connected components over the RAW import graph (the conservative,
+    /// over-approximate cycle structure).
+    #[must_use]
+    pub fn import_strongly_connected_components(&self) -> Vec<Vec<usize>> {
+        let adjacency: Vec<Vec<usize>> = self
+            .imports
+            .iter()
+            .map(|targets| targets.iter().copied().collect())
+            .collect();
+        tarjan_scc(&adjacency)
+    }
+
+    /// Node indices in a non-trivial import cycle.
+    #[must_use]
+    pub fn import_cyclic_modules(&self) -> BTreeSet<usize> {
+        let mut cyclic = BTreeSet::new();
+        for component in self.import_strongly_connected_components() {
+            let self_loop =
+                component.len() == 1 && self.imports[component[0]].contains(&component[0]);
+            if component.len() > 1 || self_loop {
+                cyclic.extend(component);
+            }
+        }
+        cyclic
     }
 
     /// Node indices that sit in a non-trivial cycle (SCC of size > 1, or a
@@ -275,25 +314,27 @@ fn normalize_module_path(dir: &str, specifier: &str) -> String {
     path
 }
 
-/// Parse `source` and return its init-time edges: imported-module node index →
-/// edge kinds. `index` maps a resolved module path to its node index.
-fn extract_init_edges(
+/// Parse `source` and return `(import_targets, init_edges)`: the set of imported
+/// module node indices, and the init-time dependency edges (target → kinds).
+/// `index` maps a resolved module path to its node index.
+fn extract_module_edges(
     source: &str,
     path: &str,
     index: &BTreeMap<String, usize>,
-) -> BTreeMap<usize, InitEdgeKinds> {
+) -> (BTreeSet<usize>, BTreeMap<usize, InitEdgeKinds>) {
     let alloc = oxc_allocator::Allocator::default();
     let source_type = SourceType::default().with_typescript(true).with_jsx(true);
     let parsed = Parser::new(&alloc, source, source_type)
         .with_options(parse_options_for(source_type))
         .parse();
     if parsed.panicked {
-        return BTreeMap::new();
+        return (BTreeSet::new(), BTreeMap::new());
     }
     let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
     let imports = import_bindings(&parsed.program, dir, index);
+    let import_targets: BTreeSet<usize> = imports.values().copied().collect();
     if imports.is_empty() {
-        return BTreeMap::new();
+        return (import_targets, BTreeMap::new());
     }
     let mut visitor = InitRefVisitor {
         imports: &imports,
@@ -327,7 +368,7 @@ fn extract_init_edges(
             other => visitor.visit_statement(other),
         }
     }
-    visitor.edges
+    (import_targets, visitor.edges)
 }
 
 /// Map every imported local binding name to the node index of the module it is
@@ -548,7 +589,9 @@ mod tests {
         let bi = graph.index_of("b.ts").unwrap();
         assert!(graph.dependencies_of(ai).contains_key(&bi));
         assert!(!graph.dependencies_of(bi).contains_key(&ai));
-        // ...so there is no init cycle, even though the import graph is cyclic.
+        // The IMPORT graph IS cyclic (a↔b mutually import)...
+        assert_eq!(graph.import_cyclic_modules(), BTreeSet::from([ai, bi]));
+        // ...but the INIT graph is not — the refinement that matters.
         assert!(graph.cyclic_modules(InitEdgeFilter::All).is_empty());
     }
 }

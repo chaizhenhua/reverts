@@ -1527,6 +1527,7 @@ mod tests {
                 runtime_attribution: false,
                 package_source_blockers: false,
                 finding_clusters: false,
+                init_cycles: false,
                 input: output_db,
             },
         )?;

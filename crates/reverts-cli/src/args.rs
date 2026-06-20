@@ -217,6 +217,8 @@ pub struct RuntimeInventoryArgs {
     #[arg(long)]
     pub finding_clusters: bool,
     #[arg(long)]
+    pub init_cycles: bool,
+    #[arg(long)]
     pub input: PathBuf,
 }
 
