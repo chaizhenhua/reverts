@@ -126,15 +126,31 @@ memoizer (`_$l` → `lazyModuleInit`), `gitExe`, and the multipart `TLA` → `mu
 (14 accepted).
 
 ```text
-round 0 (baseline):       named=0   / 308   (0%)
-round 1 (SDK names):      named=8   / 308   (3%)
-round 2 (git names):      named=30  / 307   (10%)
-round 3 (3p classified):  named=30  / 77    (39%)   pending=47, modules=11
-round 4 (init-thunk tail): named=44 / 77    (57%)   pending=33
+round 0 (baseline):        named=0   / 308   (0%)
+round 1 (SDK names):       named=8   / 308   (3%)
+round 2 (git names):       named=30  / 307   (10%)
+round 3 (3p classified):   named=30  / 77    (39%)   pending=47, modules=11
+round 4 (init-thunk tail): named=44  / 77    (57%)   pending=33
+round 5 (dead excluded):   named=31  / 41    (76%)   pending=10
+round 6 (cross-module):    named=41  / 41   (100%)   pending=0  — tsc still 0 errors
 ```
 
-(230 third-party targets left the denominator; the count nudges by one as accepted names
-re-classify the emitted universe.)
+**Round 6 — 100% via cross-module def-use tracing.** The last 10 are exported module
+state whose roles only the *consumers* reveal. All are imported by
+`runtime/source-6-helpers.ts`; tracing usage there names every one: `vAA` is a ring buffer
+(`vAA.length >= yhr && vAA.shift()`) → `recentEventBuffer`, its cap `yhr=100` →
+`maxRecentEvents`; `aUA=1000`×`gUA=60` build a timeout → `millisecondsPerSecond` /
+`secondsPerMinute`; `XNe` (already aliased `interval`) feeds `watchFile({interval})` →
+`fileWatchIntervalMs`; `sG` is a `Map` path cache → `resolvedPathCache`; `VNe.logError` →
+`errorReporter`; `U$ = new Whr()` (a class with `gitDir`/`watchedPaths`/`repoBranches`) →
+`gitRepoWatcher`. **100% first-party named, tsc 0 errors** — the complete reference sample.
+This is the `ImportExportGraph` + alias-closure lever the round-4 note predicted.
+
+(230 third-party targets left the denominator in round 3; round 5 — the implemented
+dead-binding exclusion below — drops 36 more dead esbuild hoists, and even removes 13
+bindings that earlier rounds had named but that the def-use pass proved dead, e.g. the
+vestigial `cwd`/`statCount`/`untracked` in module 1166. The remaining `31/41 = 76%` is the
+honest first-party coverage.)
 
 **Honest ceiling — and what per-symbol data-flow tracing reveals.** Tracing each of the
 remaining 33 targets by its def/use (the `DefUseGraph` / `ResolvedSymbolGraph` signal:
@@ -153,12 +169,23 @@ reads, writes, member-access) shows they split into two groups:
   (who reads/writes them under their re-imported names) — exactly what the
   `ImportExportGraph` + alias-closure automates and what a by-hand pass cannot do reliably.
 
-So the data-flow verdict is **not "name them all"** — it is "≈73% are dead and should leave
-the worklist; the rest need the cross-module def-use closure." Wiring
-`unread_bindings`/dead-binding detection into `naming-plan` would drop the dead targets
-(denominator `77 → ~53`, coverage `57% → ~83%`) *correctly* — the proper next pipeline
-change, and the real consumer of the P0–P2 graph work. The agent does **not** mechanically
-rename dead code to reach 100%; a wrong name is worse than an honest exclusion.
+So the data-flow verdict is **not "name them all"** — it is "most are dead and should leave
+the worklist; the rest need the cross-module def-use closure."
+
+**This is now implemented (the real consumer of the P0–P2 graph work).** A reverts-js
+`collect_dead_top_level_bindings` (oxc semantic: module-scope binding, not exported, zero
+resolved references — the `unread_bindings` signal) flags each emitted binding `dead` on
+`SymbolIndexEntry`; the shared `classify_emitted_entry` drops dead entries from both the
+worklist and the denominator. Measured impact:
+
+```text
+Claude.dmg : denominator 77 → 41   (36 dead hoists removed)   coverage 31/41 = 76%
+cc-2.1.89  : worklist 26800 → 3845 (22955 dead hoists, -86%)  one bundle, fresh
+```
+
+The agent does **not** mechanically rename dead code to reach 100%; a wrong name is worse
+than an honest exclusion — and the def-use pass even retired 13 names earlier rounds had
+applied to bindings it proved dead.
 
 The names land in the regenerated output and propagate to every call site, e.g. module
 1079 now reads:

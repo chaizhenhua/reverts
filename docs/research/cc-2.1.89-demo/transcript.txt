@@ -1,0 +1,31 @@
+
+==== 0. the input: one 13 MB minified line ====
+-rwxr-xr-x 1 chaizhenhua chaizhenhua 13081065 Oct 26  1985 /home/chaizhenhua/Codes/reverts/cc-2.1.89/package/cli.js
+#!/usr/bin/env node
+// (c) Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.
+
+// Version: 2.1.89
+
+// Want to see the unminifie …
+
+==== 1. collect — auto-unpack detects node-bundle, runs the collector ====
+kind: node-bundle | skill: node-bundle-collector | dispatch ok: True
+
+==== 2. import — bundle facts into Reverts SQLite ====
+imported unpacked target as project 1 into /tmp/cc89-demo/project.sqlite: 1 source file(s), 0 module(s), 0 module edge(s), 0 asset(s), 0 native asset(s), 0 deferred source asset(s), 1 bundle source file(s), 0 package attribution(s)
+
+==== 3. generate — split the bundle into readable TypeScript modules ====
+warning: generated project carries 2 audit warning(s):
+Warning UnreachableFunctionCode: function body contains unreachable code at bytes 24388..24394 module=369
+Warning MissingRequiredAsset: source references an asset that is absent from project_assets module=2921 binding=vendor/ripgrep/x64-linux/rg
+TypeScript modules: 2883
+
+==== 4. compile — tsc on the recovered project ====
+tsc: 0 errors
+
+==== 5. run — the decompiled code IS Claude Code ====
+$ node dist/cli.js --version
+2.1.89 (Claude Code)
+$ node dist/cli.js -p 'say hi'
+Hi! How can I help you today?
+[>4m[<u
