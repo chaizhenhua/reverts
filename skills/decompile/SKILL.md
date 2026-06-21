@@ -188,11 +188,21 @@ naming.
    `--evidence` so `origin=agent` names clear the naming gate on the first try;
    the worklist's `evidence_tokens` are the raw material for that evidence.
 
-6. **Regenerate and re-measure; loop until the tier target is met.**
-   `generate-project-v2` applies accepted names (a binding rename keeps the
-   public export alias, so renaming an island entry binding never breaks its
-   importers), then return to step 3. Advance to the next tier only after the
-   current one reaches 100%.
+6. **Name the module files, not just the symbols.** Readability also means the
+   emitted file paths. Accept a semantic path per module
+   (`module-names --accept <MODULE_ID=path> --apply`, stored as a
+   `module_path_overrides` row); `generate-project-v2` then moves the module's
+   file to that path and recomputes every importing file's relative specifier.
+   Reference-source matching can also set these automatically when an upstream
+   tree exists. Wire/export names are untouched, so the build still links.
+
+7. **Regenerate and re-measure; loop until the tier target is met.**
+   `generate-project-v2` applies accepted names, then return to step 3. Two
+   readability properties hold by construction: an exported symbol's semantic
+   name propagates into every importing module (the consumer reads the semantic
+   name, with the wire/export name preserved as an alias), and a renamed island
+   entry binding keeps its public export alias so `cli`/importers never break.
+   Advance to the next tier only after the current one reaches 100%.
 
 This ordering is what makes the [Phase 4](#phase-4-completion-gate) coverage gate
 *achievable* rather than aspirational: deterministic mechanisms cover the bulk,
