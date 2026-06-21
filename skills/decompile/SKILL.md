@@ -130,7 +130,8 @@ Repeat:
 | `mechanical_semantic_name > 0` (symbol/global-level) | mechanical fix agents |
 | `package_attribution_unverified > 0` | package attribution correction + verification agents |
 | `non_existent_package > 0` | package reclassification agents |
-| `public_surface` ratio < 100% | symbol naming agents for modules with unnamed public-surface symbols |
+| `public_surface` ratio < 100% **and** an upstream first-party source tree is available and not yet applied | deterministic auto-name first (see [Naming to target](#naming-to-target-mechanism-first-coverage) step 2) |
+| `public_surface` ratio < 100% | symbol naming agents for the residue, routing accepts by `rename_channel` (see [Naming to target](#naming-to-target-mechanism-first-coverage)) |
 | path organization not reviewed | path organization agents |
 | otherwise | proceed to output |
 
@@ -143,6 +144,60 @@ Status: public_surface={named}/{total} ({pct}%) | {unnamed} unnamed | {incomplet
 ```
 
 The `public_surface` field (from `decompile_status`) tracks public-surface symbol naming progress and must reach 100% before output generation.
+
+## Naming to target: mechanism-first coverage
+
+The coverage gate is a *result*, not a wish. Reach it by spending the cheapest,
+highest-confidence mechanism first and falling back to agent naming only for the
+residue. Run these in order every time; do not jump straight to per-module agent
+naming.
+
+1. **Refine the denominator before measuring.** Classify modules so the ratio
+   targets the true first-party surface, not package or runtime-glue code
+   (`module-classify --auto --apply`; MCP: `update_modules` category edits). An
+   inflated denominator makes 100% unreachable; a silently deflated one fakes it.
+   Re-confirm denominator integrity per the [Phase 4 rules](#p0--naming-denominator-integrity-no-silent-exclusion)
+   — the entry-island group must be present and counted.
+
+2. **Auto-name deterministically when an upstream first-party source tree is
+   available.** A historical/published source tree for the same app names
+   modules, exports, AND bindings — including the entry island — by structural
+   match, auto-accepting only high/medium-tier hits with recorded evidence
+   (`reference-source-names --reference-source-root <dir> --reference-version
+   <ver> --apply [--min-tier high|medium]`). This is the largest coverage lever
+   and the accepted names pass the naming gate by construction. Run it BEFORE
+   spending any agent budget. It is precision-gated, so it never invents names;
+   absence of a reference tree just means you skip to step 4.
+
+3. **Measure honestly, reusing the just-emitted index.** `naming-progress --json
+   --symbol-index <out>/symbol-index.json` (and `naming-plan` likewise) avoids a
+   re-emit each loop iteration. Read the per-tier `named/total` and the per-file
+   groups; verify the entry-island group (null `module_id`,
+   `rename_channel: "binding-names"`) is counted.
+
+4. **Plan the residue per tier.** `naming-plan --target-level <tier>
+   --symbol-index <out>/symbol-index.json` emits the unnamed worklist grouped by
+   file, each target carrying `evidence_tokens` and a `rename_channel`. Work the
+   tiers in goal order: `public-surface` → `declarations` → `full`.
+
+5. **Agent-name the residue, routing accepts by `rename_channel`.** Module
+   bindings accept through the module/symbol channel
+   (`symbol-names --batch --apply`, keyed by `module_id`); module-less
+   entry-island bindings accept through the file-path channel
+   (`binding-names --batch --apply`, keyed by `file_path`). Always pass
+   `--evidence` so `origin=agent` names clear the naming gate on the first try;
+   the worklist's `evidence_tokens` are the raw material for that evidence.
+
+6. **Regenerate and re-measure; loop until the tier target is met.**
+   `generate-project-v2` applies accepted names (a binding rename keeps the
+   public export alias, so renaming an island entry binding never breaks its
+   importers), then return to step 3. Advance to the next tier only after the
+   current one reaches 100%.
+
+This ordering is what makes the [Phase 4](#phase-4-completion-gate) coverage gate
+*achievable* rather than aspirational: deterministic mechanisms cover the bulk,
+agent naming closes the precise remainder, and both naming channels keep the
+entry island in scope.
 
 ## Phase 1: Setup
 
@@ -278,6 +333,10 @@ Use severity tiers instead of demanding cosmetic perfection.
 Public surface = exported symbols + owned globals + module semantic names.
 Check with `decompile_status`: the `public_surface` field tracks public-surface naming progress
 (e.g. `public_surface=2395/5609 (42.7%)`). This ratio must reach **100%** before proceeding to output.
+
+Reaching it is the job of the [Naming to target](#naming-to-target-mechanism-first-coverage)
+loop — drive the metric with deterministic auto-naming first, then agent naming
+for the residue. The gate below only *checks* the result; it does not produce it.
 
 ### P0 — must be zero (hard gate, blocks output)
 
