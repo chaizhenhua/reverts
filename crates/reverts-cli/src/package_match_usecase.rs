@@ -151,6 +151,12 @@ pub(crate) fn match_packages_from_connection(
         package_source_load_scope(&rows, &requested_package_names, &mut source_import_audit)
     };
     let package_filter = (!args.package_names.is_empty()).then_some(&package_names);
+    // Snapshot the prepared rows BEFORE revalidation strips package attributions:
+    // the island model must rebuild from rows that still pass `from_rows`
+    // validation (every package module keeps its attribution). The eager
+    // preludes the island anchoring needs do not depend on attributions or
+    // resolved versions, so this pre-mutation snapshot is the right input.
+    let island_rows = rows.clone();
     remove_package_attributions_for_revalidation(&mut rows, &package_names);
     let loaded_package_sources = load_package_sources_with_fingerprint_stats(
         connection,
@@ -163,6 +169,10 @@ pub(crate) fn match_packages_from_connection(
     )?;
     let fingerprint_cache = loaded_package_sources.fingerprint_cache;
     let island_corpus = loaded_package_sources.island_corpus;
+    eprintln!(
+        "match-packages: island corpus has {} no-module library source(s)",
+        island_corpus.len()
+    );
     let mut package_sources = loaded_package_sources.sources;
     mark_timing!("load_package_sources");
     let package_versions_before_resolution = package_versions_by_module(&rows);
@@ -184,7 +194,7 @@ pub(crate) fn match_packages_from_connection(
     // island. They never become model modules, so the per-module pipeline above
     // never sees them; this anchors them per-binding against the same package
     // corpus. Skipped when there is no corpus to match against.
-    let island_anchors = compute_island_anchors(&rows, &island_corpus);
+    let island_anchors = compute_island_anchors(island_rows, &island_corpus);
     if !island_anchors.is_empty() {
         eprintln!(
             "match-packages: anchored {} eager entry-island binding(s) to packages",
@@ -299,23 +309,31 @@ pub(crate) fn match_packages_from_connection(
 /// With no corpus there is nothing to match against, so the (non-trivial) model
 /// rebuild is skipped.
 fn compute_island_anchors(
-    rows: &InputRows,
+    rows: InputRows,
     package_sources: &[PackageSource],
 ) -> Vec<IslandPackageAnchor> {
     if package_sources.is_empty() {
         return Vec::new();
     }
-    let Ok(input) = InputBundle::from_rows(rows.clone()) else {
-        return Vec::new();
+    let input = match InputBundle::from_rows(rows) {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!(
+                "match-packages: island anchoring skipped — could not rebuild program model: {error}"
+            );
+            return Vec::new();
+        }
     };
     let model = ProgramModel::from_input(input);
 
     let mut anchors = Vec::new();
+    let mut total_bindings = 0_usize;
     for (source_file_id, prelude) in model.graph().runtime_preludes() {
         let binding_sources = prelude_binding_sources(prelude);
         if binding_sources.is_empty() {
             continue;
         }
+        total_bindings += binding_sources.len();
         for anchor in anchor_prelude_bindings(&binding_sources, package_sources) {
             anchors.push(IslandPackageAnchor {
                 source_file_id: *source_file_id,
@@ -333,5 +351,10 @@ fn compute_island_anchors(
             });
         }
     }
+    eprintln!(
+        "match-packages: island anchoring scanned {total_bindings} eager binding(s) against {} library source(s) -> {} anchor(s)",
+        package_sources.len(),
+        anchors.len()
+    );
     anchors
 }
