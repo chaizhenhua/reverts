@@ -15,6 +15,7 @@ mod export_completion;
 mod external_package_adapter_emit;
 mod identifiers;
 mod import_coalesce;
+mod localize_written_imports;
 mod module_planning_context;
 mod package_runtime;
 mod package_runtime_accumulator;

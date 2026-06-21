@@ -77,6 +77,10 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     // cross-module bindings) by re-exporting from the module's externalized
     // package or exporting a locally-defined binding.
     crate::export_completion::complete_cross_module_exports(&mut state.plan);
+    // Correctness: after every import-completion pass has settled the final
+    // import set, ensure no file imports a binding it reassigns (ESM imports are
+    // read-only). Re-home each such binding to its writer as a local `var`.
+    crate::localize_written_imports::localize_written_imports(&mut state.plan);
     // Several late passes (CommonJS lowering, scope-hoisted export emission,
     // cross-module reconciliation) append `export { … }` statements into an
     // already-finalised single body chunk, which the per-chunk coalescer can no
