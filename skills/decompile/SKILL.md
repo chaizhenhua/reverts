@@ -197,11 +197,16 @@ naming.
    tree exists. Wire/export names are untouched, so the build still links.
 
 7. **Regenerate and re-measure; loop until the tier target is met.**
-   `generate-project-v2` applies accepted names, then return to step 3. Two
-   readability properties hold by construction: an exported symbol's semantic
-   name propagates into every importing module (the consumer reads the semantic
-   name, with the wire/export name preserved as an alias), and a renamed island
-   entry binding keeps its public export alias so `cli`/importers never break.
+   `generate-project-v2` applies accepted names, then return to step 3.
+   Export-name readability holds by construction: an exported symbol's semantic
+   name propagates into every importing module, so consumers read the semantic
+   name. For a binding whose semantic name is provably safe to expose
+   project-wide — defining module not namespace-imported or re-exported, name
+   globally unique — the public import/export *wire* name is renamed too, so the
+   emitted module surface reads `export { parseDocument }` /
+   `import { parseDocument }` with no minified alias. Bindings that fail that
+   gate keep the wire alias (`export { parseDocument as Cb }`), and a renamed
+   island entry binding keeps its export alias so `cli`/importers never break.
    Advance to the next tier only after the current one reaches 100%.
 
 This ordering is what makes the [Phase 4](#phase-4-completion-gate) coverage gate
