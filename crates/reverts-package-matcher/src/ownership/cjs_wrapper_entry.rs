@@ -267,11 +267,33 @@ fn unique_anchor_full_coverage_hit(
     source: &str,
     members_by_package: &BTreeMap<(String, String), BTreeSet<String>>,
 ) -> Option<(String, String)> {
+    // A module that re-exports via esbuild's star helpers (`__exportStar` /
+    // `__reExport` / `__copyProps`) exposes MORE than its own `exports.X=`
+    // assignments capture — a barrel that assigns `{fromHttp}` but star-re-exports
+    // a dozen other providers must NOT externalize to credential-provider-http
+    // (consumers reading the star-re-exported members would get `undefined` from
+    // its namespace). The SUBSET path is only sound when no such star re-export
+    // hides exports, so disable it for those modules; the FULL-COVERAGE path stays
+    // valid regardless (it requires the module to assign the package's whole
+    // surface directly).
+    let has_star_reexport = source.contains("__exportStar")
+        || source.contains("__reExport")
+        || source.contains("__copyProps");
     let mut hit: Option<(String, String)> = None;
     for ((name, version), members) in members_by_package {
-        let full_coverage =
-            !members.is_empty() && members.iter().all(|member| assigned.contains(member));
-        if full_coverage && thunk_contains_package_name_anchor(source, name) {
+        if members.is_empty() {
+            continue;
+        }
+        // FULL COVERAGE: the thunk assigns the package's entire public surface
+        // (identity by exhaustive assignment). SUBSET: every member the thunk
+        // exports is a public member of the package (so the namespace passthrough
+        // re-provides all of them) — sound for a split sub-module, but only when
+        // no star re-export hides additional exports.
+        let full_coverage = members.iter().all(|member| assigned.contains(member));
+        let subset_all_public =
+            !has_star_reexport && assigned.iter().all(|member| members.contains(member));
+        if (full_coverage || subset_all_public) && thunk_contains_package_name_anchor(source, name)
+        {
             if hit.is_some() {
                 return None;
             }

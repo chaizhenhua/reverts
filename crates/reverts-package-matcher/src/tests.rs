@@ -550,6 +550,54 @@ fn cjs_wrapper_entry_anchor_path_skips_unattributed_without_anchor() {
     assert!(report.attributions.is_empty());
 }
 
+#[test]
+fn cjs_wrapper_entry_subset_export_with_anchor_externalizes_split_submodule() {
+    // A split package's sub-module assigns only PART of the package's public
+    // surface ({alpha,beta} ⊆ {alpha,beta,gamma,delta}) and names the package.
+    // Every member it exports is a public member, so the namespace passthrough
+    // re-provides them all — externalize it (the aggregate/split case, e.g.
+    // @aws-sdk/core's protocol sub-modules). The ≥4 floor does NOT apply (2
+    // members), so this relies on the subset + anchor identity.
+    let module_source =
+        "var entry=cjs((ex)=>{ex.alpha=function(){};ex.beta=function(){};var z=\"pkg helper\";});";
+    let (rows, mut report) = unattributed_anonymous_bundle(module_source);
+    let package_sources = package_sources_with_public_surface();
+
+    cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+        &rows,
+        &package_sources,
+        &mut report,
+    );
+
+    assert_eq!(report.matches.len(), 1, "{:?}", report.matches);
+    assert!(report.matches[0].external_importable);
+    assert_eq!(report.matches[0].package_name, "pkg");
+}
+
+#[test]
+fn cjs_wrapper_entry_subset_with_star_reexport_stays_inlined() {
+    // A barrel assigns one public member directly ({alpha}) but STAR-re-exports
+    // other sub-modules (`__exportStar`), so its true exported surface is larger
+    // than its `exports.X=` assignments capture. Externalizing it would lose the
+    // star-re-exported members (consumers reading them get `undefined` from the
+    // namespace), so the subset path must NOT fire.
+    let module_source = "var entry=cjs((ex)=>{ex.alpha=function(){};__exportStar(other(),ex);var z=\"pkg helper\";});";
+    let (rows, mut report) = unattributed_anonymous_bundle(module_source);
+    let package_sources = package_sources_with_public_surface();
+
+    cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+        &rows,
+        &package_sources,
+        &mut report,
+    );
+
+    assert!(
+        report.matches.is_empty(),
+        "star-re-export barrel must not externalize via the subset path: {:?}",
+        report.matches
+    );
+}
+
 /// A package whose bare specifier (`pkg`) resolves — through a re-export stub —
 /// to a public surface of `alpha`/`beta`/`gamma`/`delta`, modelling how a real
 /// npm package (e.g. react's `index.js` → `cjs/react.development.js`) exposes
