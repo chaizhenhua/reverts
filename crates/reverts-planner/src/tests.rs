@@ -4233,6 +4233,56 @@ fn cross_module_eager_safe_analysis_delazifies_exported_thunk_and_rewrites_consu
 }
 
 #[test]
+fn imported_binding_semantic_name_propagates_as_all_scope_readability_rename() {
+    // When a defining module has an accepted semantic name for an exported
+    // binding, an importing file must receive an all-scope readability rename
+    // for that binding. The emitter then renames only the import's local
+    // identifier (keeping the wire/export name), so the consumer reads the
+    // semantic name in its body and import clause while the cross-module
+    // contract stays intact. A binding with no semantic name is left untouched.
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::application(
+        ModuleId(1),
+        "producer",
+        "modules/producer.ts",
+    ));
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let mut semantic_names = reverts_model::SemanticNameMap::default();
+    semantic_names.insert_binding(ModuleId(1), "Cb", "parseDocument");
+    let program = reverts_model::EnrichedProgram::new(
+        model,
+        semantic_names,
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+
+    // Imported binding WITH a semantic name in its defining module -> rename.
+    let mut consumer = PlannedFile::new("modules/consumer.ts");
+    super::propagate_imported_binding_semantic_name(
+        &program,
+        ModuleId(1),
+        &BindingName::new("Cb"),
+        &mut consumer,
+    );
+    assert_eq!(consumer.readability_renames.len(), 1);
+    let rename = &consumer.readability_renames[0];
+    assert_eq!(rename.original.as_str(), "Cb");
+    assert_eq!(rename.renamed.as_str(), "parseDocument");
+    assert_eq!(rename.scope, super::PlannedRenameScope::All);
+
+    // Imported binding WITHOUT a semantic name -> no rename, nothing to propagate.
+    let mut other = PlannedFile::new("modules/other.ts");
+    super::propagate_imported_binding_semantic_name(
+        &program,
+        ModuleId(1),
+        &BindingName::new("Untouched"),
+        &mut other,
+    );
+    assert!(other.readability_renames.is_empty());
+}
+
+#[test]
 fn cross_module_eager_safe_analysis_keeps_lazy_when_consumer_uses_thunk_as_value() {
     let planner = ImportExportPlanner;
     // Same shape as above, but the consumer passes the thunk as a

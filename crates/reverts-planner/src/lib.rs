@@ -270,6 +270,34 @@ pub fn finalize_planned_file(file: &mut PlannedFile) {
 /// solver, and `known_members` are attached only for `NamespaceObject`
 /// (paper #7 downstream). Sites that synthesise runtime helpers bypass
 /// this and use `PlannedBinding::new` directly with their known shape.
+/// Propagate a defining module's accepted semantic name for `binding` into an
+/// importing `file`, so the consumer reads the readable name in its body and
+/// import clause instead of the minified original.
+///
+/// Added as an all-scope readability rename. The emitter renames only the
+/// import's LOCAL identifier (never the `imported`/wire name), so the emitted
+/// import becomes `import { <original> as <semantic> }` — the cross-module
+/// export contract is preserved while the consumer reads cleanly. Aliased
+/// imports (local already differs from the export name) simply don't match and
+/// are left untouched, and the emitter skips any rename that would collide.
+pub(crate) fn propagate_imported_binding_semantic_name(
+    program: &EnrichedProgram,
+    defining_module: ModuleId,
+    binding: &BindingName,
+    file: &mut PlannedFile,
+) {
+    if let Some(semantic) = program
+        .semantic_names()
+        .binding_name(defining_module, binding.as_str())
+        && semantic != binding
+    {
+        file.add_readability_rename(PlannedRename::new_all_scopes(
+            binding.clone(),
+            semantic.clone(),
+        ));
+    }
+}
+
 pub(crate) fn plan_binding_from_program(
     program: &EnrichedProgram,
     module_id: ModuleId,
@@ -816,6 +844,12 @@ pub(crate) fn emit_source_module_imports(args: SourceModuleImportEmitArgs<'_>) -
             ));
             for binding in effective_bindings {
                 planned_bindings.insert(binding.clone());
+                propagate_imported_binding_semantic_name(
+                    program,
+                    effective_target_module_id,
+                    &binding,
+                    file,
+                );
                 file.add_binding(plan_binding_from_program(
                     program,
                     module_id,
@@ -2741,6 +2775,7 @@ pub(crate) fn emit_direct_owner_imports(
         file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
         for binding in bindings {
             planned_bindings.insert(binding.clone());
+            propagate_imported_binding_semantic_name(program, *owner_module, &binding, file);
             file.add_binding(plan_binding_from_program(
                 program,
                 module_id,
