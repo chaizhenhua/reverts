@@ -470,6 +470,86 @@ fn cjs_wrapper_entry_thunk_small_surface_without_anchor_stays_inlined() {
     assert!(report.attributions.is_empty());
 }
 
+/// Build rows holding one anonymous esbuild bundle module with NO package match
+/// (a fingerprint-recall miss), to exercise the anchor-driven externalization
+/// path that does not depend on a prior attribution.
+fn unattributed_anonymous_bundle(module_source: &str) -> (InputRows, VersionedPackageMatchReport) {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "bundle.js",
+        Some(module_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(
+            ModuleId(20),
+            "20-esbuild-anon",
+            "modules/20-esbuild-anon.ts",
+        )
+        .with_source_file(1),
+    );
+    let report = VersionedPackageMatchReport {
+        attributions: Vec::new(),
+        surfaces: Vec::new(),
+        matches: Vec::new(),
+        version_matches: Vec::new(),
+        audit: reverts_observe::AuditReport::default(),
+    };
+    (rows, report)
+}
+
+#[test]
+fn cjs_wrapper_entry_anchor_externalizes_unattributed_recall_miss() {
+    // Fingerprint recall missed this thunk (no PackageMatch exists), but it
+    // assigns the package's FULL public surface AND embeds the package name as a
+    // string literal — a stronger identity than the missed fingerprint. The
+    // anchor-driven path creates the attribution and externalizes it (the
+    // @aws-sdk/credential-provider-ini `fromIni` recall miss in cc-2.1.89).
+    let module_source = "var entry=cjs((ex)=>{ex.fromThing=void 0;function impl(){return\"pkg - fromThing\"}ex.fromThing=impl;});";
+    let (rows, mut report) = unattributed_anonymous_bundle(module_source);
+    let package_sources = single_member_package_sources();
+
+    cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+        &rows,
+        &package_sources,
+        &mut report,
+    );
+
+    assert_eq!(
+        report.matches.len(),
+        1,
+        "anchor-driven path must create a match for the unattributed thunk: {:?}",
+        report.matches
+    );
+    assert!(report.matches[0].external_importable);
+    assert_eq!(report.matches[0].package_name, "pkg");
+    assert_eq!(report.attributions.len(), 1);
+}
+
+#[test]
+fn cjs_wrapper_entry_anchor_path_skips_unattributed_without_anchor() {
+    // Without the package-name string anchor, an unattributed thunk that merely
+    // assigns the member name is NOT externalized — the anchor is mandatory on
+    // the recall-miss path (no fingerprint backs it).
+    let module_source =
+        "var entry=cjs((ex)=>{ex.fromThing=void 0;function impl(){return 42}ex.fromThing=impl;});";
+    let (rows, mut report) = unattributed_anonymous_bundle(module_source);
+    let package_sources = single_member_package_sources();
+
+    cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+        &rows,
+        &package_sources,
+        &mut report,
+    );
+
+    assert!(
+        report.matches.is_empty(),
+        "no anchor ⇒ no anchor-driven externalization: {:?}",
+        report.matches
+    );
+    assert!(report.attributions.is_empty());
+}
+
 /// A package whose bare specifier (`pkg`) resolves — through a re-export stub —
 /// to a public surface of `alpha`/`beta`/`gamma`/`delta`, modelling how a real
 /// npm package (e.g. react's `index.js` → `cjs/react.development.js`) exposes

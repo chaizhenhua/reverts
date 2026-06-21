@@ -52,7 +52,7 @@ use crate::source::ast_export_helpers::object_expression_static_keys;
 
 use crate::pipeline::is_anonymous_bundle_package_candidate;
 use crate::{
-    PackageSource, VersionedPackageMatchReport, accepted_external_modules,
+    ModuleMatchStrategy, PackageSource, VersionedPackageMatchReport, accepted_external_modules,
     package_source_exported_members, package_source_public_export_proofs,
 };
 
@@ -122,7 +122,16 @@ pub(crate) fn promote_anonymous_cjs_wrapper_entry_thunks(
         .collect::<BTreeMap<_, _>>();
     let members_by_package = package_public_member_universe(package_sources);
 
-    let mut promotions = Vec::<(usize, ExternalImportPromotion)>::new();
+    // Path 1: re-evaluate every non-externalized MATCHED thunk. It externalizes
+    // to a package P when EITHER (A) it assigns ≥4 of P's public members where P
+    // is the package it was matched to (broad-surface identity, e.g. react), OR
+    // (B) it assigns the FULL public surface of some package and embeds that
+    // package's own name as a string literal — the anchor-driven identity, which
+    // does NOT depend on the (possibly wrong/rejected) fingerprint match, so it
+    // re-attributes a thunk the matcher mis-matched (e.g. cc-2.1.89's
+    // @aws-sdk/credential-provider-ini `fromIni` thunk, matched elsewhere).
+    let mut promotions = Vec::<(Option<usize>, ExternalImportPromotion)>::new();
+    let mut promoted_modules = BTreeSet::new();
     for (idx, package_match) in report.matches.iter().enumerate() {
         if package_match.external_importable || already_accepted.contains(&package_match.module_id)
         {
@@ -140,64 +149,136 @@ pub(crate) fn promote_anonymous_cjs_wrapper_entry_thunks(
         let Some(params) = esbuild_commonjs_entry_thunk_params(slice.source) else {
             continue;
         };
-        // Identity gate: the matched package's real public export names must be
-        // assigned onto the thunk's exports object. This rejects a thunk that
-        // merely function-matched the wrong package.
-        let Some(package_members) = members_by_package.get(&(
-            package_match.package_name.clone(),
-            package_match.package_version.clone(),
-        )) else {
+        let assigned = exports_assigned_members(slice.source, &params);
+        if assigned.is_empty() {
+            continue;
+        }
+        // Branch A — the matched package's own ≥4-member identity (broad surface).
+        let matched_pkg_target = members_by_package
+            .get(&(
+                package_match.package_name.clone(),
+                package_match.package_version.clone(),
+            ))
+            .filter(|members| {
+                members.intersection(&assigned).count() >= MIN_PUBLIC_MEMBER_ASSIGNMENTS
+            })
+            .map(|_| {
+                (
+                    package_match.package_name.clone(),
+                    package_match.package_version.clone(),
+                )
+            });
+        // Branch B — anchor-driven full-coverage identity against ANY package.
+        let Some((name, version)) = matched_pkg_target.or_else(|| {
+            unique_anchor_full_coverage_hit(&assigned, slice.source, &members_by_package)
+        }) else {
             continue;
         };
-        if package_members.is_empty() {
-            continue;
-        }
-        let assigned = exports_assigned_members(slice.source, &params);
-        let matched_members = package_members.intersection(&assigned).count();
-        // Identity is proven EITHER by assigning enough public members outright
-        // (the ≥4 floor, for packages with a broad surface like react), OR — for
-        // a SMALL-surface package whose entire public API is one or a few members
-        // (e.g. @aws-sdk/credential-provider-http exports only `fromHttp`) — by
-        // assigning its FULL public surface AND embedding the package's own name
-        // as a string literal in the body. Full coverage + the literal name is
-        // unspoofable: a thunk that merely function-collided with the wrong
-        // package would not assign EVERY one of that package's public members and
-        // ALSO carry its name as a string. A bare ≥1 count never suffices alone.
-        let full_public_surface = matched_members > 0 && matched_members == package_members.len();
-        let small_surface_identity = full_public_surface
-            && thunk_contains_package_name_anchor(slice.source, &package_match.package_name);
-        if matched_members < MIN_PUBLIC_MEMBER_ASSIGNMENTS && !small_surface_identity {
-            continue;
-        }
-
-        // Semantic-path proof (NOT an export-member proof): the thunk binding is
-        // the package's CommonJS thunk, not one of its public members, so the
-        // planner re-provides it as `function <thunk>() { return <ns>; }` (the
-        // CommonJsWrapper Callable branch), never `<ns>.<thunk>`. A semantic-path
-        // proof clears the planner's unproven-named-exports bail without
-        // populating the member-binding map.
-        let resolved_file = reverts_package::ExternalImportProofPath::semantic_path(&format!(
-            "{}@{}/index.js",
-            package_match.package_name, package_match.package_version,
-        ));
+        promoted_modules.insert(module.id);
         promotions.push((
-            idx,
-            ExternalImportPromotion {
-                module_id: module.id,
-                package_name: package_match.package_name.clone(),
-                package_version: package_match.package_version.clone(),
-                export_specifier: package_match.package_name.clone(),
-                resolved_file,
-                strategy: package_match.strategy,
-                function_signature_matches: package_match.function_signature_matches,
-                string_anchor_matches: package_match.string_anchor_matches,
-            },
+            Some(idx),
+            anchor_external_promotion(module.id, name, version),
         ));
     }
 
-    for (idx, promotion) in promotions {
-        apply_external_import_promotion(report, Some(idx), promotion);
+    // Path 2: anchor-driven externalization of UNMATCHED thunks (a fingerprint
+    // recall miss leaves no PackageMatch at all). Same anchor + full-coverage
+    // identity; emit a fresh attribution. The uniqueness guard inside
+    // `unique_anchor_full_coverage_hit` skips merged multi-provider barrels
+    // (which full-cover several packages and carry several names — not a single
+    // package, must stay source).
+    let matched_modules = report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+    for module in &rows.modules {
+        if matched_modules.contains(&module.id)
+            || promoted_modules.contains(&module.id)
+            || already_accepted.contains(&module.id)
+        {
+            continue;
+        }
+        if !is_anonymous_bundle_package_candidate(rows, module) {
+            continue;
+        }
+        let Some(slice) = rows.module_source_slice(module.id) else {
+            continue;
+        };
+        if !members_by_package
+            .keys()
+            .any(|(name, _)| slice.source.contains(name.as_str()))
+        {
+            continue;
+        }
+        let Some(params) = esbuild_commonjs_entry_thunk_params(slice.source) else {
+            continue;
+        };
+        let assigned = exports_assigned_members(slice.source, &params);
+        if assigned.is_empty() {
+            continue;
+        }
+        let Some((name, version)) =
+            unique_anchor_full_coverage_hit(&assigned, slice.source, &members_by_package)
+        else {
+            continue;
+        };
+        promotions.push((None, anchor_external_promotion(module.id, name, version)));
     }
+
+    for (match_index, promotion) in promotions {
+        apply_external_import_promotion(report, match_index, promotion);
+    }
+}
+
+/// Build the externalization promotion for a recognized package-entry thunk. The
+/// proof is a SEMANTIC-PATH proof (not an export-member proof): the thunk binding
+/// is the package's CommonJS thunk, not one of its public members, so the planner
+/// re-provides it as `function <thunk>() { return <ns>; }` (the CommonJsWrapper
+/// Callable branch), never `<ns>.<thunk>`.
+fn anchor_external_promotion(
+    module_id: reverts_ir::ModuleId,
+    package_name: String,
+    package_version: String,
+) -> ExternalImportPromotion {
+    let resolved_file = reverts_package::ExternalImportProofPath::semantic_path(&format!(
+        "{package_name}@{package_version}/index.js"
+    ));
+    ExternalImportPromotion {
+        module_id,
+        export_specifier: package_name.clone(),
+        package_name,
+        package_version,
+        resolved_file,
+        strategy: ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors,
+        function_signature_matches: 0,
+        string_anchor_matches: 1,
+    }
+}
+
+/// The UNIQUE package whose FULL public surface `assigned` covers and whose name
+/// the thunk `source` anchors as a string literal. `None` if there is no hit or
+/// more than one (a merged barrel covering several packages). Full coverage + the
+/// literal name is an identity stronger than the fingerprint match, so it can
+/// attribute on its own — a coincidental thunk would not assign EVERY public
+/// member of, and also embed the literal name of, the package it collided with.
+fn unique_anchor_full_coverage_hit(
+    assigned: &BTreeSet<String>,
+    source: &str,
+    members_by_package: &BTreeMap<(String, String), BTreeSet<String>>,
+) -> Option<(String, String)> {
+    let mut hit: Option<(String, String)> = None;
+    for ((name, version), members) in members_by_package {
+        let full_coverage =
+            !members.is_empty() && members.iter().all(|member| assigned.contains(member));
+        if full_coverage && thunk_contains_package_name_anchor(source, name) {
+            if hit.is_some() {
+                return None;
+            }
+            hit = Some((name.clone(), version.clone()));
+        }
+    }
+    hit
 }
 
 /// The two factory parameters of an esbuild `__commonJS` wrapper:
