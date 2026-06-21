@@ -708,6 +708,7 @@ pub enum CliRunError {
     IdentifierInventory(String),
     GenerateProject(String),
     BindingNames(String),
+    ModuleNames(String),
     ReferenceSourceNames(String),
     AuditRejected(String),
     UnsafeOutputPath(PathBuf),
@@ -735,6 +736,7 @@ impl fmt::Display for CliRunError {
             }
             Self::GenerateProject(message) => write!(formatter, "generate-project-v2: {message}"),
             Self::BindingNames(message) => write!(formatter, "binding-names: {message}"),
+            Self::ModuleNames(message) => write!(formatter, "module-names: {message}"),
             Self::ReferenceSourceNames(message) => {
                 write!(formatter, "reference-source-names: {message}")
             }
@@ -782,6 +784,7 @@ impl Error for CliRunError {
             | Self::CoverageLedger(_)
             | Self::GenerateProject(_)
             | Self::BindingNames(_)
+            | Self::ModuleNames(_)
             | Self::ReferenceSourceNames(_)
             | Self::IdentifierInventory(_) => None,
         }

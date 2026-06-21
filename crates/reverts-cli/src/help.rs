@@ -26,6 +26,7 @@ pub enum HelpTopic {
     NamingProgress,
     NamingPlan,
     ModuleClassify,
+    ModuleNames,
     MatchModulesRecall,
 }
 
@@ -57,6 +58,7 @@ pub const SYMBOL_NAMES_COMMAND: &str = "symbol-names";
 pub const NAMING_PROGRESS_COMMAND: &str = "naming-progress";
 pub const NAMING_PLAN_COMMAND: &str = "naming-plan";
 pub const MODULE_CLASSIFY_COMMAND: &str = "module-classify";
+pub const MODULE_NAMES_COMMAND: &str = "module-names";
 pub const MATCH_MODULES_RECALL_COMMAND: &str = "match-modules-recall";
 
 pub const COMMAND_SPECS: &[CommandSpec] = &[
@@ -166,6 +168,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         summary: "Classify modules (application/third-party/runtime-glue) to refine the naming denominator",
     },
     CommandSpec {
+        name: MODULE_NAMES_COMMAND,
+        topic: HelpTopic::ModuleNames,
+        summary: "Accept semantic file paths for first-party modules (renames emitted files)",
+    },
+    CommandSpec {
         name: MATCH_MODULES_RECALL_COMMAND,
         topic: HelpTopic::MatchModulesRecall,
         summary: "Measure cross-project module match recall against a ground-truth project",
@@ -254,6 +261,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         }
         HelpTopic::ModuleClassify => {
             "reverts-cli module-classify\n\nUSAGE:\n    reverts-cli module-classify --input <DB> --project-id <ID> [--auto] [--batch <TSV>] [--list] [--apply]\n\nOPTIONS:\n    --input <DB>        SQLite input database\n    --project-id <ID>   Positive project id\n    --auto              Classify vendored node_modules paths as third-party (deterministic)\n    --batch <TSV>       Agent verdicts: MODULE_ID<TAB>CLASSIFICATION[<TAB>EVIDENCE]\n    --list              List recorded classifications\n    --apply             Persist (otherwise dry-run)\n\nCLASSIFICATIONS:\n    application | third-party-library | runtime-glue\n\nNOTE: classification only refines the naming denominator; it never emits a bare import. Real externalization stays with the fingerprint matcher."
+        }
+        HelpTopic::ModuleNames => {
+            "reverts-cli module-names\n\nUSAGE:\n    reverts-cli module-names --input <DB> --project-id <ID> (--list | --accept <MODULE_ID=SEMANTIC_PATH>... | --batch <TSV>) [--origin <SOURCE>] [--evidence <TEXT>] [--apply]\n\nOPTIONS:\n    --input <DB>        SQLite input database\n    --project-id <ID>   Positive project id\n    --list              List accepted module path overrides\n    --accept <SPEC>     Accept one module file path; format MODULE_ID=SEMANTIC_PATH (e.g. 247=feature/markdown-renderer)\n    --batch <TSV>       TSV rows: accept<TAB>MODULE_ID<TAB>SEMANTIC_PATH<TAB>[EVIDENCE]\n    --origin <SOURCE>   Name source label, default: agent\n    --evidence <TEXT>   Evidence for paths from automated origins\n    --apply             Persist changes; without it, dry-run validation only\n\nAccepted paths are stored as module_path_overrides and consumed by\ngenerate-project-v2: each module's emitted file moves to the semantic path and\nevery importing file's relative specifier is recomputed. The wire/export names\nare untouched, so the build still links."
         }
         HelpTopic::MatchModulesRecall => {
             "reverts-cli match-modules-recall\n\nUSAGE:\n    reverts-cli match-modules-recall --input <DB> --ground-truth-project-id <ID> --subject-project-id <ID> [--threshold-percent <N>] [--metric jaccard|overlap] [--category <NAME> ...] [--limit <N>]\n\nOPTIONS:\n    --input <DB>                      SQLite input database (opened read-only)\n    --ground-truth-project-id <ID>    Project whose semantic_names are treated as truth\n    --subject-project-id <ID>         Project whose modules are being matched\n    --threshold-percent <N>           Similarity threshold for a (ref, subject) pair to count (default 70)\n    --metric <NAME>                   jaccard (default, principled) or overlap (more forgiving subset rule)\n    --category <NAME>                 Restrict to this module_category (e.g. application, package); repeatable\n    --limit <N>                       Cap modules per project for fast iteration\n\nDIAGNOSTIC:\n    Reports recall under each available matching strategy:\n      baseline / semantic_name exact   exact equality on the existing semantic_name field\n      multi_axis_<metric>              per-axis function-fingerprint similarity (Ast, Cfg, anchors, ...) combined by max\n    Writes nothing to the database."

@@ -32,6 +32,7 @@ pub use commands::module_classify::{
     ModuleClassification, ModuleClassificationRow, ModuleClassifyOutcome,
     excluded_module_ids_from_sqlite, module_classify_from_sqlite,
 };
+pub use commands::module_names::{ModuleNamesArgs, module_names_from_sqlite};
 pub use commands::naming_plan::naming_plan_json;
 pub use commands::naming_progress::{
     ModuleNamingProgress, NamingProgressReport, Tier, TierBreakdown, TierCoverage,
@@ -127,6 +128,7 @@ pub enum CliCommand {
     NamingProgress(NamingProgressArgs),
     NamingPlan(NamingPlanArgs),
     ModuleClassify(ModuleClassifyArgs),
+    ModuleNames(ModuleNamesArgs),
     MatchModulesRecall(MatchModulesRecallArgs),
 }
 
@@ -232,6 +234,8 @@ enum ClapCommand {
     NamingPlan(NamingPlanArgs),
     #[command(name = "module-classify", disable_help_flag = true)]
     ModuleClassify(ModuleClassifyArgs),
+    #[command(name = "module-names", disable_help_flag = true)]
+    ModuleNames(ModuleNamesArgs),
     #[command(name = "match-modules-recall", disable_help_flag = true)]
     MatchModulesRecall(MatchModulesRecallArgs),
 }
@@ -278,6 +282,9 @@ impl ClapCli {
             Some(ClapCommand::NamingProgress(args)) => CliCommand::NamingProgress(args),
             Some(ClapCommand::NamingPlan(args)) => CliCommand::NamingPlan(args),
             Some(ClapCommand::ModuleClassify(args)) => CliCommand::ModuleClassify(args),
+            Some(ClapCommand::ModuleNames(args)) => {
+                CliCommand::ModuleNames(commands::module_names::validate_args(args)?)
+            }
             Some(ClapCommand::MatchModulesRecall(args)) => CliCommand::MatchModulesRecall(args),
             None => CliCommand::Help(HelpTopic::TopLevel),
         })
@@ -417,6 +424,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::NamingProgress(args) => commands::naming_progress::run(args),
         CliCommand::NamingPlan(args) => commands::naming_plan::run(args),
         CliCommand::ModuleClassify(args) => commands::module_classify::run(args),
+        CliCommand::ModuleNames(args) => commands::module_names::run(args),
         CliCommand::MatchModulesRecall(args) => commands::match_modules::run(args),
     }
 }
