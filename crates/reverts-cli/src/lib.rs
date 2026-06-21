@@ -58,8 +58,9 @@ pub(crate) use package_source_workflow::{
     clean_package_entry_path, enrich_package_modules_from_source_units,
     filter_package_sources_to_referenced_package_versions, load_package_sources,
     load_package_sources_with_fingerprint_stats, package_export_specifier,
-    package_module_source_quality_counts, package_names_from_reference_source_roots,
-    package_source_load_scope, remove_package_attributions_for_revalidation,
+    package_module_source_quality_counts, package_names_and_versions_from_reference_source_roots,
+    package_names_from_reference_source_roots, package_source_load_scope,
+    remove_package_attributions_for_revalidation,
 };
 #[cfg(test)]
 pub(crate) use package_source_workflow::{

@@ -51,6 +51,13 @@ pub(crate) struct PackageModuleSourceQualityCounts {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct LoadedPackageSources {
     pub(crate) sources: Vec<PackageSource>,
+    /// Sources for packages with NO bundle module — the libraries a bundler
+    /// inlined into the eager entry island. Captured before the module-relevance
+    /// filters strip them (those filters keep only sources some module
+    /// references, which by definition excludes inlined libraries). The island
+    /// anchoring pass matches against this corpus; the per-module matcher does
+    /// not see it.
+    pub(crate) island_corpus: Vec<PackageSource>,
     pub(crate) fingerprint_cache: FingerprintCacheStats,
 }
 
@@ -323,16 +330,35 @@ pub(crate) fn package_names_from_reference_source_roots(
     roots: &[PathBuf],
     audit: &mut AuditReport,
 ) -> Result<BTreeSet<String>, MatchPackagesError> {
+    Ok(package_names_and_versions_from_reference_source_roots(roots, audit)?.0)
+}
+
+/// Like [`package_names_from_reference_source_roots`], but also returns the
+/// `package.json` version specifier for each discovered dependency name (when
+/// present). Inlined third-party libraries leave no bundle module — and thus no
+/// version hint — so the reference manifest is the only place their version can
+/// come from for materialization.
+pub(crate) fn package_names_and_versions_from_reference_source_roots(
+    roots: &[PathBuf],
+    audit: &mut AuditReport,
+) -> Result<(BTreeSet<String>, BTreeMap<String, String>), MatchPackagesError> {
     let mut package_names = BTreeSet::new();
+    let mut package_versions = BTreeMap::new();
     for root in roots {
-        collect_reference_package_names(root.as_path(), &mut package_names, audit)?;
+        collect_reference_package_names(
+            root.as_path(),
+            &mut package_names,
+            &mut package_versions,
+            audit,
+        )?;
     }
-    Ok(package_names)
+    Ok((package_names, package_versions))
 }
 
 fn collect_reference_package_names(
     path: &Path,
     package_names: &mut BTreeSet<String>,
+    package_versions: &mut BTreeMap<String, String>,
     audit: &mut AuditReport,
 ) -> Result<(), MatchPackagesError> {
     let metadata =
@@ -341,7 +367,7 @@ fn collect_reference_package_names(
             source,
         })?;
     if metadata.is_file() {
-        collect_reference_package_names_from_file(path, package_names, audit)?;
+        collect_reference_package_names_from_file(path, package_names, package_versions, audit)?;
         return Ok(());
     }
     if !metadata.is_dir() {
@@ -362,7 +388,12 @@ fn collect_reference_package_names(
         if should_skip_reference_dir(entry_path.as_path()) {
             continue;
         }
-        collect_reference_package_names(entry_path.as_path(), package_names, audit)?;
+        collect_reference_package_names(
+            entry_path.as_path(),
+            package_names,
+            package_versions,
+            audit,
+        )?;
     }
     Ok(())
 }
@@ -370,10 +401,16 @@ fn collect_reference_package_names(
 fn collect_reference_package_names_from_file(
     path: &Path,
     package_names: &mut BTreeSet<String>,
+    package_versions: &mut BTreeMap<String, String>,
     audit: &mut AuditReport,
 ) -> Result<(), MatchPackagesError> {
     if path.file_name().and_then(|name| name.to_str()) == Some("package.json") {
-        collect_reference_package_names_from_package_json(path, package_names, audit)?;
+        collect_reference_package_names_from_package_json(
+            path,
+            package_names,
+            package_versions,
+            audit,
+        )?;
         return Ok(());
     }
     if !is_reference_source_file(path) {
@@ -411,6 +448,7 @@ fn collect_reference_package_names_from_file(
 fn collect_reference_package_names_from_package_json(
     path: &Path,
     package_names: &mut BTreeSet<String>,
+    package_versions: &mut BTreeMap<String, String>,
     audit: &mut AuditReport,
 ) -> Result<(), MatchPackagesError> {
     let content =
@@ -431,6 +469,10 @@ fn collect_reference_package_names_from_package_json(
             return Ok(());
         }
     };
+    // `dependencies` first, then the others: a runtime version specifier should
+    // win over a dev/peer one for the same name, so insert runtime last would be
+    // wrong — instead only fill a version if not already set by an earlier (more
+    // authoritative) field.
     for field in [
         "dependencies",
         "devDependencies",
@@ -440,10 +482,19 @@ fn collect_reference_package_names_from_package_json(
         let Some(dependencies) = value.get(field).and_then(serde_json::Value::as_object) else {
             continue;
         };
-        for package_name in dependencies.keys() {
+        for (package_name, version) in dependencies {
             let package_name = package_name.trim();
-            if is_valid_package_name(package_name) {
-                package_names.insert(package_name.to_string());
+            if !is_valid_package_name(package_name) {
+                continue;
+            }
+            package_names.insert(package_name.to_string());
+            if let Some(version) = version.as_str() {
+                let version = version.trim();
+                if !version.is_empty() {
+                    package_versions
+                        .entry(package_name.to_string())
+                        .or_insert_with(|| version.to_string());
+                }
             }
         }
     }
@@ -566,6 +617,7 @@ pub(crate) fn load_package_sources(
         rows,
         package_names,
         package_source_roots,
+        &BTreeMap::new(),
         materialize_package_sources,
         persist_materialized_package_sources,
     )?
@@ -577,6 +629,7 @@ pub(crate) fn load_package_sources_with_fingerprint_stats(
     rows: &InputRows,
     package_names: &BTreeSet<String>,
     package_source_roots: &[PathBuf],
+    reference_versions: &BTreeMap<String, String>,
     materialize_package_sources: bool,
     persist_materialized_package_sources: bool,
 ) -> Result<LoadedPackageSources, MatchPackagesError> {
@@ -631,6 +684,7 @@ pub(crate) fn load_package_sources_with_fingerprint_stats(
             &expanded_package_names,
             &package_sources,
             &stale_cache_versions,
+            reference_versions,
         )?;
         if persist_materialized_package_sources && !materialized_sources.is_empty() {
             persist_package_source_cache(connection, &materialized_sources)?;
@@ -642,6 +696,10 @@ pub(crate) fn load_package_sources_with_fingerprint_stats(
         &expanded_package_names,
         &mut package_sources,
     )?;
+    // Capture the inlined-library corpus (packages with no bundle module) BEFORE
+    // the module-relevance filters below, which keep only sources some module
+    // references and would otherwise strip every inlined library.
+    let island_corpus = island_corpus_from_sources(rows, &package_sources);
     filter_package_sources_to_best_build_variants(rows, &mut package_sources);
     filter_package_sources_to_relevant_path_hints(rows, &mut package_sources);
     dedup_package_sources(&mut package_sources);
@@ -651,8 +709,27 @@ pub(crate) fn load_package_sources_with_fingerprint_stats(
     let fingerprint_cache = attach_global_fingerprints(&mut package_sources);
     Ok(LoadedPackageSources {
         sources: package_sources,
+        island_corpus,
         fingerprint_cache,
     })
+}
+
+/// Sources for packages that have no bundle module — the inlined-library corpus
+/// for entry-island anchoring. Deduplicated by `(package, version, path)`.
+fn island_corpus_from_sources(rows: &InputRows, sources: &[PackageSource]) -> Vec<PackageSource> {
+    let module_package_names: BTreeSet<&str> = rows
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .filter_map(|module| module.package_name.as_deref())
+        .collect();
+    let mut corpus: Vec<PackageSource> = sources
+        .iter()
+        .filter(|source| !module_package_names.contains(source.package_name.as_str()))
+        .cloned()
+        .collect();
+    dedup_package_sources(&mut corpus);
+    corpus
 }
 
 pub(crate) fn filter_package_sources_to_referenced_package_versions(
@@ -936,5 +1013,62 @@ void required;
             ])
         );
         assert!(audit.findings().is_empty());
+    }
+
+    #[test]
+    fn reference_package_json_version_specifiers_are_captured() {
+        // The version of an inlined library (no bundle module) can only come from
+        // the reference manifest, so the scanner must surface name -> specifier.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tempdir.path().join("package.json"),
+            r#"{
+  "dependencies": {"zod": "^3.25.64"},
+  "devDependencies": {"react": "18.2.0", "blank": ""}
+}"#,
+        )
+        .expect("package json");
+
+        let mut audit = AuditReport::default();
+        let (names, versions) = package_names_and_versions_from_reference_source_roots(
+            &[tempdir.path().into()],
+            &mut audit,
+        )
+        .expect("names and versions");
+
+        assert!(names.contains("zod") && names.contains("react"));
+        assert_eq!(versions.get("zod").map(String::as_str), Some("^3.25.64"));
+        assert_eq!(versions.get("react").map(String::as_str), Some("18.2.0"));
+        // An empty specifier contributes a name but no version.
+        assert!(names.contains("blank"));
+        assert!(!versions.contains_key("blank"));
+    }
+
+    #[test]
+    fn island_corpus_keeps_only_sources_without_a_bundle_module() {
+        use reverts_input::ModuleInput;
+        use reverts_ir::ModuleId;
+        use reverts_package_matcher::PackageSource;
+
+        let mut rows = InputRows::new(ProjectInput::new(1, "p"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(1),
+            "node_modules/node-pty/index.js",
+            "node_modules/node-pty/index.js",
+            "node-pty",
+            Some("1.0.0".to_string()),
+        ));
+
+        let sources = vec![
+            // Has a bundle module — belongs to the per-module matcher, not the island.
+            PackageSource::external("node-pty", "1.0.0", "node-pty", "node-pty/index.js", "1;"),
+            // Inlined library, no module — the island corpus.
+            PackageSource::external("zod", "3.25.64", "zod", "zod/index.js", "2;"),
+        ];
+
+        let corpus = island_corpus_from_sources(&rows, &sources);
+
+        assert_eq!(corpus.len(), 1, "only the no-module source: {corpus:?}");
+        assert_eq!(corpus[0].package_name, "zod");
     }
 }

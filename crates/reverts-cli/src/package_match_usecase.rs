@@ -29,7 +29,7 @@ use crate::{
     MatchPackagesOutcome, dedup_audit_report, enrich_package_modules_from_source_units,
     filter_package_sources_to_referenced_package_versions,
     load_package_sources_with_fingerprint_stats, package_module_source_quality_counts,
-    package_names_from_reference_source_roots, package_source_load_scope,
+    package_names_and_versions_from_reference_source_roots, package_source_load_scope,
     package_version_resolution_evidence, package_versions_by_module,
     remove_package_attributions_for_revalidation,
     resolve_package_version_hints_to_available_sources,
@@ -101,10 +101,11 @@ pub(crate) fn match_packages_from_connection(
     mark_timing!("bundle_extract_enrich");
 
     let mut source_import_audit = AuditReport::default();
-    let reference_package_names = package_names_from_reference_source_roots(
-        &args.reference_source_roots,
-        &mut source_import_audit,
-    )?;
+    let (reference_package_names, reference_package_versions) =
+        package_names_and_versions_from_reference_source_roots(
+            &args.reference_source_roots,
+            &mut source_import_audit,
+        )?;
     if !args.reference_source_roots.is_empty() {
         let preview = reference_package_names
             .iter()
@@ -135,10 +136,12 @@ pub(crate) fn match_packages_from_connection(
         &rows,
         &package_names,
         &args.package_source_roots,
+        &reference_package_versions,
         args.materialize_package_sources,
         args.apply,
     )?;
     let fingerprint_cache = loaded_package_sources.fingerprint_cache;
+    let island_corpus = loaded_package_sources.island_corpus;
     let mut package_sources = loaded_package_sources.sources;
     mark_timing!("load_package_sources");
     let package_versions_before_resolution = package_versions_by_module(&rows);
@@ -160,7 +163,7 @@ pub(crate) fn match_packages_from_connection(
     // island. They never become model modules, so the per-module pipeline above
     // never sees them; this anchors them per-binding against the same package
     // corpus. Skipped when there is no corpus to match against.
-    let island_anchors = compute_island_anchors(&rows, &package_sources);
+    let island_anchors = compute_island_anchors(&rows, &island_corpus);
     if !island_anchors.is_empty() {
         eprintln!(
             "match-packages: anchored {} eager entry-island binding(s) to packages",

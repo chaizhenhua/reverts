@@ -315,11 +315,22 @@ pub(crate) fn materialize_package_sources_from_hints(
     package_names: &BTreeSet<String>,
     existing_sources: &[PackageSource],
     stale_cache_versions: &BTreeSet<(String, String)>,
+    reference_versions: &BTreeMap<String, String>,
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
     let plan = PackageVersionResolutionPlan::build(rows, package_names, existing_sources)?;
     let mut hints = plan.materialization_hints(rows, package_names);
     hints.extend(plan.stale_cache_materialization_hints(rows, package_names, stale_cache_versions));
-    for (package_name, requested_version) in plan.network_resolution_hints(rows, package_names) {
+    let mut network_hints = plan.network_resolution_hints(rows, package_names);
+    // Inlined libraries (zod, react, …) leave no bundle module, so the
+    // module-driven hints above never name them. Their version lives only in the
+    // reference `package.json`; resolve those too so the island anchoring pass
+    // has a corpus to match against.
+    network_hints.extend(reference_no_module_network_hints(
+        rows,
+        existing_sources,
+        reference_versions,
+    ));
+    for (package_name, requested_version) in network_hints {
         match resolve_package_version_hint_from_network(
             package_name.as_str(),
             requested_version.as_str(),
@@ -356,6 +367,38 @@ pub(crate) fn materialize_package_sources_from_hints(
         }
     }
     Ok(sources)
+}
+
+/// Network-resolution hints for reference-manifest packages that have NO bundle
+/// module and no already-loaded source — i.e. libraries the bundler inlined into
+/// the eager island. Each yields `(name, version_specifier)` to resolve and
+/// download; a name already covered by a module hint or an existing source is
+/// skipped so this never duplicates the module-driven path.
+fn reference_no_module_network_hints(
+    rows: &InputRows,
+    existing_sources: &[PackageSource],
+    reference_versions: &BTreeMap<String, String>,
+) -> BTreeSet<(String, String)> {
+    let module_package_names: BTreeSet<&str> = rows
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .filter_map(|module| module.package_name.as_deref())
+        .collect();
+    let sourced_names: BTreeSet<&str> = existing_sources
+        .iter()
+        .map(|source| source.package_name.as_str())
+        .collect();
+    reference_versions
+        .iter()
+        .filter(|(name, version)| {
+            is_valid_package_name(name)
+                && !version.trim().is_empty()
+                && !module_package_names.contains(name.as_str())
+                && !sourced_names.contains(name.as_str())
+        })
+        .map(|(name, version)| (name.clone(), version.trim().to_string()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -442,6 +485,49 @@ pub(crate) fn resolve_package_version_hints_to_available_sources(
 ) -> Result<usize, MatchPackagesError> {
     let plan = PackageVersionResolutionPlan::build(rows, package_names, package_sources)?;
     Ok(plan.apply_to_rows(rows, package_names))
+}
+
+#[cfg(test)]
+mod reference_no_module_hint_tests {
+    use reverts_input::{ModuleInput, ProjectInput};
+    use reverts_ir::ModuleId;
+
+    use super::*;
+
+    #[test]
+    fn emits_hints_only_for_inlined_libraries_without_a_module_or_source() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "p"));
+        // node-pty has a bundle module → handled by the module-driven path.
+        rows.modules.push(ModuleInput::package(
+            ModuleId(1),
+            "node_modules/node-pty/index.js",
+            "node_modules/node-pty/index.js",
+            "node-pty",
+            Some("1.0.0".to_string()),
+        ));
+        // semver already has a loaded source → no need to re-fetch.
+        let existing = vec![PackageSource::external(
+            "semver",
+            "7.6.0",
+            "semver",
+            "semver/index.js",
+            "1;",
+        )];
+        let reference_versions = BTreeMap::from([
+            ("zod".to_string(), "^3.25.64".to_string()),
+            ("node-pty".to_string(), "1.0.0".to_string()),
+            ("semver".to_string(), "^7.0.0".to_string()),
+            ("blank".to_string(), "  ".to_string()),
+        ]);
+
+        let hints = reference_no_module_network_hints(&rows, &existing, &reference_versions);
+
+        // Only zod: node-pty has a module, semver has a source, blank has no version.
+        assert_eq!(
+            hints,
+            BTreeSet::from([("zod".to_string(), "^3.25.64".to_string())])
+        );
+    }
 }
 
 fn source_identity_versions_by_module(
