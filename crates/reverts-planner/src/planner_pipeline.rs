@@ -172,6 +172,15 @@ impl BundleScope {
                 file_of_path.insert(path, source_file_id);
             }
         }
+        // The entrypoint island is synthetic (no module row) but belongs to the
+        // main bundle's source file; map it so its barrel imports are scoped the
+        // same way as that bundle's modules.
+        if let Some((_prelude, entrypoint)) = crate::runtime_entrypoint(program) {
+            file_of_path.insert(
+                cli_entrypoint::ENTRYPOINT_ISLAND_PATH.to_string(),
+                entrypoint.source_file_id,
+            );
+        }
         Self {
             file_of_path,
             modules_per_file,
