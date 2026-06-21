@@ -3,6 +3,7 @@ mod byte_lexer;
 mod class_field_bindings;
 mod cli_entrypoint;
 mod compiler_preservation;
+mod complete_referenced_imports;
 mod compute_modules;
 mod dead_export_prune;
 mod destructure_writes;

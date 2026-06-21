@@ -45,6 +45,14 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     // helpers). Runs last so it sees the final, pruned file set.
     let export_names = crate::compute_modules::build_namespace_export_name_map(context.program());
     crate::compute_modules::apply_export_name_renames(&mut state.plan, &export_names);
+    // Final correctness completion: a binding the runtime-reader-cluster
+    // migration routed into a cycle-avoidance bucket can be referenced (in call
+    // position, e.g. an esbuild `__esm` init thunk in an `await import()`
+    // lowering) without being bound locally, while the same module's namespace
+    // IS imported. Add such referenced-but-unbound names to the EXISTING import
+    // from the module that exports them — cycle-safe (augments an existing edge,
+    // adds none) — so the emitted ESM has no dangling reference.
+    crate::complete_referenced_imports::complete_referenced_module_imports(&mut state.plan);
     Ok(state.plan)
 }
 
