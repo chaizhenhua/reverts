@@ -72,11 +72,15 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
     mark_timing!("load_binding_renames");
     let function_param_renames = load_function_param_renames(&args.input, args.project_id)?;
     mark_timing!("load_param_renames");
+    let package_anchored_island_bindings =
+        load_package_anchored_island_bindings(&args.input, args.project_id)?;
+    mark_timing!("load_island_anchors");
     let run = generate_project_from_input_with_options(
         input,
         GenerateProjectOptions {
             local_binding_renames: local_binding_renames.clone(),
             function_param_renames,
+            package_anchored_island_bindings,
         },
     )
     .map_err(CliRunError::Pipeline)?;
@@ -216,6 +220,39 @@ fn load_local_binding_renames(
         })
         .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
     collect_sqlite_rows(rows).map_err(|source| CliRunError::GenerateProject(source.to_string()))
+}
+
+/// Bundle-local names of eager entry-island bindings the matcher anchored to a
+/// third-party library (`package_island_anchors`). These are library code, not
+/// application symbols, so generation drops them from the naming denominator.
+/// A pre-anchoring database (no table) simply contributes nothing.
+fn load_package_anchored_island_bindings(
+    input: &Path,
+    project_id: u32,
+) -> Result<std::collections::BTreeSet<String>, CliRunError> {
+    let connection = Connection::open_with_flags(input, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    if !sqlite_table_exists(&connection, "package_island_anchors")
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+    {
+        return Ok(std::collections::BTreeSet::new());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT binding_name FROM package_island_anchors \
+             WHERE project_id = ?1 AND TRIM(binding_name) != ''",
+        )
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let rows = statement
+        .query_map(params![i64::from(project_id)], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let mut names = std::collections::BTreeSet::new();
+    for row in rows {
+        names.insert(row.map_err(|source| CliRunError::GenerateProject(source.to_string()))?);
+    }
+    Ok(names)
 }
 
 fn load_function_param_renames(

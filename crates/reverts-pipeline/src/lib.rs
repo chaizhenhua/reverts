@@ -100,6 +100,12 @@ pub struct SymbolIndexEntry {
 pub struct GenerateProjectOptions {
     pub local_binding_renames: Vec<LocalBindingRename>,
     pub function_param_renames: Vec<FunctionParamRenameRow>,
+    /// Bundle-local names of eager entry-island bindings that the package
+    /// matcher anchored to a third-party library (see `package_island_anchors`).
+    /// These are library code flattened into the island, not application
+    /// symbols, so they are dropped from the naming denominator — included here
+    /// they would inflate it and depress coverage with work no one should do.
+    pub package_anchored_island_bindings: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +151,7 @@ fn build_symbol_index(
     emitted: &reverts_emitter::EmittedProject,
     unmodularized_code_paths: &std::collections::BTreeSet<String>,
     local_binding_renames: &[LocalBindingRename],
+    package_anchored_island_bindings: &std::collections::BTreeSet<String>,
 ) -> Vec<SymbolIndexEntry> {
     use std::path::Path;
 
@@ -270,6 +277,15 @@ fn build_symbol_index(
                     } else {
                         (emitted_name.clone(), false)
                     };
+                // Library code the matcher anchored to a package was flattened
+                // into the island; it is not application naming work, so it
+                // leaves the denominator entirely. Gated on `module_id.is_none()`
+                // so a same-named binding in a real module is never dropped.
+                if module_id.is_none()
+                    && package_anchored_island_bindings.contains(&original_name)
+                {
+                    continue;
+                }
                 let dead = dead_bindings.contains(&emitted_name);
                 let exported = exported_bindings.contains(&emitted_name);
                 entries.push(SymbolIndexEntry {
@@ -605,6 +621,7 @@ pub fn generate_project_from_prepared_with_options(
         &emitted_project,
         &unmodularized_code_paths,
         &options.local_binding_renames,
+        &options.package_anchored_island_bindings,
     );
     mark_timing!("symbol_index");
     if timing_enabled {
@@ -951,6 +968,7 @@ mod tests {
                     },
                 ],
                 function_param_renames: Vec::new(),
+                package_anchored_island_bindings: std::collections::BTreeSet::new(),
             },
         )
         .expect("fixture should emit");
@@ -2893,6 +2911,7 @@ main();"#
             &emitted,
             &std::collections::BTreeSet::new(),
             &[],
+            &std::collections::BTreeSet::new(),
         );
 
         assert_eq!(entries.len(), 1);
@@ -2925,6 +2944,7 @@ main();"#
             &emitted,
             &std::collections::BTreeSet::new(),
             &[],
+            &std::collections::BTreeSet::new(),
         );
 
         assert!(
@@ -2963,7 +2983,14 @@ main();"#
         };
         let marked = std::collections::BTreeSet::from(["modules/entry-island.ts".to_string()]);
 
-        let entries = super::build_symbol_index(&program, &module_paths, &emitted, &marked, &[]);
+        let entries = super::build_symbol_index(
+            &program,
+            &module_paths,
+            &emitted,
+            &marked,
+            &[],
+            &std::collections::BTreeSet::new(),
+        );
 
         let island_entries: Vec<_> = entries
             .iter()
@@ -3003,12 +3030,76 @@ main();"#
             &emitted,
             &std::collections::BTreeSet::new(),
             &[],
+            &std::collections::BTreeSet::new(),
         );
         assert!(
             unmarked
                 .iter()
                 .all(|entry| entry.file_path != "modules/entry-island.ts"),
             "unmarked unowned files must stay out of the symbol index"
+        );
+    }
+
+    #[test]
+    fn symbol_index_drops_package_anchored_island_bindings() {
+        // Failure mode: a bundled library (zod, etc.) is flattened into the eager
+        // island. Its functions are not application naming work, yet they sit in
+        // the island file and would inflate the naming denominator. When the
+        // package matcher anchors such a binding to a library, it must leave the
+        // symbol index entirely — while a genuine, unanchored island binding (and
+        // any same-named binding in a real module) stays.
+        let rows = rows_with_application_source("var x = 1;");
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let program = super::prepare_and_enrich(input)
+            .expect("fixture should enrich")
+            .program;
+        let mut module_paths = BTreeMap::new();
+        module_paths.insert(ModuleId(1), "modules/1.ts".to_string());
+        let emitted = EmittedProject {
+            files: vec![
+                // A real module that happens to share the anchored minified name.
+                EmittedFile {
+                    path: "modules/1.ts".to_string(),
+                    source: "function Fv() { return 1; }\nexport { Fv };\n".to_string(),
+                },
+                EmittedFile {
+                    path: "modules/entry-island.ts".to_string(),
+                    source: "function Fv() { return 2; }\nvar appState = 3;\nexport { Fv };\n"
+                        .to_string(),
+                },
+            ],
+        };
+        let marked = std::collections::BTreeSet::from(["modules/entry-island.ts".to_string()]);
+        let anchored = std::collections::BTreeSet::from(["Fv".to_string()]);
+
+        let entries = super::build_symbol_index(
+            &program,
+            &module_paths,
+            &emitted,
+            &marked,
+            &[],
+            &anchored,
+        );
+
+        // The island's anchored `Fv` is gone from the denominator.
+        assert!(
+            !entries.iter().any(|entry| entry.module_id.is_none()
+                && entry.file_path == "modules/entry-island.ts"
+                && entry.original_name == "Fv"),
+            "package-anchored island binding must be dropped: {entries:?}"
+        );
+        // The genuine island binding stays.
+        assert!(
+            entries.iter().any(|entry| entry.module_id.is_none()
+                && entry.original_name == "appState"),
+            "unanchored island binding must remain: {entries:?}"
+        );
+        // The same-named binding in a real module is untouched (gated on module_id).
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.module_id == Some(ModuleId(1)) && entry.original_name == "Fv"),
+            "a real module's same-named binding must not be dropped: {entries:?}"
         );
     }
 
@@ -3040,7 +3131,14 @@ main();"#
         }];
 
         let entries =
-            super::build_symbol_index(&program, &module_paths, &emitted, &marked, &renames);
+            super::build_symbol_index(
+                &program,
+                &module_paths,
+                &emitted,
+                &marked,
+                &renames,
+                &std::collections::BTreeSet::new(),
+            );
 
         let entry = entries
             .iter()
