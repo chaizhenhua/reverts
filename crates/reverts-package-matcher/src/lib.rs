@@ -94,10 +94,11 @@ pub use source_evidence::{
     score_source_evidence, source_evidence_idf,
 };
 pub use strategy::{
-    CascadeMatchReport, CascadeOwnershipMatch, GlobalAssignment, StructuralBag,
-    StructuralBagMatchReport, assign_globally, build_structural_bag, cascade_candidates,
-    match_function, match_structural_bags, match_structural_bags_with_excluded_modules,
-    match_with_cascade, score_structural_bags,
+    CascadeMatchReport, CascadeOwnershipMatch, GlobalAssignment, PreludeBindingAnchor,
+    PreludeBindingSource, StructuralBag, StructuralBagMatchReport, anchor_prelude_bindings,
+    assign_globally, build_structural_bag, cascade_candidates, match_function,
+    match_structural_bags, match_structural_bags_with_excluded_modules, match_with_cascade,
+    score_structural_bags,
 };
 
 #[cfg(test)]
