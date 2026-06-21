@@ -35,6 +35,12 @@ pub enum FindingCode {
     MissingParseableBody,
     OverlappingFunctionAttribution,
     UnreachableTopLevelCode,
+    /// A statement is unreachable within its enclosing function — dead code
+    /// after a `return`/`throw`/`break`/`continue`, in any branch or nested
+    /// block. Found via the oxc intraprocedural control-flow graph, so it sees
+    /// inside function bodies (unlike `UnreachableTopLevelCode`, which only
+    /// covers the module's top-level statement sequence).
+    UnreachableFunctionCode,
     MissingRequiredAsset,
     /// A source-backed package surface was discovered, but an explicit
     /// Agent-authored `package-surface-decisions` reject/block row suppresses

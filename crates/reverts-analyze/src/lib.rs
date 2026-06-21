@@ -52,6 +52,7 @@ pub fn enrich_program(mut model: ProgramModel) -> EnrichmentOutput {
     audit.extend(audit_binding_shape_conflicts(&binding_shapes));
     audit.extend(audit_unprotected_nullable_member_reads(&model));
     audit.extend(audit_unreachable_top_level_code(&model));
+    audit.extend(audit_unreachable_function_code(&model));
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
     let mut function_fingerprints: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
@@ -860,6 +861,31 @@ fn audit_unreachable_top_level_code(model: &ProgramModel) -> AuditReport {
                 AuditFinding::error(
                     FindingCode::UnreachableTopLevelCode,
                     "module body contains a statement that follows a top-level return or throw",
+                )
+                .with_module(module.id.0.to_string()),
+            );
+        }
+    }
+    audit
+}
+
+/// Flag statements unreachable within their enclosing function, using the oxc
+/// intraprocedural CFG projected onto [`IntraproceduralFlow`]. Complements
+/// `audit_unreachable_top_level_code` (which only sees the module top level) by
+/// reaching inside function bodies and nested branches. Per ADR 0002 this is a
+/// warning: dead code in the input is surfaced, not repaired.
+fn audit_unreachable_function_code(model: &ProgramModel) -> AuditReport {
+    let mut audit = AuditReport::default();
+    let flow = model.graph().intraprocedural_flow();
+    for module in model.modules() {
+        for span in flow.unreachable_in(module.id) {
+            audit.push(
+                AuditFinding::warning(
+                    FindingCode::UnreachableFunctionCode,
+                    format!(
+                        "function body contains unreachable code at bytes {}..{}",
+                        span.start, span.end
+                    ),
                 )
                 .with_module(module.id.0.to_string()),
             );
@@ -1919,6 +1945,57 @@ mod tests {
         assert!(
             !output.audit.has(FindingCode::UnreachableTopLevelCode),
             "audit must not fire on a final throw, got: {:?}",
+            output.audit.findings(),
+        );
+    }
+
+    #[test]
+    fn dead_code_inside_a_function_is_reported_as_unreachable_function_code() {
+        // The dead statement is INSIDE a function body, so the top-level audit
+        // cannot see it — only the intraprocedural CFG audit fires.
+        let source = "function f() {\n  return 1;\n  globalThis.dead = 2;\n}\n";
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(
+            output.audit.has(FindingCode::UnreachableFunctionCode),
+            "expected UnreachableFunctionCode finding, got: {:?}",
+            output.audit.findings(),
+        );
+        // It is function-internal, so the top-level audit stays silent.
+        assert!(
+            !output.audit.has(FindingCode::UnreachableTopLevelCode),
+            "top-level audit must not fire on function-internal dead code",
+        );
+    }
+
+    #[test]
+    fn straight_line_function_reports_no_unreachable_function_code() {
+        let source = "function f(x) {\n  const y = x + 1;\n  return y;\n}\n";
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(
+            !output.audit.has(FindingCode::UnreachableFunctionCode),
+            "no dead code expected, got: {:?}",
             output.audit.findings(),
         );
     }

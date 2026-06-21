@@ -36,6 +36,7 @@ use oxc_ast::{
         walk_ts_type_parameter_instantiation, walk_variable_declarator,
     },
 };
+use oxc_cfg::{EdgeType, InstructionKind};
 use oxc_parser::Parser;
 use oxc_semantic::{ScopeTree, Semantic, SemanticBuilder};
 use oxc_span::GetSpan;
@@ -44,11 +45,13 @@ use oxc_syntax::{
     scope::{ScopeFlags, ScopeId},
     symbol::{SymbolFlags, SymbolId},
 };
+use petgraph::{Direction, graph::NodeIndex, visit::EdgeRef};
 use reverts_input::{InputBundle, ModuleDependencyTarget, ModuleInput, SymbolScope};
 use reverts_ir::{
-    BindingConstraint, BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowGraph,
-    ControlFlowNodeKind, DeclarationKind, DefUseGraph, FlowNodeId, ModuleId, ModuleKind,
-    ResolvedBinding, ResolvedSymbolGraph, ResolvedSymbolId, split_bare_specifier,
+    BindingConstraint, BindingConstraintKind, BindingName, ByteRange, ControlFlowEdgeKind,
+    ControlFlowGraph, ControlFlowNodeKind, DeclarationKind, DefUseGraph, FlowNodeId,
+    IntraproceduralFlow, ModuleId, ModuleKind, ResolvedBinding, ResolvedSymbolGraph,
+    ResolvedSymbolId, split_bare_specifier,
 };
 use reverts_js::{
     JsError, ParseError, ParseGoal, collect_identifier_read_facts, lazy_value_sub_snippets,
@@ -64,6 +67,7 @@ pub struct RevertsGraph {
     import_export: ImportExportGraph,
     function_calls: FunctionCallGraph,
     resolved_symbols: ResolvedSymbolGraph,
+    intraprocedural_flow: IntraproceduralFlow,
     runtime_preludes: BTreeMap<u32, RuntimePrelude>,
     runtime_imports: BTreeMap<ModuleId, BTreeSet<RuntimePreludeImport>>,
     ast_facts: Vec<AstFact>,
@@ -451,6 +455,7 @@ pub struct AstExtraction {
     pub facts: Vec<AstFact>,
     pub control_flow: ControlFlowGraph,
     pub resolved_symbols: ResolvedSymbolGraph,
+    pub intraprocedural_flow: IntraproceduralFlow,
 }
 
 impl RevertsGraph {
@@ -504,6 +509,7 @@ impl RevertsGraph {
         let mut ast_errors = Vec::new();
         let mut control_flow = ControlFlowGraph::default();
         let mut resolved_symbols = ResolvedSymbolGraph::default();
+        let mut intraprocedural_flow = IntraproceduralFlow::default();
         let runtime_preludes = extract_runtime_preludes(input);
         for module in &input.modules {
             if module.kind == ModuleKind::Package {
@@ -516,6 +522,7 @@ impl RevertsGraph {
                 Ok(extraction) => {
                     control_flow.extend(extraction.control_flow);
                     resolved_symbols.extend(extraction.resolved_symbols);
+                    intraprocedural_flow.extend(extraction.intraprocedural_flow);
                     for fact in extraction.facts {
                         apply_ast_fact(&mut definitions, &mut def_use, &mut import_export, &fact);
                         ast_facts.push(fact);
@@ -578,6 +585,7 @@ impl RevertsGraph {
             import_export,
             function_calls,
             resolved_symbols,
+            intraprocedural_flow,
             runtime_preludes,
             runtime_imports,
             ast_facts,
@@ -637,6 +645,11 @@ impl RevertsGraph {
     #[must_use]
     pub fn resolved_symbols(&self) -> &ResolvedSymbolGraph {
         &self.resolved_symbols
+    }
+
+    #[must_use]
+    pub fn intraprocedural_flow(&self) -> &IntraproceduralFlow {
+        &self.intraprocedural_flow
     }
 
     #[must_use]
@@ -1540,14 +1553,20 @@ impl AstFactExtractor {
                 visitor.visit_program(&parsed.program);
                 // Scope-resolved projection: run oxc's semantic analyzer over
                 // the same parsed program (it annotates symbol/reference ids on
-                // the AST in place) and project its `SymbolTable` into owned,
-                // deterministic IR. The name-keyed facts above are untouched.
-                let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+                // the AST in place) and project its `SymbolTable` + intraprocedural
+                // CFG into owned, deterministic IR. The name-keyed facts above are
+                // untouched. `with_cfg` enables the per-function control-flow graph.
+                let semantic = SemanticBuilder::new()
+                    .with_cfg(true)
+                    .build(&parsed.program)
+                    .semantic;
                 let resolved_symbols = project_resolved_symbols(module.id, &semantic);
+                let intraprocedural_flow = project_intraprocedural_flow(module.id, &semantic);
                 return Ok(AstExtraction {
                     facts: visitor.facts,
                     control_flow: extract_control_flow(module.id, &parsed.program),
                     resolved_symbols,
+                    intraprocedural_flow,
                 });
             }
             errors.push(ParseError {
@@ -1644,6 +1663,75 @@ fn declaration_kind(flags: SymbolFlags, is_parameter: bool) -> DeclarationKind {
 fn is_parameter(semantic: &Semantic<'_>, symbol_id: SymbolId) -> bool {
     let node_id = semantic.symbols().get_declaration(symbol_id);
     matches!(semantic.nodes().kind(node_id), AstKind::FormalParameter(_))
+}
+
+/// Project oxc's intraprocedural CFG into owned flow facts. Currently: the
+/// source spans of statements unreachable within their enclosing function.
+///
+/// Reachability is a multi-source BFS seeded from every CFG entry — the graph
+/// roots (no incoming edge) plus every function-subgraph entry (the target of a
+/// `NewFunction` edge) — traversing all edges *except* `NewFunction` (which
+/// would descend into a nested function, analysed from its own entry) and
+/// `Unreachable` (which oxc inserts to dead blocks). Any block left unvisited is
+/// dead code; its real statements' spans are reported.
+fn project_intraprocedural_flow(
+    module_id: ModuleId,
+    semantic: &Semantic<'_>,
+) -> IntraproceduralFlow {
+    let mut flow = IntraproceduralFlow::default();
+    let Some(cfg) = semantic.cfg() else {
+        return flow;
+    };
+    let graph = cfg.graph();
+
+    let mut reachable: BTreeSet<NodeIndex> = BTreeSet::new();
+    let mut queue: VecDeque<NodeIndex> = VecDeque::new();
+    for node in graph.node_indices() {
+        if graph
+            .edges_directed(node, Direction::Incoming)
+            .next()
+            .is_none()
+            && reachable.insert(node)
+        {
+            queue.push_back(node);
+        }
+    }
+    for edge in graph.edge_indices() {
+        if matches!(graph.edge_weight(edge), Some(EdgeType::NewFunction))
+            && let Some((_, target)) = graph.edge_endpoints(edge)
+            && reachable.insert(target)
+        {
+            queue.push_back(target);
+        }
+    }
+    while let Some(node) = queue.pop_front() {
+        for edge in graph.edges_directed(node, Direction::Outgoing) {
+            if matches!(edge.weight(), EdgeType::NewFunction | EdgeType::Unreachable) {
+                continue;
+            }
+            let target = edge.target();
+            if reachable.insert(target) {
+                queue.push_back(target);
+            }
+        }
+    }
+
+    for node in graph.node_indices() {
+        if reachable.contains(&node) {
+            continue;
+        }
+        for instruction in cfg.basic_block(node).instructions() {
+            if instruction.kind != InstructionKind::Statement {
+                continue;
+            }
+            let Some(node_id) = instruction.node_id else {
+                continue;
+            };
+            let span = semantic.nodes().get_node(node_id).kind().span();
+            flow.add_unreachable(module_id, ByteRange::new(span.start, span.end));
+        }
+    }
+    flow
 }
 
 /// Lexical nesting depth of `scope_id`: `0` for the program root scope.
@@ -3124,6 +3212,84 @@ function writer() { let v = 0; v = 1; }
                 .iter()
                 .any(|binding| binding.symbol == write_only.symbol),
         );
+    }
+
+    #[test]
+    fn from_input_detects_intraprocedural_unreachable_code() {
+        // Dead code lives INSIDE function bodies and inside a branch — the
+        // top-level statement skeleton cannot see it; the oxc CFG can.
+        let source = "\
+function afterReturn() {
+  return 1;
+  globalThis.dead = 1;
+}
+function afterThrow(x) {
+  if (x) {
+    throw new Error(\"e\");
+    globalThis.deadBranch = 2;
+  }
+  return x;
+}
+function live() {
+  return 2;
+}
+";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let flow = graph.intraprocedural_flow();
+        let ranges = flow.unreachable_in(ModuleId(1));
+
+        assert!(flow.has_unreachable(ModuleId(1)), "expected dead code");
+        let covers = |needle: &str| {
+            let at = source.find(needle).expect("snippet present") as u32;
+            ranges
+                .iter()
+                .any(|range| range.start <= at && at < range.end)
+        };
+        // Dead code after `return` and after `throw` (inside a branch) is flagged.
+        assert!(
+            covers("globalThis.dead = 1"),
+            "post-return dead: {ranges:?}"
+        );
+        assert!(
+            covers("globalThis.deadBranch = 2"),
+            "post-throw dead: {ranges:?}",
+        );
+        // Live statements are never flagged.
+        assert!(!covers("return 1"), "live return flagged: {ranges:?}");
+        assert!(!covers("return 2"), "live function flagged: {ranges:?}");
+    }
+
+    #[test]
+    fn from_input_reports_no_unreachable_for_straight_line_code() {
+        let source = "\
+function f(x) {
+  const y = x + 1;
+  return y;
+}
+";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        assert!(!graph.intraprocedural_flow().has_unreachable(ModuleId(1)));
+        assert_eq!(graph.intraprocedural_flow().unreachable_count(), 0);
     }
 
     #[test]

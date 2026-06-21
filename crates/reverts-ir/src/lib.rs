@@ -855,6 +855,61 @@ impl ResolvedSymbolGraph {
     }
 }
 
+/// Facts derived from the intraprocedural control-flow graph (oxc `with_cfg`),
+/// projected into owned, deterministic IR. A peer of [`ResolvedSymbolGraph`]
+/// that adds the flow-sensitive dimension the def-use / resolved graphs lack:
+/// *where*, on which paths, a fact holds — not just *whether* it ever holds.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct IntraproceduralFlow {
+    /// Source spans of statements that are unreachable within their enclosing
+    /// function (dead code after `return`/`throw`/`break`/`continue`, in any
+    /// branch), ordered by position. Computed from oxc CFG reachability — it
+    /// sees inside function bodies and nested blocks, unlike the top-level
+    /// [`ControlFlowGraph`] statement skeleton.
+    unreachable: BTreeMap<ModuleId, Vec<ByteRange>>,
+}
+
+impl IntraproceduralFlow {
+    /// Record an unreachable-code span. Spans are kept sorted and deduplicated
+    /// per module so the projection is deterministic regardless of CFG
+    /// traversal order.
+    pub fn add_unreachable(&mut self, module_id: ModuleId, span: ByteRange) {
+        let spans = self.unreachable.entry(module_id).or_default();
+        if let Err(index) = spans.binary_search(&span) {
+            spans.insert(index, span);
+        }
+    }
+
+    pub fn extend(&mut self, other: Self) {
+        for (module_id, spans) in other.unreachable {
+            for span in spans {
+                self.add_unreachable(module_id, span);
+            }
+        }
+    }
+
+    /// Unreachable-code spans in `module_id`, ordered by position.
+    #[must_use]
+    pub fn unreachable_in(&self, module_id: ModuleId) -> &[ByteRange] {
+        self.unreachable
+            .get(&module_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn has_unreachable(&self, module_id: ModuleId) -> bool {
+        self.unreachable
+            .get(&module_id)
+            .is_some_and(|spans| !spans.is_empty())
+    }
+
+    #[must_use]
+    pub fn unreachable_count(&self) -> usize {
+        self.unreachable.values().map(Vec::len).sum()
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BindingShapeSolution {
     shapes: BTreeMap<(ModuleId, BindingName), BindingShape>,
@@ -1070,9 +1125,10 @@ fn normalize_subpath(subpath: &str) -> String {
 mod tests {
     use super::{
         BindingConstraint, BindingConstraintKind, BindingName, BindingShape, BindingShapeSolution,
-        BindingSourceKind, BindingUseKind, ControlFlowEdgeKind, ControlFlowGraph,
-        ControlFlowNodeKind, DeclarationKind, DefUseGraph, ModuleId, PackageSurface,
-        ResolvedBinding, ResolvedSymbolGraph, ResolvedSymbolId, is_valid_package_name,
+        BindingSourceKind, BindingUseKind, ByteRange, ControlFlowEdgeKind, ControlFlowGraph,
+        ControlFlowNodeKind, DeclarationKind, DefUseGraph, IntraproceduralFlow, ModuleId,
+        PackageSurface, ResolvedBinding, ResolvedSymbolGraph, ResolvedSymbolId,
+        is_valid_package_name,
     };
 
     fn resolved(symbol: u32, name: &str, scope_depth: u32) -> ResolvedBinding {
@@ -1234,6 +1290,25 @@ mod tests {
         let unread = graph.unread_bindings(ModuleId(1));
         assert_eq!(unread.len(), 1);
         assert_eq!(unread[0].symbol, ResolvedSymbolId(1));
+    }
+
+    #[test]
+    fn intraprocedural_flow_unreachable_is_sorted_deduped_and_module_scoped() {
+        let mut flow = IntraproceduralFlow::default();
+        // Inserted out of order, with a duplicate, across two modules.
+        flow.add_unreachable(ModuleId(1), ByteRange::new(40, 50));
+        flow.add_unreachable(ModuleId(1), ByteRange::new(10, 20));
+        flow.add_unreachable(ModuleId(1), ByteRange::new(40, 50));
+        flow.add_unreachable(ModuleId(2), ByteRange::new(5, 6));
+
+        assert_eq!(
+            flow.unreachable_in(ModuleId(1)),
+            &[ByteRange::new(10, 20), ByteRange::new(40, 50)],
+        );
+        assert!(flow.has_unreachable(ModuleId(1)));
+        assert!(!flow.has_unreachable(ModuleId(3)));
+        assert_eq!(flow.unreachable_in(ModuleId(3)), &[]);
+        assert_eq!(flow.unreachable_count(), 3);
     }
 
     #[test]
