@@ -154,7 +154,19 @@ pub(crate) fn promote_anonymous_cjs_wrapper_entry_thunks(
         }
         let assigned = exports_assigned_members(slice.source, &params);
         let matched_members = package_members.intersection(&assigned).count();
-        if matched_members < MIN_PUBLIC_MEMBER_ASSIGNMENTS {
+        // Identity is proven EITHER by assigning enough public members outright
+        // (the ≥4 floor, for packages with a broad surface like react), OR — for
+        // a SMALL-surface package whose entire public API is one or a few members
+        // (e.g. @aws-sdk/credential-provider-http exports only `fromHttp`) — by
+        // assigning its FULL public surface AND embedding the package's own name
+        // as a string literal in the body. Full coverage + the literal name is
+        // unspoofable: a thunk that merely function-collided with the wrong
+        // package would not assign EVERY one of that package's public members and
+        // ALSO carry its name as a string. A bare ≥1 count never suffices alone.
+        let full_public_surface = matched_members > 0 && matched_members == package_members.len();
+        let small_surface_identity = full_public_surface
+            && thunk_contains_package_name_anchor(slice.source, &package_match.package_name);
+        if matched_members < MIN_PUBLIC_MEMBER_ASSIGNMENTS && !small_surface_identity {
             continue;
         }
 
@@ -226,6 +238,40 @@ pub(crate) fn exports_assigned_members(source: &str, params: &ThunkParams) -> BT
         visitor.members.extend(attached);
     }
     visitor.members
+}
+
+/// Does the thunk body contain the package's own name as a STRING LITERAL? This
+/// corroborates a small-surface identity match: esbuild preserves string-literal
+/// contents through `--minify`, so a real `@aws-sdk/credential-provider-http`
+/// entry keeps its `"@aws-sdk/credential-provider-http - fromHttp"` debug string,
+/// while a coincidental function-shape collision carries no such literal. Scans
+/// string literals only (not identifiers/raw source), so a name appearing inside
+/// an unrelated identifier cannot false-positive.
+fn thunk_contains_package_name_anchor(source: &str, package_name: &str) -> bool {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::default()).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return false;
+    }
+    let mut visitor = StringLiteralAnchorVisitor {
+        needle: package_name,
+        found: false,
+    };
+    visitor.visit_program(&parsed.program);
+    visitor.found
+}
+
+struct StringLiteralAnchorVisitor<'s> {
+    needle: &'s str,
+    found: bool,
+}
+
+impl<'a> Visit<'a> for StringLiteralAnchorVisitor<'_> {
+    fn visit_string_literal(&mut self, literal: &oxc_ast::ast::StringLiteral<'a>) {
+        if literal.value.as_str().contains(self.needle) {
+            self.found = true;
+        }
+    }
 }
 
 struct ExportAssignmentVisitor<'s> {

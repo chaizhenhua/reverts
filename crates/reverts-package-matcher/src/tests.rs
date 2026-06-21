@@ -385,6 +385,91 @@ fn cjs_wrapper_entry_thunk_externalizes_via_object_literal_public_surface() {
     );
 }
 
+/// A single-member package source (the @aws-sdk/credential-provider-http shape:
+/// the whole public API is `fromThing`).
+fn single_member_package_sources() -> [PackageSource; 2] {
+    [
+        PackageSource::source_only(
+            "pkg",
+            "1.0.0",
+            "pkg/impl",
+            "pkg@1.0.0/impl.js",
+            "function fromThing(){}\nexports.fromThing=fromThing;",
+        ),
+        PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg",
+            "pkg@1.0.0/index.js",
+            "export { fromThing } from './impl.js';",
+        ),
+    ]
+}
+
+#[test]
+fn cjs_wrapper_entry_thunk_externalizes_small_surface_with_package_name_anchor() {
+    // A package whose ENTIRE public API is a single member (the
+    // @aws-sdk/credential-provider-http `fromHttp` shape). The fixed ≥4-member
+    // floor would reject it, but assigning its FULL public surface AND embedding
+    // the package's own name as a string literal (which esbuild --minify
+    // preserves) proves identity unspoofably, so it externalizes — unlocking the
+    // small split-package sub-modules that name-recovery (①) targets.
+    let module_source = "var entry=cjs((ex)=>{ex.fromThing=void 0;function impl(){return\"pkg - fromThing\"}ex.fromThing=impl;});";
+    let (rows, mut report) = anonymous_bundle_report_with_match(
+        module_source,
+        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors,
+        128,
+        0,
+    );
+    let package_sources = single_member_package_sources();
+
+    cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+        &rows,
+        &package_sources,
+        &mut report,
+    );
+
+    assert!(
+        report.matches[0].external_importable,
+        "single-member entry thunk with full coverage + name anchor must externalize: {:?}",
+        report.matches[0]
+    );
+    assert_eq!(
+        report.attributions[0].resolved_file.as_deref(),
+        Some("forced-external:semantic-path:pkg@1.0.0/index.js"),
+    );
+}
+
+#[test]
+fn cjs_wrapper_entry_thunk_small_surface_without_anchor_stays_inlined() {
+    // The anchor is REQUIRED for a small surface: a thunk that assigns the one
+    // public member but carries NO string literal naming the package could be a
+    // coincidental single-name collision, so it must NOT externalize on a bare
+    // 1-of-1 match. This is what keeps the small-surface path from re-opening the
+    // misattribution risk the ≥4 floor closed.
+    let module_source =
+        "var entry=cjs((ex)=>{ex.fromThing=void 0;function impl(){return 42}ex.fromThing=impl;});";
+    let (rows, mut report) = anonymous_bundle_report_with_match(
+        module_source,
+        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors,
+        128,
+        0,
+    );
+    let package_sources = single_member_package_sources();
+
+    cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+        &rows,
+        &package_sources,
+        &mut report,
+    );
+
+    assert!(
+        !report.matches[0].external_importable,
+        "single-member match without a package-name anchor must stay inlined"
+    );
+    assert!(report.attributions.is_empty());
+}
+
 /// A package whose bare specifier (`pkg`) resolves — through a re-export stub —
 /// to a public surface of `alpha`/`beta`/`gamma`/`delta`, modelling how a real
 /// npm package (e.g. react's `index.js` → `cjs/react.development.js`) exposes
