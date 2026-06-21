@@ -639,6 +639,42 @@ impl ControlFlowGraph {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResolvedSymbolId(pub u32);
 
+/// How a binding entered scope, projected from oxc's `SymbolFlags`. Captures
+/// the declaration form the decompiler needs to faithfully re-emit a symbol —
+/// in particular `const`/`let`/`var`, kept distinct from one another and from
+/// functions, classes, imports, and type-only declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DeclarationKind {
+    Const,
+    Let,
+    Var,
+    Parameter,
+    Function,
+    Class,
+    Import,
+    CatchParam,
+    Enum,
+    Interface,
+    TypeAlias,
+    TypeParameter,
+    Other,
+}
+
+impl DeclarationKind {
+    /// `true` for `const`/`let`/`var` value declarations.
+    #[must_use]
+    pub fn is_variable(self) -> bool {
+        matches!(self, Self::Const | Self::Let | Self::Var)
+    }
+
+    /// `true` for forms that re-emit as a `const` binding when never reassigned
+    /// (`let`/`var`). `const` is already const; everything else keeps its form.
+    #[must_use]
+    pub fn is_const_upgradeable(self) -> bool {
+        matches!(self, Self::Let | Self::Var)
+    }
+}
+
 /// A scope-resolved binding occurrence.
 ///
 /// Unlike [`DefUseGraph`], which keys everything by `(ModuleId, BindingName)`
@@ -653,12 +689,24 @@ pub struct ResolvedBinding {
     /// Lexical nesting of the binding's declaring scope. `0` is the module
     /// (program root) scope; deeper bindings live inside functions/blocks.
     pub scope_depth: u32,
+    pub declaration: DeclarationKind,
+    /// Whether the binding is ever written after its declaration (oxc's own
+    /// mutation tracking). A `const` is never reassigned; a `let`/`var` that
+    /// is never reassigned can be re-emitted as `const`.
+    pub reassigned: bool,
 }
 
 impl ResolvedBinding {
     #[must_use]
     pub fn is_module_scope(&self) -> bool {
         self.scope_depth == 0
+    }
+
+    /// `true` when this binding was declared `let`/`var` but is never
+    /// reassigned, so it can be faithfully re-emitted as `const`.
+    #[must_use]
+    pub fn can_be_const(&self) -> bool {
+        self.declaration.is_const_upgradeable() && !self.reassigned
     }
 }
 
@@ -726,6 +774,23 @@ impl ResolvedSymbolGraph {
         self.by_name
             .get(&(module_id, BindingName::new(name)))
             .is_some_and(|symbols| symbols.len() > 1)
+    }
+
+    /// The unique module-scope binding named `name`, if exactly one exists at
+    /// depth 0. Returns `None` when the name is absent at module scope or is
+    /// declared more than once there (e.g. a `var`/`function` merge).
+    #[must_use]
+    pub fn module_scope_binding(
+        &self,
+        module_id: ModuleId,
+        name: &str,
+    ) -> Option<&ResolvedBinding> {
+        let mut module_scope = self
+            .symbols_named(module_id, name)
+            .into_iter()
+            .filter(|binding| binding.is_module_scope());
+        let first = module_scope.next()?;
+        module_scope.next().is_none().then_some(first)
     }
 
     /// Module-scope (top-level) bindings of `module_id`, ordered by symbol id.
@@ -977,8 +1042,8 @@ mod tests {
     use super::{
         BindingConstraint, BindingConstraintKind, BindingName, BindingShape, BindingShapeSolution,
         BindingSourceKind, BindingUseKind, ControlFlowEdgeKind, ControlFlowGraph,
-        ControlFlowNodeKind, DefUseGraph, ModuleId, PackageSurface, ResolvedBinding,
-        ResolvedSymbolGraph, ResolvedSymbolId, is_valid_package_name,
+        ControlFlowNodeKind, DeclarationKind, DefUseGraph, ModuleId, PackageSurface,
+        ResolvedBinding, ResolvedSymbolGraph, ResolvedSymbolId, is_valid_package_name,
     };
 
     fn resolved(symbol: u32, name: &str, scope_depth: u32) -> ResolvedBinding {
@@ -986,6 +1051,8 @@ mod tests {
             symbol: ResolvedSymbolId(symbol),
             name: BindingName::new(name),
             scope_depth,
+            declaration: DeclarationKind::Let,
+            reassigned: false,
         }
     }
 
@@ -1016,6 +1083,71 @@ mod tests {
             Some(2),
         );
         assert_eq!(graph.binding_count(), 5);
+    }
+
+    #[test]
+    fn resolved_binding_const_upgrade_and_module_scope_lookup() {
+        let mut graph = ResolvedSymbolGraph::default();
+        graph.record(
+            ModuleId(1),
+            ResolvedBinding {
+                symbol: ResolvedSymbolId(0),
+                name: BindingName::new("immutable"),
+                scope_depth: 0,
+                declaration: DeclarationKind::Let,
+                reassigned: false,
+            },
+        );
+        graph.record(
+            ModuleId(1),
+            ResolvedBinding {
+                symbol: ResolvedSymbolId(1),
+                name: BindingName::new("counter"),
+                scope_depth: 0,
+                declaration: DeclarationKind::Var,
+                reassigned: true,
+            },
+        );
+        graph.record(
+            ModuleId(1),
+            ResolvedBinding {
+                symbol: ResolvedSymbolId(2),
+                name: BindingName::new("frozen"),
+                scope_depth: 0,
+                declaration: DeclarationKind::Const,
+                reassigned: false,
+            },
+        );
+
+        // never-reassigned let → upgradeable to const.
+        assert!(
+            graph
+                .module_scope_binding(ModuleId(1), "immutable")
+                .unwrap()
+                .can_be_const()
+        );
+        // reassigned var → must stay mutable.
+        assert!(
+            !graph
+                .module_scope_binding(ModuleId(1), "counter")
+                .unwrap()
+                .can_be_const()
+        );
+        // already const → not an "upgrade".
+        assert!(
+            !graph
+                .module_scope_binding(ModuleId(1), "frozen")
+                .unwrap()
+                .can_be_const()
+        );
+
+        assert_eq!(
+            graph
+                .module_scope_binding(ModuleId(1), "counter")
+                .map(|binding| binding.declaration),
+            Some(DeclarationKind::Var),
+        );
+        assert_eq!(graph.module_scope_binding(ModuleId(1), "absent"), None);
     }
 
     #[test]

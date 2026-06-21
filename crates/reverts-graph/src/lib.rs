@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
-    Visit,
+    AstKind, Visit,
     ast::{
         Argument, ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
         BindingPatternKind, CallExpression, Class, ComputedMemberExpression, Declaration,
@@ -42,12 +42,13 @@ use oxc_span::GetSpan;
 use oxc_syntax::{
     operator::{AssignmentOperator, LogicalOperator},
     scope::{ScopeFlags, ScopeId},
+    symbol::{SymbolFlags, SymbolId},
 };
 use reverts_input::{InputBundle, ModuleDependencyTarget, ModuleInput, SymbolScope};
 use reverts_ir::{
     BindingConstraint, BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowGraph,
-    ControlFlowNodeKind, DefUseGraph, FlowNodeId, ModuleId, ModuleKind, ResolvedBinding,
-    ResolvedSymbolGraph, ResolvedSymbolId, split_bare_specifier,
+    ControlFlowNodeKind, DeclarationKind, DefUseGraph, FlowNodeId, ModuleId, ModuleKind,
+    ResolvedBinding, ResolvedSymbolGraph, ResolvedSymbolId, split_bare_specifier,
 };
 use reverts_js::{
     JsError, ParseError, ParseGoal, collect_identifier_read_facts, lazy_value_sub_snippets,
@@ -1572,16 +1573,66 @@ fn project_resolved_symbols(module_id: ModuleId, semantic: &Semantic<'_>) -> Res
     let scopes = semantic.scopes();
     for (index, symbol_id) in symbols.symbol_ids().enumerate() {
         let scope_depth = scope_depth(scopes, symbols.get_scope_id(symbol_id));
+        let declaration = declaration_kind(
+            symbols.get_flags(symbol_id),
+            is_parameter(semantic, symbol_id),
+        );
         graph.record(
             module_id,
             ResolvedBinding {
                 symbol: ResolvedSymbolId(index as u32),
                 name: BindingName::new(symbols.get_name(symbol_id)),
                 scope_depth,
+                declaration,
+                reassigned: symbols.symbol_is_mutated(symbol_id),
             },
         );
     }
     graph
+}
+
+/// Classify a symbol's declaration form from its `SymbolFlags`. Order matters:
+/// flags combine (a `const` carries both `ConstVariable` and
+/// `BlockScopedVariable`), so the more specific forms are tested first.
+fn declaration_kind(flags: SymbolFlags, is_parameter: bool) -> DeclarationKind {
+    if flags.intersects(SymbolFlags::Import | SymbolFlags::TypeImport) {
+        DeclarationKind::Import
+    } else if flags.contains(SymbolFlags::CatchVariable) {
+        DeclarationKind::CatchParam
+    } else if flags.contains(SymbolFlags::Function) {
+        DeclarationKind::Function
+    } else if flags.contains(SymbolFlags::Class) {
+        DeclarationKind::Class
+    } else if flags.intersects(SymbolFlags::Enum) {
+        DeclarationKind::Enum
+    } else if flags.contains(SymbolFlags::Interface) {
+        DeclarationKind::Interface
+    } else if flags.contains(SymbolFlags::TypeAlias) {
+        DeclarationKind::TypeAlias
+    } else if flags.contains(SymbolFlags::TypeParameter) {
+        DeclarationKind::TypeParameter
+    } else if flags.contains(SymbolFlags::ConstVariable) {
+        DeclarationKind::Const
+    } else if flags.contains(SymbolFlags::BlockScopedVariable) {
+        DeclarationKind::Let
+    } else if flags.contains(SymbolFlags::FunctionScopedVariable) {
+        // `var` and function parameters both carry `FunctionScopedVariable`;
+        // the declaration node distinguishes them.
+        if is_parameter {
+            DeclarationKind::Parameter
+        } else {
+            DeclarationKind::Var
+        }
+    } else {
+        DeclarationKind::Other
+    }
+}
+
+/// Whether `symbol_id` is declared as a function parameter (its declaration
+/// node is a `FormalParameter`).
+fn is_parameter(semantic: &Semantic<'_>, symbol_id: SymbolId) -> bool {
+    let node_id = semantic.symbols().get_declaration(symbol_id);
+    matches!(semantic.nodes().kind(node_id), AstKind::FormalParameter(_))
 }
 
 /// Lexical nesting depth of `scope_id`: `0` for the program root scope.
@@ -2810,7 +2861,8 @@ mod tests {
         InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SourceSpan, SymbolInput,
     };
     use reverts_ir::{
-        BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowNodeKind, ModuleId,
+        BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowNodeKind,
+        DeclarationKind, ModuleId,
     };
 
     use super::{AstFactKind, AstWrapperKind, RevertsGraph, RuntimePreludeBindingKind};
@@ -2955,6 +3007,85 @@ function g() { let shared = 3; return shared; }
             assert_eq!(bindings.len(), 1, "`{name}` is unique: {bindings:?}");
             assert!(bindings[0].is_module_scope());
             assert!(!resolved.name_is_ambiguous(ModuleId(1), name));
+        }
+    }
+
+    #[test]
+    fn from_input_classifies_declaration_kinds_and_const_upgrade() {
+        let source = "\
+import { dep } from \"mod\";
+export const keep = dep;
+let mutated = 0;
+mutated = 2;
+let stable = 3;
+var legacy = 4;
+function fn(a, b) { return a + b; }
+class Cls {}
+";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let resolved = graph.resolved_symbols();
+        let kind = |name: &str| {
+            resolved
+                .module_scope_binding(ModuleId(1), name)
+                .map(|binding| binding.declaration)
+        };
+
+        assert_eq!(kind("keep"), Some(DeclarationKind::Const));
+        assert_eq!(kind("mutated"), Some(DeclarationKind::Let));
+        assert_eq!(kind("stable"), Some(DeclarationKind::Let));
+        assert_eq!(kind("legacy"), Some(DeclarationKind::Var));
+        assert_eq!(kind("fn"), Some(DeclarationKind::Function));
+        assert_eq!(kind("Cls"), Some(DeclarationKind::Class));
+        assert_eq!(kind("dep"), Some(DeclarationKind::Import));
+
+        // Reassignment / const-upgrade signal.
+        assert!(
+            !resolved
+                .module_scope_binding(ModuleId(1), "keep")
+                .unwrap()
+                .reassigned
+        );
+        assert!(
+            resolved
+                .module_scope_binding(ModuleId(1), "mutated")
+                .unwrap()
+                .reassigned
+        );
+        assert!(
+            !resolved
+                .module_scope_binding(ModuleId(1), "mutated")
+                .unwrap()
+                .can_be_const()
+        );
+        assert!(
+            resolved
+                .module_scope_binding(ModuleId(1), "stable")
+                .unwrap()
+                .can_be_const()
+        );
+        assert!(
+            resolved
+                .module_scope_binding(ModuleId(1), "legacy")
+                .unwrap()
+                .can_be_const()
+        );
+
+        // Function parameters are nested and classified distinctly from `var`.
+        for param in ["a", "b"] {
+            let bindings = resolved.symbols_named(ModuleId(1), param);
+            assert_eq!(bindings.len(), 1, "`{param}`: {bindings:?}");
+            assert_eq!(bindings[0].declaration, DeclarationKind::Parameter);
+            assert!(!bindings[0].is_module_scope());
         }
     }
 
