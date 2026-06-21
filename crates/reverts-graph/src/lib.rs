@@ -37,15 +37,17 @@ use oxc_ast::{
     },
 };
 use oxc_parser::Parser;
+use oxc_semantic::{ScopeTree, Semantic, SemanticBuilder};
 use oxc_span::GetSpan;
 use oxc_syntax::{
     operator::{AssignmentOperator, LogicalOperator},
-    scope::ScopeFlags,
+    scope::{ScopeFlags, ScopeId},
 };
 use reverts_input::{InputBundle, ModuleDependencyTarget, ModuleInput, SymbolScope};
 use reverts_ir::{
     BindingConstraint, BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowGraph,
-    ControlFlowNodeKind, DefUseGraph, FlowNodeId, ModuleId, ModuleKind, split_bare_specifier,
+    ControlFlowNodeKind, DefUseGraph, FlowNodeId, ModuleId, ModuleKind, ResolvedBinding,
+    ResolvedSymbolGraph, ResolvedSymbolId, split_bare_specifier,
 };
 use reverts_js::{
     JsError, ParseError, ParseGoal, collect_identifier_read_facts, lazy_value_sub_snippets,
@@ -60,6 +62,7 @@ pub struct RevertsGraph {
     control_flow: ControlFlowGraph,
     import_export: ImportExportGraph,
     function_calls: FunctionCallGraph,
+    resolved_symbols: ResolvedSymbolGraph,
     runtime_preludes: BTreeMap<u32, RuntimePrelude>,
     runtime_imports: BTreeMap<ModuleId, BTreeSet<RuntimePreludeImport>>,
     ast_facts: Vec<AstFact>,
@@ -446,6 +449,7 @@ pub struct AstFactExtractor;
 pub struct AstExtraction {
     pub facts: Vec<AstFact>,
     pub control_flow: ControlFlowGraph,
+    pub resolved_symbols: ResolvedSymbolGraph,
 }
 
 impl RevertsGraph {
@@ -498,6 +502,7 @@ impl RevertsGraph {
         let mut ast_facts = Vec::new();
         let mut ast_errors = Vec::new();
         let mut control_flow = ControlFlowGraph::default();
+        let mut resolved_symbols = ResolvedSymbolGraph::default();
         let runtime_preludes = extract_runtime_preludes(input);
         for module in &input.modules {
             if module.kind == ModuleKind::Package {
@@ -509,6 +514,7 @@ impl RevertsGraph {
             match AstFactExtractor.extract(module, source.source_file_path, source.source) {
                 Ok(extraction) => {
                     control_flow.extend(extraction.control_flow);
+                    resolved_symbols.extend(extraction.resolved_symbols);
                     for fact in extraction.facts {
                         apply_ast_fact(&mut definitions, &mut def_use, &mut import_export, &fact);
                         ast_facts.push(fact);
@@ -570,6 +576,7 @@ impl RevertsGraph {
             control_flow,
             import_export,
             function_calls,
+            resolved_symbols,
             runtime_preludes,
             runtime_imports,
             ast_facts,
@@ -624,6 +631,11 @@ impl RevertsGraph {
     #[must_use]
     pub fn function_calls(&self) -> &FunctionCallGraph {
         &self.function_calls
+    }
+
+    #[must_use]
+    pub fn resolved_symbols(&self) -> &ResolvedSymbolGraph {
+        &self.resolved_symbols
     }
 
     #[must_use]
@@ -1525,9 +1537,16 @@ impl AstFactExtractor {
                     type_position_depth: 0,
                 };
                 visitor.visit_program(&parsed.program);
+                // Scope-resolved projection: run oxc's semantic analyzer over
+                // the same parsed program (it annotates symbol/reference ids on
+                // the AST in place) and project its `SymbolTable` into owned,
+                // deterministic IR. The name-keyed facts above are untouched.
+                let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+                let resolved_symbols = project_resolved_symbols(module.id, &semantic);
                 return Ok(AstExtraction {
                     facts: visitor.facts,
                     control_flow: extract_control_flow(module.id, &parsed.program),
+                    resolved_symbols,
                 });
             }
             errors.push(ParseError {
@@ -1541,6 +1560,39 @@ impl AstFactExtractor {
             "source could not be parsed",
         ))
     }
+}
+
+/// Project oxc's resolved `SymbolTable` into the owned, scope-aware
+/// [`ResolvedSymbolGraph`]. Symbol ids are assigned by iteration order
+/// (== oxc's own `SymbolId` index, which is deterministic per source), so the
+/// projection is reproducible and arena-lifetime-free.
+fn project_resolved_symbols(module_id: ModuleId, semantic: &Semantic<'_>) -> ResolvedSymbolGraph {
+    let mut graph = ResolvedSymbolGraph::default();
+    let symbols = semantic.symbols();
+    let scopes = semantic.scopes();
+    for (index, symbol_id) in symbols.symbol_ids().enumerate() {
+        let scope_depth = scope_depth(scopes, symbols.get_scope_id(symbol_id));
+        graph.record(
+            module_id,
+            ResolvedBinding {
+                symbol: ResolvedSymbolId(index as u32),
+                name: BindingName::new(symbols.get_name(symbol_id)),
+                scope_depth,
+            },
+        );
+    }
+    graph
+}
+
+/// Lexical nesting depth of `scope_id`: `0` for the program root scope.
+fn scope_depth(scopes: &ScopeTree, scope_id: ScopeId) -> u32 {
+    let mut depth = 0;
+    let mut current = scope_id;
+    while let Some(parent) = scopes.get_parent_id(current) {
+        depth += 1;
+        current = parent;
+    }
+    depth
 }
 
 fn extract_control_flow(module_id: ModuleId, program: &Program<'_>) -> ControlFlowGraph {
@@ -2851,6 +2903,59 @@ function d() { a(); externalThing(); }
                 BindingName::new("c"),
             ]),
         );
+    }
+
+    #[test]
+    fn from_input_projects_scope_resolved_symbols() {
+        // The same name `shared` is declared three times across distinct scopes.
+        // A name-keyed graph collapses them to one node; the resolved projection
+        // keeps three, one of which is module scope.
+        let source = "\
+const shared = 1;
+function f() { const shared = 2; return shared; }
+function g() { let shared = 3; return shared; }
+";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let resolved = graph.resolved_symbols();
+
+        let shared = resolved.symbols_named(ModuleId(1), "shared");
+        assert_eq!(
+            shared.len(),
+            3,
+            "three distinct `shared` bindings: {shared:?}"
+        );
+        assert!(resolved.name_is_ambiguous(ModuleId(1), "shared"));
+        let module_scope_shared: Vec<_> = shared
+            .iter()
+            .filter(|binding| binding.is_module_scope())
+            .collect();
+        assert_eq!(
+            module_scope_shared.len(),
+            1,
+            "exactly one module-scope `shared`",
+        );
+        assert!(
+            shared.iter().filter(|b| b.scope_depth > 0).count() == 2,
+            "two nested `shared` bindings: {shared:?}",
+        );
+
+        // Uniquely-named top-level functions resolve unambiguously at depth 0.
+        for name in ["f", "g"] {
+            let bindings = resolved.symbols_named(ModuleId(1), name);
+            assert_eq!(bindings.len(), 1, "`{name}` is unique: {bindings:?}");
+            assert!(bindings[0].is_module_scope());
+            assert!(!resolved.name_is_ambiguous(ModuleId(1), name));
+        }
     }
 
     #[test]

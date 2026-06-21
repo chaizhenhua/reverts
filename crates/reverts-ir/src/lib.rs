@@ -632,6 +632,135 @@ impl ControlFlowGraph {
     }
 }
 
+/// Module-local identifier for a scope-resolved binding, projected from
+/// oxc's `SymbolTable` (the numeric symbol index within one module's
+/// semantic build). Stable and deterministic for a given source, but only
+/// meaningful within its owning `ModuleId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ResolvedSymbolId(pub u32);
+
+/// A scope-resolved binding occurrence.
+///
+/// Unlike [`DefUseGraph`], which keys everything by `(ModuleId, BindingName)`
+/// and therefore collapses every same-named binding in a module to one node,
+/// each `ResolvedBinding` carries a distinct [`ResolvedSymbolId`] and its
+/// lexical depth — so the minified locals (`t`, `e`, `n`) that esbuild reuses
+/// across functions never conflate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBinding {
+    pub symbol: ResolvedSymbolId,
+    pub name: BindingName,
+    /// Lexical nesting of the binding's declaring scope. `0` is the module
+    /// (program root) scope; deeper bindings live inside functions/blocks.
+    pub scope_depth: u32,
+}
+
+impl ResolvedBinding {
+    #[must_use]
+    pub fn is_module_scope(&self) -> bool {
+        self.scope_depth == 0
+    }
+}
+
+/// Scope-resolved projection of a program's bindings, keyed by module and
+/// [`ResolvedSymbolId`]. A first-class peer of [`DefUseGraph`] that adds the
+/// scope identity the name-keyed graph cannot represent.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ResolvedSymbolGraph {
+    bindings: BTreeMap<ModuleId, BTreeMap<ResolvedSymbolId, ResolvedBinding>>,
+    /// `(module, name) → symbols` reverse index. More than one entry means the
+    /// name is reused across scopes within that module.
+    by_name: BTreeMap<(ModuleId, BindingName), BTreeSet<ResolvedSymbolId>>,
+}
+
+impl ResolvedSymbolGraph {
+    pub fn record(&mut self, module_id: ModuleId, binding: ResolvedBinding) {
+        self.by_name
+            .entry((module_id, binding.name.clone()))
+            .or_default()
+            .insert(binding.symbol);
+        self.bindings
+            .entry(module_id)
+            .or_default()
+            .insert(binding.symbol, binding);
+    }
+
+    /// Merge another graph into this one (modules are disjoint in practice;
+    /// later inserts win on collision).
+    pub fn extend(&mut self, other: Self) {
+        for (module_id, bindings) in other.bindings {
+            for binding in bindings.into_values() {
+                self.record(module_id, binding);
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn binding(
+        &self,
+        module_id: ModuleId,
+        symbol: ResolvedSymbolId,
+    ) -> Option<&ResolvedBinding> {
+        self.bindings.get(&module_id)?.get(&symbol)
+    }
+
+    /// All bindings in `module_id` that share `name`, ordered by symbol id.
+    /// Length > 1 proves the name is reused across distinct scopes.
+    #[must_use]
+    pub fn symbols_named(&self, module_id: ModuleId, name: &str) -> Vec<&ResolvedBinding> {
+        let key = (module_id, BindingName::new(name));
+        let Some(symbols) = self.by_name.get(&key) else {
+            return Vec::new();
+        };
+        let module_bindings = self.bindings.get(&module_id);
+        symbols
+            .iter()
+            .filter_map(|symbol| module_bindings.and_then(|m| m.get(symbol)))
+            .collect()
+    }
+
+    /// `true` when `name` resolves to more than one distinct binding in
+    /// `module_id` — a name-keyed lookup would conflate them.
+    #[must_use]
+    pub fn name_is_ambiguous(&self, module_id: ModuleId, name: &str) -> bool {
+        self.by_name
+            .get(&(module_id, BindingName::new(name)))
+            .is_some_and(|symbols| symbols.len() > 1)
+    }
+
+    /// Module-scope (top-level) bindings of `module_id`, ordered by symbol id.
+    #[must_use]
+    pub fn module_scope_bindings(&self, module_id: ModuleId) -> Vec<&ResolvedBinding> {
+        self.bindings
+            .get(&module_id)
+            .map(|bindings| {
+                bindings
+                    .values()
+                    .filter(|binding| binding.is_module_scope())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn bindings_for(&self, module_id: ModuleId) -> Vec<&ResolvedBinding> {
+        self.bindings
+            .get(&module_id)
+            .map(|bindings| bindings.values().collect())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bindings.values().all(BTreeMap::is_empty)
+    }
+
+    #[must_use]
+    pub fn binding_count(&self) -> usize {
+        self.bindings.values().map(BTreeMap::len).sum()
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BindingShapeSolution {
     shapes: BTreeMap<(ModuleId, BindingName), BindingShape>,
@@ -848,8 +977,46 @@ mod tests {
     use super::{
         BindingConstraint, BindingConstraintKind, BindingName, BindingShape, BindingShapeSolution,
         BindingSourceKind, BindingUseKind, ControlFlowEdgeKind, ControlFlowGraph,
-        ControlFlowNodeKind, DefUseGraph, ModuleId, PackageSurface, is_valid_package_name,
+        ControlFlowNodeKind, DefUseGraph, ModuleId, PackageSurface, ResolvedBinding,
+        ResolvedSymbolGraph, ResolvedSymbolId, is_valid_package_name,
     };
+
+    fn resolved(symbol: u32, name: &str, scope_depth: u32) -> ResolvedBinding {
+        ResolvedBinding {
+            symbol: ResolvedSymbolId(symbol),
+            name: BindingName::new(name),
+            scope_depth,
+        }
+    }
+
+    #[test]
+    fn resolved_symbol_graph_disambiguates_same_name_across_scopes() {
+        let mut graph = ResolvedSymbolGraph::default();
+        graph.record(ModuleId(1), resolved(0, "t", 0));
+        graph.record(ModuleId(1), resolved(1, "t", 1));
+        graph.record(ModuleId(1), resolved(2, "t", 2));
+        graph.record(ModuleId(1), resolved(3, "unique", 0));
+        // A different module reusing the same symbol ids must not leak in.
+        graph.record(ModuleId(2), resolved(0, "t", 0));
+
+        let module_one = graph.symbols_named(ModuleId(1), "t");
+        assert_eq!(module_one.len(), 3);
+        assert!(graph.name_is_ambiguous(ModuleId(1), "t"));
+        assert!(!graph.name_is_ambiguous(ModuleId(1), "unique"));
+        assert!(!graph.name_is_ambiguous(ModuleId(2), "t"));
+
+        let module_scope = graph.module_scope_bindings(ModuleId(1));
+        assert_eq!(module_scope.len(), 2, "t@0 and unique@0");
+        assert!(module_scope.iter().all(|binding| binding.is_module_scope()));
+
+        assert_eq!(
+            graph
+                .binding(ModuleId(1), ResolvedSymbolId(2))
+                .map(|binding| binding.scope_depth),
+            Some(2),
+        );
+        assert_eq!(graph.binding_count(), 5);
+    }
 
     #[test]
     fn package_surface_does_not_accept_absent_subpath() {
