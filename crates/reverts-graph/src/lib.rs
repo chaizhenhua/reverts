@@ -1015,7 +1015,6 @@ fn collect_runtime_prelude_declarations(
     let mut namespace_exports = Vec::new();
     let mut entrypoint_candidate = None;
     let mut entrypoint_side_effects = Vec::new();
-    let tail_runtime_start = module_spans.iter().map(|(_, end)| *end).max().unwrap_or(0);
     for statement in &program.body {
         let span = statement.span();
         if !span_outside_module_spans(span.start, span.end, module_spans) {
@@ -1057,9 +1056,17 @@ fn collect_runtime_prelude_declarations(
                 snippets.push(statement_source);
                 continue;
             }
-            if span.start >= tail_runtime_start
-                && let Some(side_effect) =
-                    runtime_entrypoint_side_effect_from_statement(statement, source)
+            // A bare, binding-less top-level statement outside every module span
+            // is genuine eager prelude code the original program runs. It must be
+            // preserved as an entrypoint side effect REGARDLESS of byte position:
+            // restricting capture to the tail (`span.start >= tail_runtime_start`)
+            // silently dropped mid-bundle side effects whose only link to live
+            // code is a `globalThis` side-channel the binding graph cannot see —
+            // e.g. zod's `(VRe=globalThis).__zod_globalRegistry ?? (…=Sqi())` init,
+            // leaving the surviving `const HV=globalThis.__zod_globalRegistry`
+            // reader pointed at `undefined`.
+            if let Some(side_effect) =
+                runtime_entrypoint_side_effect_from_statement(statement, source)
             {
                 entrypoint_side_effects.push(side_effect);
             }
@@ -4942,5 +4949,60 @@ mod iife_kind_visibility_tests {
         };
         let kind = iife_kind(&call.callee);
         assert_eq!(kind, Some(AstWrapperKind::FunctionIife));
+    }
+}
+
+#[cfg(test)]
+mod runtime_prelude_side_effect_tests {
+    use super::collect_runtime_prelude_declarations;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    // A bare, binding-less top-level expression statement with an observable side
+    // effect (a `globalThis` member init) that sits in the MIDDLE of a bundle —
+    // before the last module span — must still be preserved as an entrypoint side
+    // effect. Mirrors zod's global-registry init
+    // `(VRe=globalThis).__zod_globalRegistry ?? (VRe.__zod_globalRegistry=Sqi())`,
+    // whose only link to the live `const HV=globalThis.__zod_globalRegistry`
+    // reader is the `globalThis` side-channel the binding graph cannot see.
+    #[test]
+    fn mid_bundle_global_init_side_effect_is_preserved() {
+        let source = concat!(
+            "var mk = () => ({ add() {} });\n",
+            "(G = globalThis).__reg ?? (G.__reg = mk());\n", // mid-bundle side effect
+            "var moduleRegion = 123;\n",                     // stands in for an extracted module
+            "function main() { return 1; }\n",               // declared entrypoint binding
+            "main();\n",                                     // tail entrypoint call
+        );
+        let module_start = source.find("var moduleRegion").expect("region present") as u32;
+        let module_end = module_start + "var moduleRegion = 123;".len() as u32;
+
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::default()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "fixture parses: {:?}",
+            parsed.errors
+        );
+
+        let collection = collect_runtime_prelude_declarations(
+            1,
+            &parsed.program,
+            source,
+            &[(module_start, module_end)],
+        );
+        let entrypoint = collection
+            .entrypoint
+            .expect("the tail `main()` call is the entrypoint");
+        let captured: Vec<&str> = entrypoint
+            .side_effects
+            .iter()
+            .map(|side_effect| side_effect.source.as_str())
+            .collect();
+        assert!(
+            captured.iter().any(|source| source.contains("__reg")),
+            "mid-bundle global-registry init must be preserved as a side effect, got: {captured:?}"
+        );
     }
 }

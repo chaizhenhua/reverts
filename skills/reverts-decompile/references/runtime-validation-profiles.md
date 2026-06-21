@@ -81,6 +81,54 @@ applicable profiles.
    `document.readyState == "complete"`, collect console logs, and fail on errors.
 5. Exit with `app.quit()` or the documented shutdown path and require exit code 0.
 
+### Deterministic main-process equivalence smoke (when a real launch is infeasible)
+
+A branded production Electron app (no display, requires sign-in, spawns helper
+processes) often cannot be driven to renderer readiness in a sandbox. A real
+`electron .` launch is also a poor *recovery* signal: the app fails for
+environmental reasons (auth, network, GUI) long before any recovery defect
+surfaces, and launching it has real side effects. Use a deterministic
+**original-vs-recovered equivalence trace** as the main-process smoke:
+
+1. Build an instrumented stub that intercepts `require('electron')` (and native
+   `.node`/native packages, plus `net`/`http(s)`/`tls`/`child_process` so the run
+   does no real I/O) via a `Module._load` hook. Model a real *main* process:
+   `ipcRenderer` is `undefined`; `app.getPath`/`getVersion`/`getName` return
+   strings; `app.whenReady()` resolves; define `process.versions.electron`. Every
+   electron interaction (property path + call + arg shape) appends to a
+   deterministic trace; deep-proxy everything else.
+2. Run the **original** bundle entry (`.vite/build/index.js`) and the
+   **recovered** entry (`dist/cli.js`) under the *identical* stub. The program is
+   the same; only its textual form differs, so the two traces — and the
+   load/async error sets — must match.
+3. Pass criterion: recovered trace length and ordered interaction set equal the
+   original's, and recovered raises no error the original does not. A divergence,
+   or a recovered-only `SyntaxError`/`ReferenceError`/`has already been
+   declared`/`before initialization`/dropped-statement crash, is a recovery
+   defect — triage with the buckets above and fix the pipeline.
+
+Module-load *order* legitimately shifts when a bundle is split into modules, so
+diff the interaction **multiset** and the error set, not raw positional indices.
+This smoke is deterministic, side-effect-free, and catches real
+divergences (e.g. a dropped side-effecting top-level statement) that `tsc` cannot.
+
+### Known recovery defect class: dropped side-effecting top-level statement
+
+Symptom: recovered crashes at runtime (`Cannot read properties of undefined`)
+where the original runs clean, because a bare top-level **expression statement**
+with an observable side effect — e.g. a lazy global-registry init
+`(X=globalThis).__reg ?? (X.__reg = make())` whose only binding `X` is reachable
+from live code *only* through the `globalThis` side-channel — was dropped while
+its sibling read (`const R = globalThis.__reg`) survived. The static binding
+graph cannot see the `globalThis` link, so the whole cluster
+(`var X` / its class / its init) is treated as unreachable. The drop happens
+during lowered-module-source construction (before the planner prunes), so the
+side-effecting statement is gone by `PlanModulesPass`. A side-effecting top-level
+expression statement (member-assignment to a non-local object, or a call) must be
+preserved and must keep its referenced bindings live. Detect it with the
+equivalence smoke above (original-vs-recovered trace divergence pinpoints the
+crashing call site).
+
 ## CLI / Node bundle
 
 1. Run `node ./<entry>.ts` or `tsx ./<entry>.ts` with `--version`, `--help`, or
