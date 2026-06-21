@@ -7,9 +7,13 @@
 use std::time::Instant;
 
 use reverts_input::sqlite::load_project_rows_from_connection;
+use reverts_input::{InputBundle, InputRows};
 use reverts_ir::ModuleKind;
+use reverts_model::ProgramModel;
 use reverts_observe::AuditReport;
-use reverts_package_matcher::match_packages_with_pipeline;
+use reverts_package_matcher::{
+    PackageSource, anchor_prelude_bindings, match_packages_with_pipeline, prelude_binding_sources,
+};
 use reverts_pipeline::prepare_input_rows_for_pipeline_with_reserved_ids;
 use rusqlite::Connection;
 
@@ -19,6 +23,7 @@ use crate::commands::package_surface_decisions::{
 };
 use crate::errors::MatchPackagesError;
 use crate::persistence::attributions;
+use crate::persistence::island_anchors::{IslandPackageAnchor, persist_island_anchors};
 use crate::persistence::repository::{MatchPackagePersistence, SqliteMatchPackagePersistence};
 use crate::{
     MatchPackagesOutcome, dedup_audit_report, enrich_package_modules_from_source_units,
@@ -151,6 +156,18 @@ pub(crate) fn match_packages_from_connection(
     mark_timing!("source_quality_counts");
     let pipeline_report = match_packages_with_pipeline(&rows, &package_sources, package_filter);
     mark_timing!("match_pipeline");
+    // Recover bundled libraries flattened into the scope-hoisted eager entry
+    // island. They never become model modules, so the per-module pipeline above
+    // never sees them; this anchors them per-binding against the same package
+    // corpus. Skipped when there is no corpus to match against.
+    let island_anchors = compute_island_anchors(&rows, &package_sources);
+    if !island_anchors.is_empty() {
+        eprintln!(
+            "match-packages: anchored {} eager entry-island binding(s) to packages",
+            island_anchors.len()
+        );
+    }
+    mark_timing!("island_anchor");
     let mut report = pipeline_report.package_report;
     report.audit.extend(source_import_audit);
     suppress_rejected_or_blocked_surfaces(connection, args.project_id, &mut report)?;
@@ -188,6 +205,9 @@ pub(crate) fn match_packages_from_connection(
     } else {
         (0, 0, 0)
     };
+    if args.apply {
+        persist_island_anchors(connection, i64::from(args.project_id), &island_anchors)?;
+    }
     mark_timing!("persist");
     if timing_enabled {
         let _ = timing_last;
@@ -238,4 +258,56 @@ pub(crate) fn match_packages_from_connection(
         audit,
         external_import_blockers: external_import_safety.blockers,
     })
+}
+
+/// Anchor the eager entry-island bindings of a scope-hoisted bundle to package
+/// sources.
+///
+/// The per-module matcher above only sees model modules; a scope-hoisting
+/// bundler flattens its eagerly-evaluated modules (including bundled libraries)
+/// into one top-level scope with no module of their own, so they are invisible
+/// to it. Here we rebuild the program model purely to reach the runtime
+/// preludes, enumerate their eager (`SourceBacked`) bindings, and anchor each
+/// against the same `package_sources` corpus via the function-ownership
+/// cascade. Returns one row per anchored binding, keyed by the prelude's
+/// `source_file_id` so the generate stage can join them back.
+///
+/// With no corpus there is nothing to match against, so the (non-trivial) model
+/// rebuild is skipped.
+fn compute_island_anchors(
+    rows: &InputRows,
+    package_sources: &[PackageSource],
+) -> Vec<IslandPackageAnchor> {
+    if package_sources.is_empty() {
+        return Vec::new();
+    }
+    let Ok(input) = InputBundle::from_rows(rows.clone()) else {
+        return Vec::new();
+    };
+    let model = ProgramModel::from_input(input);
+
+    let mut anchors = Vec::new();
+    for (source_file_id, prelude) in model.graph().runtime_preludes() {
+        let binding_sources = prelude_binding_sources(prelude);
+        if binding_sources.is_empty() {
+            continue;
+        }
+        for anchor in anchor_prelude_bindings(&binding_sources, package_sources) {
+            anchors.push(IslandPackageAnchor {
+                source_file_id: *source_file_id,
+                binding_name: anchor.binding,
+                package_name: anchor.package_name,
+                package_version: anchor.package_version,
+                export_specifier: anchor.export_specifier,
+                function_span_start: anchor.function_span.start,
+                function_span_end: anchor.function_span.end,
+                tier: anchor.confidence.tier.as_str().to_string(),
+                external_importable: anchor.external_importable,
+                top_score: anchor.confidence.top_score,
+                runner_up_score: anchor.confidence.runner_up_score,
+                margin: anchor.confidence.margin,
+            });
+        }
+    }
+    anchors
 }
