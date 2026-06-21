@@ -288,6 +288,41 @@ Check with `decompile_status`: the `public_surface` field tracks public-surface 
 - unnamed app module query `total == 0`
 - `public_surface` ratio == 100% (all public-surface symbols named)
 
+### P0 — naming-denominator integrity (no silent exclusion)
+
+The completion ratio is only meaningful if its denominator covers **all**
+recovered first-party code. A scope-hoisting bundler (esbuild/rollup) leaves a
+large block of eager top-level code that belongs to no module — the pipeline
+emits it as a single **unmodularized recovered-code file** (an "entry island")
+owned by no `module_id`. That file can hold the *majority* of the application's
+declarations. If the naming progress reports a small denominator next to a large
+generated entry-island file, the denominator is excluding it and a "100%" is
+fake.
+
+Before accepting the gate:
+
+1. Confirm the naming universe includes module-less code. The naming progress
+   report lists a per-file group with a null `module_id`
+   (`rename_channel: "binding-names"`) for every unmodularized recovered-code
+   file. Its symbol count must be non-zero whenever such a file was generated,
+   and those symbols MUST be in the `full`-tier denominator.
+2. If a generated entry-island file exists but contributes **zero** symbols to
+   the denominator, that is a pipeline defect (symbol indexing not registering
+   the island), not a naming-complete state. File it and fix the mechanism — do
+   not proceed to output.
+3. Never declare naming complete from `reached_level` alone. A `complete: true`
+   over an under-counted universe is a false pass.
+
+### Naming module-less (entry-island) code
+
+Module-less bindings have no `symbols` row, so they are NOT named through the
+module/symbol channel. They are named through the **file-path-keyed binding
+channel** (`rename_channel: "binding-names"` in the naming plan/progress):
+recover names for those bindings keyed by `(file_path, original_name)` and
+accept them through the binding-name path. The generator applies accepted
+binding names back to the same emitted file. The same precision gates apply;
+do not accept low-confidence island names just to move the ratio.
+
 ### P1 — minimize aggressively, but allow explicit leftovers when justified
 
 - `mechanical_semantic_name` (module-level must be 0; symbol/global-level may have residuals)
