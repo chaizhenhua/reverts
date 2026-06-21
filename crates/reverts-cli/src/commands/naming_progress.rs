@@ -160,9 +160,12 @@ fn first_party_module_ids(
     excluded: &BTreeSet<ModuleId>,
 ) -> BTreeSet<ModuleId> {
     let mut accepted_emission: BTreeMap<ModuleId, PackageEmissionMode> = BTreeMap::new();
+    let mut package_owned_source_modules = BTreeSet::new();
     for attribution in &input.package_attributions {
         if attribution.status == PackageAttributionStatus::Accepted {
             accepted_emission.insert(attribution.module_id, attribution.emission_mode);
+        } else if package_attribution_is_source_preserved_package_ownership(attribution) {
+            package_owned_source_modules.insert(attribution.module_id);
         }
     }
     input
@@ -176,6 +179,9 @@ fn first_party_module_ids(
             if is_vendored_path(&module.semantic_path) {
                 return false;
             }
+            if package_owned_source_modules.contains(&module.id) {
+                return false;
+            }
             match accepted_emission.get(&module.id) {
                 Some(mode) => *mode == PackageEmissionMode::ApplicationSource,
                 None => module.kind == ModuleKind::Application,
@@ -183,6 +189,24 @@ fn first_party_module_ids(
         })
         .map(|module| module.id)
         .collect()
+}
+
+fn package_attribution_is_source_preserved_package_ownership(
+    attribution: &reverts_input::PackageAttributionInput,
+) -> bool {
+    if attribution.status != PackageAttributionStatus::Rejected
+        || attribution.emission_mode != PackageEmissionMode::ApplicationSource
+        || attribution.package_version.is_none()
+    {
+        return false;
+    }
+    let Some(reason) = attribution.rejection_reason.as_deref() else {
+        return false;
+    };
+    reason.contains("matched package ownership")
+        || reason.contains("matched package external import")
+        || reason.contains("function-level package ownership evidence")
+        || (reason.contains("external import specifier") && reason.contains("vendored instead"))
 }
 
 /// Path evidence that a module is vendored third-party source.
@@ -388,10 +412,17 @@ pub fn naming_progress_from_sqlite(
     // The actionable universe is the emitted output; build the export/first-party
     // view before the emit consumes `prepared`.
     let universe = emitted_universe(&prepared.program, &excluded);
-    let run = generate_project_from_prepared(prepared).map_err(NamingProgressError::Pipeline)?;
+    let symbol_index = if let Some(path) = &args.symbol_index {
+        crate::commands::symbol_index_io::load_symbol_index(path.as_path())
+            .map_err(NamingProgressError::ReadSymbolIndex)?
+    } else {
+        let run =
+            generate_project_from_prepared(prepared).map_err(NamingProgressError::Pipeline)?;
+        run.symbol_index
+    };
     Ok(compute_naming_progress(
         args.project_id,
-        &run.symbol_index,
+        &symbol_index,
         &universe,
     ))
 }
@@ -632,6 +663,34 @@ mod tests {
         assert!(is_vendored_path("node_modules/ws/index.js"));
         assert!(!is_vendored_path("modules/495-esbuild-sfr.ts"));
         assert!(!is_vendored_path("src/index.ts"));
+    }
+
+    #[test]
+    fn source_preserved_package_ownership_is_excluded_from_first_party_naming() {
+        use reverts_input::{PackageAttributionInput, PackageEmissionMode};
+        use reverts_ir::ModuleId;
+
+        let mut attribution = PackageAttributionInput::rejected_source(
+            ModuleId(1015),
+            "lodash-es",
+            "matched package ownership, but the evidence does not prove a safe single external import",
+        );
+        attribution.package_version = Some("4.17.21".to_string());
+
+        assert!(super::package_attribution_is_source_preserved_package_ownership(&attribution));
+
+        attribution.rejection_reason =
+            Some("selected package version did not match this module source".to_string());
+        assert!(!super::package_attribution_is_source_preserved_package_ownership(&attribution));
+
+        attribution.rejection_reason =
+            Some("matched package ownership, but source is not importable".to_string());
+        attribution.package_version = None;
+        assert!(!super::package_attribution_is_source_preserved_package_ownership(&attribution));
+
+        attribution.package_version = Some("4.17.21".to_string());
+        attribution.emission_mode = PackageEmissionMode::ExternalImport;
+        assert!(!super::package_attribution_is_source_preserved_package_ownership(&attribution));
     }
 
     fn universe(first_party: &[u32], exported: &[(u32, &str)]) -> super::EmittedUniverse {

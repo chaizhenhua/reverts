@@ -476,6 +476,7 @@ fn serialize_symbol_index(entries: &[reverts_pipeline::SymbolIndexEntry]) -> Str
                 "emitted_name": entry.emitted_name,
                 "semantic_named": entry.semantic_named,
                 "file_path": entry.file_path,
+                "function_like": entry.function_like,
             })
         })
         .collect();

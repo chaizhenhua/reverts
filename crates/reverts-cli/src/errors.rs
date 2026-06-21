@@ -451,6 +451,7 @@ pub enum NamingProgressError {
     LoadInput(SqliteInputError),
     Pipeline(PipelineError),
     Classification(ModuleClassifyError),
+    ReadSymbolIndex(io::Error),
 }
 
 impl fmt::Display for NamingProgressError {
@@ -459,6 +460,9 @@ impl fmt::Display for NamingProgressError {
             Self::LoadInput(source) => write!(formatter, "{source}"),
             Self::Pipeline(source) => write!(formatter, "{source}"),
             Self::Classification(source) => write!(formatter, "{source}"),
+            Self::ReadSymbolIndex(source) => {
+                write!(formatter, "failed to read symbol index: {source}")
+            }
         }
     }
 }
@@ -469,6 +473,7 @@ impl Error for NamingProgressError {
             Self::LoadInput(source) => Some(source),
             Self::Pipeline(source) => Some(source),
             Self::Classification(source) => Some(source),
+            Self::ReadSymbolIndex(source) => Some(source),
         }
     }
 }

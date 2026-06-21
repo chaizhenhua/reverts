@@ -15,6 +15,7 @@ use crate::args::{NamingPlanArgs, NamingProgressTier};
 use crate::commands::module_classify::excluded_module_ids_from_sqlite;
 use crate::commands::naming_gates::evidence_tokens;
 use crate::commands::naming_progress::{Tier, classify_emitted_entry, emitted_universe};
+use crate::commands::symbol_index_io::load_symbol_index;
 use crate::errors::{CliRunError, NamingProgressError};
 use crate::input_externalization::load_project_bundle_with_package_externalization;
 
@@ -36,11 +37,17 @@ pub fn naming_plan_json(args: &NamingPlanArgs) -> Result<String, NamingProgressE
     // open and rename); tier/named come from the same classifier as
     // `naming-progress`, so plan and progress stay coherent.
     let universe = emitted_universe(&prepared.program, &excluded);
-    let run = generate_project_from_prepared(prepared).map_err(NamingProgressError::Pipeline)?;
+    let symbol_index = if let Some(path) = &args.symbol_index {
+        load_symbol_index(path.as_path()).map_err(NamingProgressError::ReadSymbolIndex)?
+    } else {
+        let run =
+            generate_project_from_prepared(prepared).map_err(NamingProgressError::Pipeline)?;
+        run.symbol_index
+    };
 
     let mut by_module: BTreeMap<u32, (String, Vec<serde_json::Value>)> = BTreeMap::new();
     let mut target_count = 0_usize;
-    for entry in &run.symbol_index {
+    for entry in &symbol_index {
         let Some(detail) = classify_emitted_entry(entry, &universe) else {
             continue;
         };

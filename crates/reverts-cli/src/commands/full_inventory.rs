@@ -163,6 +163,10 @@ pub fn full_inventory_report(args: &FullInventoryArgs) -> Result<Value, CliRunEr
             project_id: args.project_id,
             target_level: NamingProgressTier::Full,
             json: true,
+            symbol_index: args
+                .output_root
+                .as_ref()
+                .map(|root| root.join("symbol-index.json")),
         };
         let progress = naming_progress_from_sqlite(&progress_args)
             .map_err(|source| CliRunError::FullInventory(source.to_string()))?;
