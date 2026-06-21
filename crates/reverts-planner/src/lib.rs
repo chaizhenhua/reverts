@@ -227,9 +227,10 @@ use statements::runtime_helper_setter_declarations;
 use statements::{
     default_import_statement, default_named_import_alias_statement, named_export_statement,
     named_import_alias_statement, named_import_statement, named_reexport_statement,
-    namespace_import_statement, node_require_prelude_statement, noop_function_statement,
-    runtime_helper_import_statement, runtime_helper_setter_name, runtime_helpers_path,
-    runtime_lazy_helpers_path, runtime_namespace_export_statement, variable_declaration_statement,
+    namespace_import_statement, node_cjs_environment_prelude, node_require_prelude_statement,
+    noop_function_statement, runtime_helper_import_statement, runtime_helper_setter_name,
+    runtime_helpers_path, runtime_lazy_helpers_path, runtime_namespace_export_statement,
+    variable_declaration_statement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

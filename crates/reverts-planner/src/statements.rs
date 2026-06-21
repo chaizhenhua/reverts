@@ -162,6 +162,44 @@ pub(crate) fn node_require_prelude_statement() -> String {
         .to_string()
 }
 
+/// ESM polyfills for the CommonJS globals a recovered esbuild bundle still uses
+/// (`require`, `__filename`, `__dirname`). esbuild's node-ESM banner references
+/// these, but they are undefined in a real ES module, so reconstruct them from
+/// `import.meta.url`. Returns `None` when the source needs none of them.
+pub(crate) fn node_cjs_environment_prelude(
+    needs_require: bool,
+    needs_filename: bool,
+    needs_dirname: bool,
+) -> Option<String> {
+    // `__dirname` is derived from `__filename`.
+    let needs_filename = needs_filename || needs_dirname;
+    if !needs_require && !needs_filename {
+        return None;
+    }
+    let mut lines = Vec::new();
+    if needs_require {
+        lines.push("import { createRequire } from 'node:module';".to_string());
+    }
+    if needs_filename {
+        lines.push(
+            "import { fileURLToPath as __reverts_fileURLToPath } from 'node:url';".to_string(),
+        );
+    }
+    if needs_dirname {
+        lines.push("import { dirname as __reverts_dirname } from 'node:path';".to_string());
+    }
+    if needs_require {
+        lines.push("var require = createRequire(import.meta.url);".to_string());
+    }
+    if needs_filename {
+        lines.push("var __filename = __reverts_fileURLToPath(import.meta.url);".to_string());
+    }
+    if needs_dirname {
+        lines.push("var __dirname = __reverts_dirname(__filename);".to_string());
+    }
+    Some(lines.join("\n"))
+}
+
 pub(crate) fn noop_function_statement(binding: &BindingName) -> String {
     format!("function {}() {{}}", binding.as_str())
 }

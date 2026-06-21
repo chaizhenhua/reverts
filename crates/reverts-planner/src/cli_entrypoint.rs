@@ -402,6 +402,21 @@ pub(crate) fn emit_planned_entrypoint_island(
     } else {
         rewrite_runtime_helper_writes(island.source.as_str(), &written_runtime_bindings)
     };
+    // The entrypoint island carries the main bundle's recovered esbuild node-ESM
+    // banner, which uses the CommonJS globals `require`/`__filename`/`__dirname`
+    // (undefined in the emitted ES module) — prepend `import.meta.url`-based
+    // polyfills for the ones it uses and does not bind itself.
+    let island_binds = |name: &str| planned_bindings.contains(&BindingName::new(name));
+    if let Some(prelude) = crate::node_cjs_environment_prelude(
+        crate::contains_call_to_identifier(island_source.as_str(), "require")
+            && !island_binds("require"),
+        crate::contains_identifier_reference(island_source.as_str(), "__filename")
+            && !island_binds("__filename"),
+        crate::contains_identifier_reference(island_source.as_str(), "__dirname")
+            && !island_binds("__dirname"),
+    ) {
+        file.push_source(prelude);
+    }
     file.push_source(island_source);
     file.push_source(named_export_statement([&entrypoint.callee].into_iter()));
     file.add_binding(PlannedBinding::new(

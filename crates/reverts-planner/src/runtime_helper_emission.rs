@@ -455,6 +455,25 @@ pub(crate) fn emit_runtime_helper_files(
             file.push_source(noop_function_statement(binding));
         }
         if !helper_closure.source.trim().is_empty() {
+            // The recovered esbuild node-ESM banner still uses the CommonJS
+            // globals `require`/`__filename`/`__dirname` (e.g. `require('path')`,
+            // `pathToFileURL(__filename)`); they are undefined in the emitted ES
+            // module, so prepend `import.meta.url`-based polyfills — same as the
+            // per-module body path — for the ones the source uses and does not
+            // bind itself.
+            let source = helper_closure.source.as_str();
+            let bound = |name: &str| {
+                helper_closure
+                    .emitted_bindings
+                    .contains(&BindingName::new(name))
+            };
+            if let Some(prelude) = crate::node_cjs_environment_prelude(
+                crate::contains_call_to_identifier(source, "require") && !bound("require"),
+                crate::contains_identifier_reference(source, "__filename") && !bound("__filename"),
+                crate::contains_identifier_reference(source, "__dirname") && !bound("__dirname"),
+            ) {
+                file.push_source(prelude);
+            }
             file.push_source(helper_closure.source);
         }
         // Phase 10b: skip setter functions for migrated primary bindings;
