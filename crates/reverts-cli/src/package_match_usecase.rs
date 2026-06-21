@@ -72,6 +72,20 @@ pub(crate) fn match_packages_from_connection(
         &args.reference_source_roots,
         &mut source_import_audit,
     )?;
+    if !args.reference_source_roots.is_empty() {
+        let preview = reference_package_names
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "match-packages: discovered {} reference-source package candidate(s){}{}",
+            reference_package_names.len(),
+            if preview.is_empty() { "" } else { ": " },
+            preview
+        );
+    }
     let package_names = if args.package_names.is_empty() {
         let mut package_names = package_source_load_scope(&rows, &[], &mut source_import_audit);
         package_names.extend(reference_package_names);
