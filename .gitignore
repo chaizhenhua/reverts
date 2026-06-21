@@ -4,3 +4,4 @@
 /.claude/
 *.log
 /docs/superpowers/
+/node_modules
