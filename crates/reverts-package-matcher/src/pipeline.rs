@@ -1318,25 +1318,8 @@ fn dependency_components(rows: &InputRows) -> Vec<BTreeSet<ModuleId>> {
                 .insert(dependency.from_module_id);
         }
     }
-    let mut seen = BTreeSet::new();
-    let mut components = Vec::new();
-    for module_id in adjacency.keys().copied().collect::<Vec<_>>() {
-        if !seen.insert(module_id) {
-            continue;
-        }
-        let mut component = BTreeSet::new();
-        let mut stack = vec![module_id];
-        while let Some(current) = stack.pop() {
-            component.insert(current);
-            for neighbor in adjacency.get(&current).into_iter().flatten() {
-                if seen.insert(*neighbor) {
-                    stack.push(*neighbor);
-                }
-            }
-        }
-        components.push(component);
-    }
-    components
+    let seeds = adjacency.keys().copied().collect::<Vec<_>>();
+    crate::package_helpers::connected_components(&adjacency, seeds)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

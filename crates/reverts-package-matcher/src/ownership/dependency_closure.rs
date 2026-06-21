@@ -34,30 +34,7 @@ pub(crate) fn package_dependency_components(rows: &InputRows) -> Vec<BTreeSet<Mo
         adjacency.entry(to).or_default().insert(from);
     }
 
-    let mut seen = BTreeSet::new();
-    let mut components = Vec::new();
-    for module_id in package_modules {
-        if seen.contains(&module_id) {
-            continue;
-        }
-        let mut stack = vec![module_id];
-        let mut component = BTreeSet::new();
-        while let Some(current) = stack.pop() {
-            if !seen.insert(current) {
-                continue;
-            }
-            component.insert(current);
-            if let Some(neighbors) = adjacency.get(&current) {
-                for neighbor in neighbors {
-                    if !seen.contains(neighbor) {
-                        stack.push(*neighbor);
-                    }
-                }
-            }
-        }
-        components.push(component);
-    }
-    components
+    crate::package_helpers::connected_components(&adjacency, package_modules)
 }
 
 pub(crate) fn has_direct_neighborhood_package_contradiction(

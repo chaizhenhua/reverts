@@ -15,6 +15,38 @@ use semver::Version;
 
 use crate::{PackageSource, VersionedPackageMatchReport};
 
+/// Connected components of an undirected module adjacency, seeded by `seeds`
+/// (the seed iteration order determines component order). A seed with no entry in
+/// `adjacency` — or an empty one — forms a singleton component. Shared by the
+/// dependency-closure ownership strategy and the matcher pipeline, which both
+/// previously carried an identical hand-rolled DFS.
+pub(crate) fn connected_components(
+    adjacency: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
+    seeds: impl IntoIterator<Item = ModuleId>,
+) -> Vec<BTreeSet<ModuleId>> {
+    let mut seen = BTreeSet::<ModuleId>::new();
+    let mut components = Vec::new();
+    for seed in seeds {
+        if !seen.insert(seed) {
+            continue;
+        }
+        let mut component = BTreeSet::new();
+        let mut stack = vec![seed];
+        while let Some(current) = stack.pop() {
+            component.insert(current);
+            if let Some(neighbors) = adjacency.get(&current) {
+                for &neighbor in neighbors {
+                    if seen.insert(neighbor) {
+                        stack.push(neighbor);
+                    }
+                }
+            }
+        }
+        components.push(component);
+    }
+    components
+}
+
 #[must_use]
 pub fn direct_module_dependencies(rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
     rows.dependencies
