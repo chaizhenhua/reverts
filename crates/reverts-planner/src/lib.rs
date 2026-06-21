@@ -16,6 +16,10 @@ mod export_completion;
 mod external_package_adapter_emit;
 mod identifiers;
 mod island_clustering;
+// Extraction primitive for behavior-preserving island splitting; wired into
+// emission (under the tsc + equivalence gate) in a follow-up step.
+#[allow(dead_code)]
+mod island_split;
 mod import_coalesce;
 mod localize_written_imports;
 mod module_planning_context;
