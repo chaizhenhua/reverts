@@ -24,6 +24,7 @@ use crate::commands::package_surface_decisions::{
 use crate::errors::MatchPackagesError;
 use crate::persistence::attributions;
 use crate::persistence::island_anchors::{IslandPackageAnchor, persist_island_anchors};
+use crate::persistence::island_package_candidates::load_accepted_island_package_candidates;
 use crate::persistence::repository::{MatchPackagePersistence, SqliteMatchPackagePersistence};
 use crate::{
     MatchPackagesOutcome, dedup_audit_report, enrich_package_modules_from_source_units,
@@ -101,11 +102,31 @@ pub(crate) fn match_packages_from_connection(
     mark_timing!("bundle_extract_enrich");
 
     let mut source_import_audit = AuditReport::default();
-    let (reference_package_names, reference_package_versions) =
+    let (mut reference_package_names, mut reference_package_versions) =
         package_names_and_versions_from_reference_source_roots(
             &args.reference_source_roots,
             &mut source_import_audit,
         )?;
+    // Agent-proposed island package names (deterministically confirmed downstream
+    // by the fingerprint cascade) seed materialization exactly like reference
+    // dependencies — this is how inlined libraries with no bundle module and no
+    // reference manifest entry get a corpus to match against.
+    let agent_island_candidates =
+        load_accepted_island_package_candidates(connection, i64::from(args.project_id))?;
+    if !agent_island_candidates.is_empty() {
+        eprintln!(
+            "match-packages: seeding {} Agent-proposed island package name(s)",
+            agent_island_candidates.len()
+        );
+        for candidate in &agent_island_candidates {
+            reference_package_names.insert(candidate.package_name.clone());
+            if let Some(version) = &candidate.version_hint {
+                reference_package_versions
+                    .entry(candidate.package_name.clone())
+                    .or_insert_with(|| version.clone());
+            }
+        }
+    }
     if !args.reference_source_roots.is_empty() {
         let preview = reference_package_names
             .iter()

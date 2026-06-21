@@ -27,6 +27,7 @@ pub enum HelpTopic {
     NamingPlan,
     ModuleClassify,
     ModuleNames,
+    IslandPackageCandidates,
     MatchModulesRecall,
 }
 
@@ -59,6 +60,7 @@ pub const NAMING_PROGRESS_COMMAND: &str = "naming-progress";
 pub const NAMING_PLAN_COMMAND: &str = "naming-plan";
 pub const MODULE_CLASSIFY_COMMAND: &str = "module-classify";
 pub const MODULE_NAMES_COMMAND: &str = "module-names";
+pub const ISLAND_PACKAGE_CANDIDATES_COMMAND: &str = "island-package-candidates";
 pub const MATCH_MODULES_RECALL_COMMAND: &str = "match-modules-recall";
 
 pub const COMMAND_SPECS: &[CommandSpec] = &[
@@ -173,6 +175,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         summary: "Accept semantic file paths for first-party modules (renames emitted files)",
     },
     CommandSpec {
+        name: ISLAND_PACKAGE_CANDIDATES_COMMAND,
+        topic: HelpTopic::IslandPackageCandidates,
+        summary: "Record Agent-proposed third-party package names for the eager entry island",
+    },
+    CommandSpec {
         name: MATCH_MODULES_RECALL_COMMAND,
         topic: HelpTopic::MatchModulesRecall,
         summary: "Measure cross-project module match recall against a ground-truth project",
@@ -264,6 +271,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         }
         HelpTopic::ModuleNames => {
             "reverts-cli module-names\n\nUSAGE:\n    reverts-cli module-names --input <DB> --project-id <ID> (--list | --accept <MODULE_ID=SEMANTIC_PATH>... | --batch <TSV>) [--origin <SOURCE>] [--evidence <TEXT>] [--apply]\n\nOPTIONS:\n    --input <DB>        SQLite input database\n    --project-id <ID>   Positive project id\n    --list              List accepted module path overrides\n    --accept <SPEC>     Accept one module file path; format MODULE_ID=SEMANTIC_PATH (e.g. 247=feature/markdown-renderer)\n    --batch <TSV>       TSV rows: accept<TAB>MODULE_ID<TAB>SEMANTIC_PATH<TAB>[EVIDENCE]\n    --origin <SOURCE>   Name source label, default: agent\n    --evidence <TEXT>   Evidence for paths from automated origins\n    --apply             Persist changes; without it, dry-run validation only\n\nAccepted paths are stored as module_path_overrides and consumed by\ngenerate-project-v2: each module's emitted file moves to the semantic path and\nevery importing file's relative specifier is recomputed. The wire/export names\nare untouched, so the build still links."
+        }
+        HelpTopic::IslandPackageCandidates => {
+            "reverts-cli island-package-candidates\n\nUSAGE:\n    reverts-cli island-package-candidates --input <DB> --project-id <ID> (--list | --accept <PACKAGE>... [--version <V>] | --reject <PACKAGE>... | --batch <TSV>) [--evidence <TEXT>] [--apply]\n\nOPTIONS:\n    --input <DB>        SQLite input database\n    --project-id <ID>   Positive project id\n    --list              List accepted island package candidates\n    --accept <PACKAGE>  Accept a proposed library name inlined in the entry island; repeatable\n    --reject <PACKAGE>  Reject a previously proposed name; repeatable\n    --version <V>       Version specifier applied to every --accept (else the matcher resolves latest)\n    --evidence <TEXT>   Evidence for the proposal (string anchors / API shapes seen in the island)\n    --batch <TSV>       TSV rows: OP<TAB>PACKAGE<TAB>VERSION|-<TAB>EVIDENCE (OP = accept|reject)\n    --apply             Persist changes; without it, dry-run validation only\n\nA scope-hoisting bundler inlines whole libraries into the eager island with no\nmodule of their own, so the deterministic matcher has no (name, version) to\nfetch. An Agent reads the island and proposes package names; match-packages\nseeds materialization with the accepted names and the fingerprint cascade\nconfirms each. A wrong guess simply fails to match and produces no anchor, so\nthe Agent's judgement never bypasses the deterministic proof."
         }
         HelpTopic::MatchModulesRecall => {
             "reverts-cli match-modules-recall\n\nUSAGE:\n    reverts-cli match-modules-recall --input <DB> --ground-truth-project-id <ID> --subject-project-id <ID> [--threshold-percent <N>] [--metric jaccard|overlap] [--category <NAME> ...] [--limit <N>]\n\nOPTIONS:\n    --input <DB>                      SQLite input database (opened read-only)\n    --ground-truth-project-id <ID>    Project whose semantic_names are treated as truth\n    --subject-project-id <ID>         Project whose modules are being matched\n    --threshold-percent <N>           Similarity threshold for a (ref, subject) pair to count (default 70)\n    --metric <NAME>                   jaccard (default, principled) or overlap (more forgiving subset rule)\n    --category <NAME>                 Restrict to this module_category (e.g. application, package); repeatable\n    --limit <N>                       Cap modules per project for fast iteration\n\nDIAGNOSTIC:\n    Reports recall under each available matching strategy:\n      baseline / semantic_name exact   exact equality on the existing semantic_name field\n      multi_axis_<metric>              per-axis function-fingerprint similarity (Ast, Cfg, anchors, ...) combined by max\n    Writes nothing to the database."
