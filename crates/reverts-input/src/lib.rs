@@ -563,6 +563,71 @@ impl InputBundle {
         });
     }
 
+    /// Merge exact-duplicate modules — different module ids backed by the
+    /// IDENTICAL `(source_file_id, byte_start, byte_end, original_name)`. Bundle
+    /// extraction/ingestion can register the same sliced span twice; the
+    /// duplicates then make a binding they define resolve to TWO owner modules,
+    /// so the "never guess a colliding owner" rule drops the cross-module import
+    /// (e.g. an esbuild `__esm` init-thunk call `nEA()` left unimported →
+    /// `ReferenceError`). Keep the lowest-id canonical module, repoint every
+    /// edge that TARGETED a duplicate to it, and drop the duplicates' own
+    /// modules / symbols / attributions / outgoing edges (the canonical carries
+    /// identical copies).
+    pub fn dedup_identical_modules(&mut self) {
+        use std::collections::BTreeMap;
+        let mut canonical = BTreeMap::<(Option<u32>, Option<(u32, u32)>, &str), ModuleId>::new();
+        let mut remap = BTreeMap::<ModuleId, ModuleId>::new();
+        for module in &self.modules {
+            // Only collapse modules with a concrete span — a spanless module is
+            // not a comparable slice.
+            let Some(span) = module.source_span else {
+                continue;
+            };
+            let key = (
+                module.source_file_id,
+                Some((span.byte_start, span.byte_end)),
+                module.original_name.as_str(),
+            );
+            match canonical.get(&key) {
+                Some(&canon) => {
+                    remap.insert(module.id, canon);
+                }
+                None => {
+                    canonical.insert(key, module.id);
+                }
+            }
+        }
+        if remap.is_empty() {
+            return;
+        }
+        self.modules
+            .retain(|module| !remap.contains_key(&module.id));
+        self.symbols
+            .retain(|symbol| !remap.contains_key(&symbol.module_id));
+        self.package_attributions
+            .retain(|attribution| !remap.contains_key(&attribution.module_id));
+        let mut seen_edges = BTreeSet::<(ModuleId, ModuleId)>::new();
+        self.dependencies.retain_mut(|dependency| {
+            // Drop a duplicate's outgoing edges — the canonical has identical ones.
+            if remap.contains_key(&dependency.from_module_id) {
+                return false;
+            }
+            if let ModuleDependencyTarget::Module(target) = &mut dependency.target
+                && let Some(&canon) = remap.get(target)
+            {
+                *target = canon;
+            }
+            // De-duplicate edges that collapsed onto the same (from, to) pair.
+            if let ModuleDependencyTarget::Module(target) = dependency.target
+                && (target == dependency.from_module_id
+                    || !seen_edges.insert((dependency.from_module_id, target)))
+            {
+                return false;
+            }
+            true
+        });
+    }
+
     pub fn from_rows(rows: InputRows) -> Result<Self, InputBundleError> {
         validate_project(&rows.project)?;
         let source_file_ids = collect_source_file_ids(&rows.source_files)?;

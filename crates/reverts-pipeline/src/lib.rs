@@ -371,6 +371,9 @@ pub fn runtime_setter_migration_blocker_report_from_prepared(
 
 pub fn prepare_and_enrich(input: InputBundle) -> Result<PreparedProgram, PipelineError> {
     let (mut input, bundle_audit) = prepare_input_bundle_for_generation(input)?;
+    // Merge exact-duplicate modules so a binding they define resolves to ONE
+    // owner (not an ambiguous pair that drops the cross-module import).
+    input.dedup_identical_modules();
     // Strip cross-bundle dependency leaks BEFORE the graph is built — the
     // ImportExport graph records module imports from these edges, so the planner
     // would otherwise resolve a binding to a foreign esbuild bundle (e.g. the
