@@ -31,6 +31,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use reverts_ir::BindingName;
 
 use crate::identifiers::is_identifier_like;
+use crate::named_specifiers::{
+    local_named_export_specifiers, named_reexport_specifiers, source_statements,
+};
 use crate::statement_parsers::{
     coalesce_consecutive_uninitialized_var_declarations as coalesce_uninitialized_var_declarations_in_source,
     parse_generated_default_import_statement, parse_generated_named_export_statement,
@@ -327,39 +330,83 @@ fn coalesce_generated_default_named_imports(file: &mut PlannedFile) {
 }
 
 fn coalesce_generated_named_exports(file: &mut PlannedFile) {
+    // Export NAMES already claimed by the module's OWN source body — aliased
+    // local exports (`export { F as f }`) and re-exports (`export { x } from`).
+    // `parse_generated_named_export_statement` rejects `as`/`from`, so those
+    // statements are never coalesced here; but a plain generated `export { f }`
+    // for a local binding `f` would still duplicate the export NAME `f` and
+    // produce invalid ESM. Treat such names as already taken and drop them from
+    // the coalesced statement.
+    let claimed_export_names = body_aliased_export_names(file);
+
     let mut exported_bindings = BTreeSet::<BindingName>::new();
     let mut first_index = None::<usize>;
-    let mut duplicate_indices = BTreeSet::<usize>::new();
+    let mut generated_indices = BTreeSet::<usize>::new();
     for (index, source) in file.body.iter().enumerate() {
         let Some(bindings) = parse_generated_named_export_statement(source) else {
             continue;
         };
         exported_bindings.extend(bindings);
+        generated_indices.insert(index);
         if first_index.is_none() {
             first_index = Some(index);
-        } else {
-            duplicate_indices.insert(index);
         }
     }
-    if duplicate_indices.is_empty() {
+    let dropped_any = exported_bindings
+        .iter()
+        .any(|binding| claimed_export_names.contains(binding));
+    exported_bindings.retain(|binding| !claimed_export_names.contains(binding));
+    // Rewrite when more than one generated statement must merge into one, OR
+    // when a claimed export name had to be dropped from a single statement.
+    if generated_indices.len() < 2 && !dropped_any {
         return;
     }
     let Some(first_index) = first_index else {
         return;
     };
-    let replacement = named_export_statement(exported_bindings.iter());
-    let mut merged = Vec::with_capacity(file.body.len().saturating_sub(duplicate_indices.len()));
+    let replacement =
+        (!exported_bindings.is_empty()).then(|| named_export_statement(exported_bindings.iter()));
+    let mut merged = Vec::with_capacity(file.body.len());
     for (index, source) in file.body.iter().enumerate() {
-        if duplicate_indices.contains(&index) {
-            continue;
-        }
         if index == first_index {
-            merged.push(replacement.clone());
-        } else {
+            // The first generated statement becomes the merged/filtered one;
+            // when nothing survives the filter, drop it entirely.
+            if let Some(replacement) = &replacement {
+                merged.push(replacement.clone());
+            }
+        } else if !generated_indices.contains(&index) {
             merged.push(source.clone());
         }
     }
     file.body = merged;
+}
+
+/// Export NAMES the module's body already claims through aliased local exports
+/// (`export { F as f }`) or re-exports (`export { x } from "..."`). These never
+/// pass `parse_generated_named_export_statement` (it rejects `as`/`from`), so a
+/// plain generated `export { f }` would silently duplicate the name `f`.
+fn body_aliased_export_names(file: &PlannedFile) -> BTreeSet<BindingName> {
+    let mut names = BTreeSet::new();
+    for statement in file
+        .body
+        .iter()
+        .flat_map(|chunk| source_statements(chunk.as_str()))
+    {
+        if let Some(specifiers) = local_named_export_specifiers(statement) {
+            // A plain non-aliased local `export { st }` IS the generated shape
+            // the coalescer itself owns — only an alias (`F as f`) claims a name
+            // the generated statement must avoid.
+            for specifier in specifiers.into_iter().filter(|s| s.is_aliased) {
+                names.insert(BindingName::new(specifier.exported));
+            }
+        } else if let Some(specifiers) = named_reexport_specifiers(statement) {
+            // Every re-export claims its export name (aliased or not).
+            for specifier in specifiers {
+                names.insert(BindingName::new(specifier.exported));
+            }
+        }
+    }
+    names
 }
 
 fn coalesce_consecutive_uninitialized_var_declarations_in_planned_file(file: &mut PlannedFile) {

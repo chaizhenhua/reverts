@@ -2409,6 +2409,48 @@ fn emit_plan_keeps_reexports_and_alias_exports_separate() {
 }
 
 #[test]
+fn emit_plan_drops_generated_export_colliding_with_an_alias_export_name() {
+    // An esbuild module re-exports an internal `F` under the public name `f`
+    // (`export { F as f }`) while also having a module-private local `f`. A
+    // generated `export { f, st }` would then duplicate the export NAME `f`,
+    // which is invalid ESM (`SyntaxError: Duplicate export of 'f'`). The
+    // colliding name must be dropped from the generated statement, leaving the
+    // alias export authoritative.
+    let mut file = PlannedFile::new("modules/asset.ts");
+    file.push_source("export { F as f, Q as g };");
+    file.push_source("export { f, st };");
+
+    let mut plan = EmitPlan::default();
+    finalize_planned_file(&mut file);
+    plan.push_file(file);
+    let source = planned_source(&plan, "modules/asset.ts");
+
+    assert!(
+        source.contains("export { F as f, Q as g };"),
+        "alias export stays authoritative: {source}"
+    );
+    assert!(
+        source.contains("export { st };"),
+        "the non-colliding generated export survives: {source}"
+    );
+    assert_eq!(
+        source.matches("export of").count(),
+        0,
+        "no duplicate-export marker text: {source}"
+    );
+    // `f` must appear exactly once as an export name — only via the alias.
+    assert_eq!(
+        source.matches(" as f").count(),
+        1,
+        "f exported once via alias: {source}"
+    );
+    assert!(
+        !source.contains("export { f, st };") && !source.contains("export { f };"),
+        "the colliding bare `f` export must be gone: {source}"
+    );
+}
+
+#[test]
 fn emit_plan_coalesces_only_consecutive_plain_var_declarations() {
     let mut file = PlannedFile::new("modules/runtime/source-1-helpers.ts");
     file.push_source(concat!(
