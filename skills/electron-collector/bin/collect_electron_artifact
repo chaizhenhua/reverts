@@ -1,0 +1,681 @@
+#!/usr/bin/env python3
+"""Collect Electron application artifacts into a ReverTS artifact manifest."""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import hashlib
+import html.parser
+import json
+import os
+import plistlib
+import shutil
+import struct
+import subprocess
+import sys
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+JS_EXTS = {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"}
+EXTRACTABLE_ASAR_EXTS = JS_EXTS | {".html", ".htm", ".css", ".json", ".map"}
+NATIVE_EXTS = {".node", ".wasm", ".dll", ".dylib", ".so"}
+SOURCE_MAP_SUFFIXES = (".js.map", ".mjs.map", ".cjs.map", ".css.map", ".map")
+DISK_IMAGE_EXTS = {".dmg", ".img"}
+
+
+class CollectorError(RuntimeError):
+    """Raised when an artifact cannot be collected safely."""
+
+
+@dataclass
+class AppLocation:
+    input_path: Path
+    app_root: Path | None
+    resources_dir: Path
+    original_artifact: Path
+    extracted_from_dmg: bool = False
+
+
+class HtmlReferenceParser(html.parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scripts: list[str] = []
+        self.stylesheets: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): value for key, value in attrs if value}
+        if tag.lower() == "script" and values.get("src"):
+            self.scripts.append(values["src"])
+        elif tag.lower() == "link" and values.get("href"):
+            rel = values.get("rel", "")
+            if "stylesheet" in rel.lower():
+                self.stylesheets.append(values["href"])
+
+
+def posix_path(path: Path | str) -> str:
+    return str(path).replace(os.sep, "/")
+
+
+def stable_id(logical_path: str) -> str:
+    digest = hashlib.sha1(logical_path.encode("utf-8")).hexdigest()[:10]
+    stem = "".join(ch if ch.isalnum() else "_" for ch in logical_path.lower()).strip("_")
+    stem = stem[:72] or "source"
+    return f"{stem}_{digest}"
+
+
+def language_for_path(path: str) -> str:
+    lower = path.lower()
+    if lower.endswith((".js", ".mjs", ".cjs")):
+        return "javascript"
+    if lower.endswith((".ts", ".mts", ".cts")):
+        return "typescript"
+    if lower.endswith(".jsx"):
+        return "jsx"
+    if lower.endswith(".tsx"):
+        return "tsx"
+    if lower.endswith(SOURCE_MAP_SUFFIXES):
+        return "source_map"
+    if lower.endswith((".html", ".htm")):
+        return "html"
+    if lower.endswith(".css"):
+        return "css"
+    if lower.endswith(".json"):
+        return "json"
+    if Path(lower).suffix in NATIVE_EXTS:
+        return "native"
+    return "asset"
+
+
+def role_for_path(path: str) -> str:
+    lower = path.lower()
+    name = Path(lower).name
+    if lower.endswith(SOURCE_MAP_SUFFIXES):
+        return "source_map"
+    if name == "package.json":
+        return "package_manifest"
+    if Path(lower).suffix in NATIVE_EXTS:
+        return "native_addon"
+    if lower.endswith((".html", ".htm")):
+        return "html_entry"
+    if "preload" in lower:
+        return "preload"
+    if "worklet" in lower or "worker" in lower or "service-worker" in lower:
+        return "worker"
+    if "vendor" in lower or "node_modules" in lower:
+        return "vendor_chunk"
+    if "/server/" in lower or "server" in name:
+        return "server_chunk"
+    if "/client/" in lower or "client" in name:
+        return "client_chunk"
+    if name in {"main.js", "main.mjs", "electron.js", "background.js"}:
+        return "main"
+    if Path(lower).suffix in JS_EXTS:
+        return "js_chunk"
+    return "asset"
+
+
+def is_javascript_family(language: str) -> bool:
+    return language in {"javascript", "typescript", "jsx", "tsx"}
+
+
+def should_ingest(logical_path: str, language: str, include: list[str], exclude: list[str]) -> bool:
+    if not is_javascript_family(language):
+        return False
+    if include and not any(fnmatch.fnmatch(logical_path, pattern) for pattern in include):
+        return False
+    if exclude and any(fnmatch.fnmatch(logical_path, pattern) for pattern in exclude):
+        return False
+    return True
+
+
+def read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def read_info_plist(app_root: Path | None) -> dict[str, Any]:
+    if app_root is None:
+        return {}
+    info_path = app_root / "Contents" / "Info.plist"
+    if not info_path.is_file():
+        return {}
+    try:
+        with info_path.open("rb") as fh:
+            return dict(plistlib.load(fh))
+    except (OSError, plistlib.InvalidFileException):
+        return {}
+
+
+def find_first_app(root: Path) -> Path | None:
+    if root.suffix.lower() == ".app" and (root / "Contents" / "Resources").is_dir():
+        return root
+    for current, dirs, _files in os.walk(root):
+        current_path = Path(current)
+        depth = len(current_path.relative_to(root).parts)
+        if depth > 4:
+            dirs[:] = []
+            continue
+        for dirname in list(dirs):
+            candidate = current_path / dirname
+            if dirname.lower().endswith(".app") and (candidate / "Contents" / "Resources").is_dir():
+                return candidate
+    return None
+
+
+def copy_tree(source: Path, dest: Path) -> Path:
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(source, dest, symlinks=True)
+    return dest
+
+
+def run_checked(command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError as exc:
+        raise CollectorError(f"Required command not found: {command[0]}") from exc
+    except subprocess.CalledProcessError as exc:
+        details = (exc.stderr or exc.stdout or "").strip()
+        raise CollectorError(f"Command failed: {' '.join(command)}\n{details}") from exc
+
+
+def run_7z_extract(command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return run_checked(command)
+    except CollectorError as exc:
+        message = str(exc)
+        if "Dangerous link path was ignored" not in message:
+            raise
+        # macOS DMGs often contain a Finder convenience symlink named
+        # "Applications" that points at /Applications. 7-Zip refuses to create
+        # that absolute symlink on Linux/Windows and returns a non-zero status
+        # even though the app payload has been extracted. Continue here and let
+        # the subsequent .app discovery and manifest validation decide whether
+        # the extraction produced a usable Electron artifact.
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr=message)
+
+
+def extract_dmg(dmg_path: Path, stage_dir: Path) -> Path:
+    extract_root = stage_dir / "dmg"
+    if extract_root.exists():
+        shutil.rmtree(extract_root)
+    extract_root.mkdir(parents=True, exist_ok=True)
+
+    hdiutil = shutil.which("hdiutil")
+    if sys.platform == "darwin" and hdiutil:
+        mount_point = stage_dir / "dmg-mount"
+        mount_point.mkdir(parents=True, exist_ok=True)
+        run_checked([hdiutil, "attach", "-readonly", "-nobrowse", "-mountpoint", str(mount_point), str(dmg_path)])
+        try:
+            app = find_first_app(mount_point)
+            if app is None:
+                raise CollectorError(f"No .app bundle found in mounted DMG: {dmg_path}")
+            return copy_tree(app, extract_root / app.name)
+        finally:
+            subprocess.run([hdiutil, "detach", str(mount_point)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    seven_zip = shutil.which("7z") or shutil.which("7zz") or shutil.which("7za")
+    if seven_zip is None:
+        raise CollectorError(
+            "DMG input requires hdiutil on macOS or 7z/7zz/7za on Linux/Windows. "
+            "Install 7-Zip or provide a mounted/extracted .app directory."
+        )
+
+    run_7z_extract([seven_zip, "x", "-y", f"-o{extract_root}", str(dmg_path)])
+    app = find_first_app(extract_root)
+    if app is not None:
+        return app
+
+    nested_images = [
+        path
+        for path in extract_root.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".hfs", ".apfs", ".dmg", ".img", ".iso"}
+    ]
+    for idx, nested in enumerate(nested_images[:4]):
+        nested_dir = extract_root / f"_nested_{idx}"
+        nested_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            run_7z_extract([seven_zip, "x", "-y", f"-o{nested_dir}", str(nested)])
+        except CollectorError:
+            continue
+        app = find_first_app(nested_dir)
+        if app is not None:
+            return app
+
+    raise CollectorError(f"No .app bundle found after extracting DMG: {dmg_path}")
+
+
+def locate_electron_app(input_path: Path, stage_dir: Path) -> AppLocation:
+    original = input_path
+    extracted_from_dmg = False
+    if input_path.is_file() and input_path.suffix.lower() in DISK_IMAGE_EXTS:
+        input_path = extract_dmg(input_path, stage_dir)
+        extracted_from_dmg = True
+
+    if not input_path.exists():
+        raise CollectorError(f"Input path does not exist: {input_path}")
+
+    app_root: Path | None = None
+    resources: Path | None = None
+    if input_path.is_dir() and input_path.suffix.lower() == ".app":
+        app_root = input_path
+        resources = input_path / "Contents" / "Resources"
+    elif (input_path / "Contents" / "Resources").is_dir():
+        app_root = input_path
+        resources = input_path / "Contents" / "Resources"
+    elif input_path.name == "Resources" and input_path.is_dir():
+        resources = input_path
+        app_root = input_path.parent.parent if input_path.parent.name == "Contents" else None
+    elif (input_path / "resources").is_dir():
+        resources = input_path / "resources"
+    elif (input_path / "app.asar").is_file() or (input_path / "package.json").is_file():
+        resources = input_path
+    else:
+        app_root = find_first_app(input_path) if input_path.is_dir() else None
+        if app_root is not None:
+            resources = app_root / "Contents" / "Resources"
+
+    if resources is None or not resources.is_dir():
+        raise CollectorError(
+            f"Could not locate Electron Resources directory from input: {original}. "
+            "Provide a .dmg, .app, Contents/Resources, or packaged Electron resources directory."
+        )
+    return AppLocation(
+        input_path=input_path.resolve(),
+        app_root=app_root.resolve() if app_root else None,
+        resources_dir=resources.resolve(),
+        original_artifact=original.resolve(),
+        extracted_from_dmg=extracted_from_dmg,
+    )
+
+
+def parse_asar_header(asar_path: Path) -> tuple[dict[str, Any], int]:
+    with asar_path.open("rb") as fh:
+        prefix = fh.read(16)
+        if len(prefix) != 16:
+            raise CollectorError(f"ASAR file is too small: {asar_path}")
+        first, header_size, _pickle_size, json_size = struct.unpack("<4I", prefix)
+        if first != 4 or header_size <= 0 or json_size <= 0:
+            raise CollectorError(f"Unsupported ASAR header layout: {asar_path}")
+        fh.seek(16)
+        raw = fh.read(json_size)
+    try:
+        header = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CollectorError(f"Failed to parse ASAR header JSON: {asar_path}") from exc
+    return header, 8 + header_size
+
+
+def iter_asar_files(node: dict[str, Any], prefix: str = "") -> list[tuple[str, dict[str, Any]]]:
+    out: list[tuple[str, dict[str, Any]]] = []
+    for name, info in node.get("files", {}).items():
+        child_path = f"{prefix}/{name}" if prefix else name
+        if "files" in info:
+            out.extend(iter_asar_files(info, child_path))
+        else:
+            out.append((child_path, info))
+    return out
+
+
+def extract_asar_entry(asar_path: Path, data_offset: int, entry: dict[str, Any], dest: Path) -> None:
+    size = int(entry.get("size", 0))
+    offset = int(entry.get("offset", "0"))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with asar_path.open("rb") as src, dest.open("wb") as out:
+        src.seek(data_offset + offset)
+        remaining = size
+        while remaining > 0:
+            chunk = src.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise CollectorError(f"Unexpected EOF while extracting {dest}")
+            out.write(chunk)
+            remaining -= len(chunk)
+
+
+def source_unit(
+    logical_path: str,
+    physical_path: Path | None,
+    role: str,
+    language: str,
+    ingest: bool,
+    entry: bool,
+    container: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": stable_id(logical_path),
+        "logical_path": logical_path,
+        "physical_path": str(physical_path.resolve()) if physical_path else None,
+        "role": role,
+        "language": language,
+        "ingest": ingest,
+        "entry": entry,
+        "container": container,
+        "metadata": metadata or {},
+    }
+
+
+def add_filesystem_sources(
+    sources: list[dict[str, Any]],
+    resources_dir: Path,
+    include_assets: bool,
+    include: list[str],
+    exclude: list[str],
+) -> None:
+    for path in sorted(resources_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = posix_path(path.relative_to(resources_dir))
+        if rel == "app.asar":
+            continue
+        language = language_for_path(rel)
+        role = role_for_path(rel)
+        if not include_assets and language == "asset":
+            continue
+        container = "app.asar.unpacked" if rel.startswith("app.asar.unpacked/") else None
+        ingest = should_ingest(rel, language, include, exclude)
+        sources.append(
+            source_unit(
+                rel,
+                path,
+                role,
+                language,
+                ingest,
+                role == "html_entry" and Path(rel).name.lower() == "index.html",
+                container,
+                {"file_size": path.stat().st_size},
+            )
+        )
+
+
+def add_asar_sources(
+    sources: list[dict[str, Any]],
+    resources_dir: Path,
+    stage_dir: Path,
+    include_assets: bool,
+    copy_asar_code: bool,
+    include: list[str],
+    exclude: list[str],
+) -> int:
+    asar_path = resources_dir / "app.asar"
+    if not asar_path.is_file():
+        return 0
+    header, data_offset = parse_asar_header(asar_path)
+    entries = iter_asar_files(header)
+    extract_root = stage_dir / "app.asar"
+    unpacked_root = resources_dir / "app.asar.unpacked"
+
+    for rel, entry in sorted(entries):
+        logical = f"app.asar/{rel}"
+        language = language_for_path(rel)
+        role = role_for_path(rel)
+        if not include_assets and language == "asset":
+            continue
+
+        physical: Path | None = None
+        extracted = False
+        unpacked = bool(entry.get("unpacked"))
+        unpacked_path = unpacked_root / rel
+        if unpacked and unpacked_path.is_file():
+            physical = unpacked_path
+        elif copy_asar_code and Path(rel).suffix.lower() in EXTRACTABLE_ASAR_EXTS:
+            physical = extract_root / rel
+            extract_asar_entry(asar_path, data_offset, entry, physical)
+            extracted = True
+
+        ingest = bool(physical) and should_ingest(logical, language, include, exclude)
+        metadata = {
+            "asar_size": entry.get("size"),
+            "asar_offset": entry.get("offset"),
+            "asar_unpacked": unpacked,
+            "asar_extracted": extracted,
+        }
+        if entry.get("integrity"):
+            metadata["integrity"] = entry["integrity"]
+        sources.append(source_unit(logical, physical, role, language, ingest, False, "app.asar", metadata))
+    return len(entries)
+
+
+def id_by_logical(sources: list[dict[str, Any]]) -> dict[str, str]:
+    return {source["logical_path"]: source["id"] for source in sources}
+
+
+def resolve_logical(base_logical: str, ref: str) -> str | None:
+    if not ref or ref.startswith(("http://", "https://", "data:", "blob:", "javascript:")):
+        return None
+    clean = ref.split("#", 1)[0].split("?", 1)[0]
+    if not clean:
+        return None
+    base = Path(base_logical).parent
+    return posix_path((base / clean).as_posix())
+
+
+def build_edges(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    lookup = id_by_logical(sources)
+    edges: list[dict[str, Any]] = []
+
+    for source in sources:
+        physical = Path(source["physical_path"]) if source.get("physical_path") else None
+        if not physical or not physical.is_file():
+            continue
+        logical = source["logical_path"]
+        if source["language"] == "html":
+            try:
+                parser = HtmlReferenceParser()
+                parser.feed(physical.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+            for ref in parser.scripts:
+                target = resolve_logical(logical, ref)
+                if target in lookup:
+                    edges.append({"from": source["id"], "to": lookup[target], "kind": "script", "metadata": {"ref": ref}})
+            for ref in parser.stylesheets:
+                target = resolve_logical(logical, ref)
+                if target in lookup:
+                    edges.append({"from": source["id"], "to": lookup[target], "kind": "stylesheet", "metadata": {"ref": ref}})
+        elif source["language"] in {"javascript", "typescript", "jsx", "tsx", "css"}:
+            try:
+                tail = physical.read_text(encoding="utf-8", errors="ignore")[-4096:]
+            except OSError:
+                continue
+            marker = "sourceMappingURL="
+            if marker in tail:
+                ref = tail.rsplit(marker, 1)[1].splitlines()[0].strip().strip("*/ ")
+                target = resolve_logical(logical, ref)
+                if target in lookup:
+                    source["source_map_id"] = lookup[target]
+                    edges.append({"from": source["id"], "to": lookup[target], "kind": "source_map", "metadata": {"ref": ref}})
+    return edges
+
+
+def mark_entries(sources: list[dict[str, Any]], resources_dir: Path, asar_package_json: Path | None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    packages = []
+    for package_path in [resources_dir / "package.json", asar_package_json]:
+        if package_path and package_path.is_file():
+            package = read_json_file(package_path)
+            if package:
+                packages.append((package_path, package))
+    lookup = {source["logical_path"]: source for source in sources}
+    for package_path, package in packages:
+        metadata.setdefault("packages", []).append(
+            {
+                "path": str(package_path),
+                "name": package.get("name"),
+                "version": package.get("version"),
+                "main": package.get("main"),
+            }
+        )
+        main = package.get("main")
+        if isinstance(main, str):
+            candidates = [main, f"app.asar/{main.lstrip('./')}"]
+            for candidate in candidates:
+                normalized = posix_path(Path(candidate))
+                source = lookup.get(normalized)
+                if source:
+                    source["entry"] = True
+                    source["role"] = "main"
+                    break
+
+    for source in sources:
+        logical = source["logical_path"].lower()
+        if source["role"] == "html_entry" and logical.endswith(("index.html", "main.html")):
+            source["entry"] = True
+        if source["role"] == "main":
+            source["entry"] = True
+    return metadata
+
+
+def validate_manifest(manifest: dict[str, Any]) -> None:
+    sources = manifest.get("sources", [])
+    if not sources:
+        raise CollectorError("Manifest contains no source units")
+    ids = [source["id"] for source in sources]
+    logical_paths = [source["logical_path"] for source in sources]
+    duplicate_ids = [item for item, count in Counter(ids).items() if count > 1]
+    duplicate_paths = [item for item, count in Counter(logical_paths).items() if count > 1]
+    if duplicate_ids:
+        raise CollectorError(f"Duplicate source ids: {duplicate_ids[:5]}")
+    if duplicate_paths:
+        raise CollectorError(f"Duplicate logical paths: {duplicate_paths[:5]}")
+    ingestable = [source for source in sources if source.get("ingest")]
+    if not ingestable:
+        raise CollectorError("Manifest has no ingest-enabled JavaScript/TypeScript source units")
+    missing = [
+        source["logical_path"]
+        for source in ingestable
+        if not source.get("physical_path") or not Path(source["physical_path"]).is_file()
+    ]
+    if missing:
+        raise CollectorError(f"Ingest-enabled source units have missing physical paths: {missing[:5]}")
+
+
+def collect(args: argparse.Namespace) -> dict[str, Any]:
+    output_manifest = args.output_manifest.resolve()
+    stage_dir = args.stage_dir.resolve() if args.stage_dir else output_manifest.parent / "electron-collector-stage"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+
+    location = locate_electron_app(args.input.resolve(), stage_dir)
+    info = read_info_plist(location.app_root)
+    sources: list[dict[str, Any]] = []
+    add_filesystem_sources(sources, location.resources_dir, not args.no_assets, args.ingest_include, args.ingest_exclude)
+    asar_count = add_asar_sources(
+        sources,
+        location.resources_dir,
+        stage_dir,
+        not args.no_assets,
+        not args.no_copy_asar_code,
+        args.ingest_include,
+        args.ingest_exclude,
+    )
+    asar_package_json = stage_dir / "app.asar" / "package.json"
+    package_metadata = mark_entries(sources, location.resources_dir, asar_package_json if asar_package_json.is_file() else None)
+    edges = build_edges(sources)
+
+    metadata = {
+        "collector": "electron-collector",
+        "collector_version": 1,
+        "input_path": str(location.original_artifact),
+        "resolved_input_path": str(location.input_path),
+        "resources_dir": str(location.resources_dir),
+        "app_root": str(location.app_root) if location.app_root else None,
+        "extracted_from_dmg": location.extracted_from_dmg,
+        "extracted_from_disk_image": location.extracted_from_dmg,
+        "disk_image_extension": location.original_artifact.suffix.lower()
+        if location.extracted_from_dmg
+        else None,
+        "asar_entries": asar_count,
+        "platform_support": {
+            "disk_image": ".dmg/.img via hdiutil on macOS, otherwise 7z/7zz/7za extraction",
+            "asar": "native header parser with code-file extraction",
+            "app": "macOS .app bundle or copied bundle directory",
+            "resources": "Windows/Linux Electron resources directory",
+        },
+        "info_plist": {
+            "CFBundleIdentifier": info.get("CFBundleIdentifier"),
+            "CFBundleName": info.get("CFBundleName"),
+            "CFBundleShortVersionString": info.get("CFBundleShortVersionString"),
+            "CFBundleVersion": info.get("CFBundleVersion"),
+        },
+        # Backstop for schema_v1: preserve the full collector-emitted role string
+        # per logical path so it survives even when SourceRole::from_str() collapses
+        # unknown values to Unknown server-side. Migration 041 will lift this into
+        # the source_units.role_tag column once schema_v2 lands.
+        "collector_roles": {
+            source["logical_path"]: source["role"] for source in sources
+        },
+        **package_metadata,
+    }
+    manifest = {
+        "schema_version": 1,
+        "profile": "electron",
+        "artifact_root": str(location.resources_dir),
+        "sources": sources,
+        "edges": edges,
+        "metadata": metadata,
+    }
+    validate_manifest(manifest)
+    output_manifest.parent.mkdir(parents=True, exist_ok=True)
+    output_manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return manifest
+
+
+def report(manifest: dict[str, Any], output_manifest: Path) -> dict[str, Any]:
+    sources = manifest["sources"]
+    by_role = Counter(source["role"] for source in sources)
+    by_language = Counter(source["language"] for source in sources)
+    ingest_enabled = sum(1 for source in sources if source.get("ingest"))
+    return {
+        "manifest_path": str(output_manifest.resolve()),
+        "artifact_root": manifest["artifact_root"],
+        "source_units": len(sources),
+        "ingest_enabled": ingest_enabled,
+        "edges": len(manifest["edges"]),
+        "by_role": dict(sorted(by_role.items())),
+        "by_language": dict(sorted(by_language.items())),
+        "asar_entries": manifest["metadata"]["asar_entries"],
+        "extracted_from_dmg": manifest["metadata"]["extracted_from_dmg"],
+    }
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "input",
+        type=Path,
+        help="Electron .dmg/.img, .app, Resources directory, or packaged app directory",
+    )
+    parser.add_argument("--output-manifest", type=Path, required=True, help="Path to write artifact-manifest.json")
+    parser.add_argument("--stage-dir", type=Path, help="Persistent directory for DMG/ASAR extracted files")
+    parser.add_argument("--no-copy-asar-code", action="store_true", help="Inventory ASAR entries without extracting code files")
+    parser.add_argument("--no-assets", action="store_true", help="Skip generic asset source units while keeping code, maps, native files, and manifests")
+    parser.add_argument("--ingest-include", action="append", default=[], help="Glob for JS/TS logical paths to enable ingest; repeatable")
+    parser.add_argument("--ingest-exclude", action="append", default=[], help="Glob for JS/TS logical paths to disable ingest; repeatable")
+    parser.add_argument("--json-report", action="store_true", help="Print machine-readable summary JSON")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    try:
+        manifest = collect(args)
+        summary = report(manifest, args.output_manifest)
+        if args.json_report:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        else:
+            print(f"Wrote {summary['manifest_path']}")
+            print(f"source_units={summary['source_units']} ingest_enabled={summary['ingest_enabled']} edges={summary['edges']}")
+        return 0
+    except CollectorError as exc:
+        print(f"electron-collector: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

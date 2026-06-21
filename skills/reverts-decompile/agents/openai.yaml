@@ -1,0 +1,4 @@
+interface:
+  display_name: "ReverTS Output Validation"
+  short_description: "Validate decompiled output by profile"
+  default_prompt: "Use $reverts-decompile to validate generated ReverTS output with install, compile, runtime, and UI checks selected by source profile."

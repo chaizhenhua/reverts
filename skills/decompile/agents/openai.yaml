@@ -1,0 +1,4 @@
+interface:
+  display_name: "ReverTS Decompile"
+  short_description: "Run semantic bundle decompilation"
+  default_prompt: "Use $decompile to complete ReverTS semantic naming, generate output, run structural audits, and hand off validation."

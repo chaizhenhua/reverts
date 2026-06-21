@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Install ReverTS skills into a host skill loader by symlinking each
+# subdirectory of this folder into the target directory.
+#
+#   ./skills/install                      # ~/.claude/skills (default)
+#   ./skills/install --target DIR         # custom target
+#   ./skills/install --uninstall          # remove the symlinks created above
+#
+# Idempotent. Refuses to overwrite an existing non-symlink entry — remove it
+# manually first to avoid clobbering a real skill directory.
+
+set -euo pipefail
+
+target="${HOME}/.claude/skills"
+mode="install"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --target)
+            shift
+            [ "$#" -gt 0 ] || { echo "error: --target requires a path" >&2; exit 2; }
+            target="$1"
+            ;;
+        --uninstall)
+            mode="uninstall"
+            ;;
+        -h|--help)
+            sed -n '2,11p' "$0" | sed 's/^# \?//'
+            exit 0
+            ;;
+        *)
+            echo "error: unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+skills_dir="$(cd "$(dirname "$0")" && pwd)"
+mkdir -p "$target"
+
+for entry in "$skills_dir"/*/; do
+    name="$(basename "$entry")"
+    [ -f "$entry/SKILL.md" ] || continue
+    link="$target/$name"
+
+    case "$mode" in
+        install)
+            if [ -L "$link" ]; then
+                rm "$link"
+            elif [ -e "$link" ]; then
+                echo "skip: $link exists and is not a symlink" >&2
+                continue
+            fi
+            ln -s "${entry%/}" "$link"
+            ln_target="$(readlink "$link")"
+            echo "linked: $link -> $ln_target"
+            ;;
+        uninstall)
+            if [ -L "$link" ]; then
+                rm "$link"
+                echo "removed: $link"
+            else
+                echo "skip: $link is not a symlink" >&2
+            fi
+            ;;
+    esac
+done
+
+echo
+case "$mode" in
+    install)
+        echo "Done. Restart Claude/Codex (or run /mcp) once so the skill"
+        echo "registry rebinds. Edits to SKILL.md and references/ are picked"
+        echo "up live thereafter."
+        ;;
+    uninstall)
+        echo "Done. Restart Claude/Codex to drop the skills from the registry."
+        ;;
+esac

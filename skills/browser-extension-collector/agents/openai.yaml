@@ -1,0 +1,4 @@
+interface:
+  display_name: "Browser Extension Collector"
+  short_description: "Collect extension artifacts for ReverTS"
+  default_prompt: "Use $browser-extension-collector to collect a browser extension artifact, ingest its manifest, and keep collection separate from decompilation fixes."

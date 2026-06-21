@@ -1,0 +1,4 @@
+interface:
+  display_name: "Electron Decompile Collector"
+  short_description: "Collect Electron artifacts and start ReverTS decompilation"
+  default_prompt: "Use $electron-collector to collect an Electron .app, DMG, Resources directory, or ASAR; ingest it with discovery; then hand off to decompile and Electron runtime validation."

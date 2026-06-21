@@ -1,0 +1,822 @@
+#!/usr/bin/env python3
+"""Collect browser-extension artifacts into a ReverTS artifact manifest."""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import hashlib
+import html.parser
+import json
+import os
+import shutil
+import struct
+import sys
+import zipfile
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+JS_EXTS = {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"}
+NATIVE_EXTS = {".node", ".wasm", ".dll", ".dylib", ".so"}
+SOURCE_MAP_SUFFIXES = (".js.map", ".mjs.map", ".cjs.map", ".css.map", ".map")
+CRX_MAGIC = b"Cr24"
+HTML_EXTS = (".html", ".htm")
+
+
+class CollectorError(RuntimeError):
+    """Raised when an artifact cannot be collected safely."""
+
+
+@dataclass
+class ArtifactLocation:
+    input_path: Path
+    artifact_root: Path
+    container: str  # "crx" | "xpi" | "directory"
+    crx_metadata: dict[str, Any] | None = None
+
+
+class HtmlReferenceParser(html.parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scripts: list[str] = []
+        self.stylesheets: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): value for key, value in attrs if value}
+        if tag.lower() == "script" and values.get("src"):
+            self.scripts.append(values["src"])
+        elif tag.lower() == "link" and values.get("href"):
+            rel = values.get("rel", "")
+            if "stylesheet" in rel.lower():
+                self.stylesheets.append(values["href"])
+
+
+def posix_path(path: Path | str) -> str:
+    return str(path).replace(os.sep, "/")
+
+
+def stable_id(logical_path: str) -> str:
+    digest = hashlib.sha1(logical_path.encode("utf-8")).hexdigest()[:10]
+    stem = "".join(ch if ch.isalnum() else "_" for ch in logical_path.lower()).strip("_")
+    stem = stem[:72] or "source"
+    return f"{stem}_{digest}"
+
+
+def language_for_path(path: str) -> str:
+    lower = path.lower()
+    if lower.endswith((".js", ".mjs", ".cjs")):
+        return "javascript"
+    if lower.endswith((".ts", ".mts", ".cts")):
+        return "typescript"
+    if lower.endswith(".jsx"):
+        return "jsx"
+    if lower.endswith(".tsx"):
+        return "tsx"
+    if lower.endswith(SOURCE_MAP_SUFFIXES):
+        return "source_map"
+    if lower.endswith(HTML_EXTS):
+        return "html"
+    if lower.endswith(".css"):
+        return "css"
+    if lower.endswith(".json"):
+        return "json"
+    if Path(lower).suffix in NATIVE_EXTS:
+        return "native"
+    return "asset"
+
+
+def is_javascript_family(language: str) -> bool:
+    return language in {"javascript", "typescript", "jsx", "tsx"}
+
+
+def should_ingest(logical_path: str, language: str, include: list[str], exclude: list[str]) -> bool:
+    if not is_javascript_family(language):
+        return False
+    if include and not any(fnmatch.fnmatch(logical_path, pattern) for pattern in include):
+        return False
+    if exclude and any(fnmatch.fnmatch(logical_path, pattern) for pattern in exclude):
+        return False
+    return True
+
+
+def normalize_manifest_ref(ref: str) -> str:
+    """Normalize a path reference from manifest.json to a logical (POSIX) path
+    relative to the extension root.
+
+    Strips leading "./" and "/" so that lookups match the keys produced by
+    walking the artifact root.
+    """
+    cleaned = ref.split("?", 1)[0].split("#", 1)[0]
+    cleaned = cleaned.replace("\\", "/").lstrip("/")
+    if cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return cleaned
+
+
+def parse_crx_header(crx_path: Path) -> tuple[int, dict[str, Any]]:
+    """Parse the CRX header and return (data_offset, crx_metadata).
+
+    Supports CRX2 (Chrome <75) and CRX3 (Chrome >=75) layouts.
+    """
+    with crx_path.open("rb") as fh:
+        prefix = fh.read(8)
+        if len(prefix) != 8 or prefix[:4] != CRX_MAGIC:
+            raise CollectorError(
+                f"Not a CRX file (magic mismatch): {crx_path}"
+            )
+        version = struct.unpack("<I", prefix[4:8])[0]
+        if version == 2:
+            sizes = fh.read(8)
+            if len(sizes) != 8:
+                raise CollectorError(f"CRX2 header truncated: {crx_path}")
+            pubkey_size, signature_size = struct.unpack("<II", sizes)
+            data_offset = 16 + pubkey_size + signature_size
+            return data_offset, {
+                "version": 2,
+                "header_size": data_offset,
+                "pubkey_size": pubkey_size,
+                "signature_size": signature_size,
+            }
+        if version == 3:
+            header_size_bytes = fh.read(4)
+            if len(header_size_bytes) != 4:
+                raise CollectorError(f"CRX3 header truncated: {crx_path}")
+            (header_size,) = struct.unpack("<I", header_size_bytes)
+            data_offset = 12 + header_size
+            return data_offset, {
+                "version": 3,
+                "header_size": data_offset,
+                "pubkey_size": None,
+                "signature_size": None,
+            }
+        raise CollectorError(
+            f"Unsupported CRX version {version} in {crx_path}; expected 2 or 3"
+        )
+
+
+def extract_crx(crx_path: Path, stage_dir: Path) -> tuple[Path, dict[str, Any]]:
+    data_offset, crx_metadata = parse_crx_header(crx_path)
+    extract_root = stage_dir / "crx"
+    if extract_root.exists():
+        shutil.rmtree(extract_root)
+    extract_root.mkdir(parents=True, exist_ok=True)
+
+    zip_payload = stage_dir / "crx-payload.zip"
+    with crx_path.open("rb") as src, zip_payload.open("wb") as out:
+        src.seek(data_offset)
+        shutil.copyfileobj(src, out)
+
+    try:
+        with zipfile.ZipFile(zip_payload) as zf:
+            _safe_zip_extract(zf, extract_root)
+    except zipfile.BadZipFile as exc:
+        raise CollectorError(f"CRX payload is not a valid ZIP: {crx_path}") from exc
+    finally:
+        zip_payload.unlink(missing_ok=True)
+    return extract_root, crx_metadata
+
+
+def extract_xpi(xpi_path: Path, stage_dir: Path) -> Path:
+    extract_root = stage_dir / "xpi"
+    if extract_root.exists():
+        shutil.rmtree(extract_root)
+    extract_root.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(xpi_path) as zf:
+            _safe_zip_extract(zf, extract_root)
+    except zipfile.BadZipFile as exc:
+        raise CollectorError(f"XPI is not a valid ZIP: {xpi_path}") from exc
+    return extract_root
+
+
+def _safe_zip_extract(zf: zipfile.ZipFile, dest: Path) -> None:
+    """Extract while rejecting absolute paths and path-traversal entries.
+
+    Browser extensions are user-supplied content; the ZIP spec allows
+    arbitrary paths, so we explicitly check each member.
+    """
+    dest_resolved = dest.resolve()
+    for member in zf.infolist():
+        member_path = (dest / member.filename).resolve()
+        if not str(member_path).startswith(str(dest_resolved) + os.sep) and member_path != dest_resolved:
+            raise CollectorError(
+                f"Refusing to extract path-traversal entry: {member.filename!r}"
+            )
+        zf.extract(member, dest)
+
+
+def find_manifest_dir(root: Path) -> Path:
+    """Locate the directory containing manifest.json.
+
+    Accepts the root itself, or descends one level if exactly one
+    immediate subdirectory contains manifest.json.
+    """
+    if (root / "manifest.json").is_file():
+        return root
+    immediate_subs = [child for child in root.iterdir() if child.is_dir()] if root.is_dir() else []
+    candidates = [child for child in immediate_subs if (child / "manifest.json").is_file()]
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise CollectorError(
+            f"No manifest.json found at root or one level deep: {root}. "
+            "Pass an unpacked extension directory, .crx, or .xpi instead."
+        )
+    raise CollectorError(
+        f"Ambiguous extension root under {root}: multiple subdirectories contain manifest.json. "
+        "Pass the specific subdirectory explicitly."
+    )
+
+
+def locate_extension(input_path: Path, stage_dir: Path) -> ArtifactLocation:
+    if not input_path.exists():
+        raise CollectorError(f"Input path does not exist: {input_path}")
+
+    if input_path.is_file():
+        suffix = input_path.suffix.lower()
+        if suffix == ".crx":
+            extract_root, crx_metadata = extract_crx(input_path, stage_dir)
+            artifact_root = find_manifest_dir(extract_root)
+            return ArtifactLocation(
+                input_path=input_path.resolve(),
+                artifact_root=artifact_root.resolve(),
+                container="crx",
+                crx_metadata=crx_metadata,
+            )
+        if suffix == ".xpi":
+            extract_root = extract_xpi(input_path, stage_dir)
+            artifact_root = find_manifest_dir(extract_root)
+            return ArtifactLocation(
+                input_path=input_path.resolve(),
+                artifact_root=artifact_root.resolve(),
+                container="xpi",
+            )
+        raise CollectorError(
+            f"Unsupported file input: {input_path} (expected .crx, .xpi, or a directory)"
+        )
+
+    artifact_root = find_manifest_dir(input_path)
+    return ArtifactLocation(
+        input_path=input_path.resolve(),
+        artifact_root=artifact_root.resolve(),
+        container="directory",
+    )
+
+
+def parse_manifest(manifest_path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise CollectorError(f"Failed to parse manifest.json: {manifest_path} ({exc})") from exc
+
+
+def collect_manifest_role_map(manifest: dict[str, Any]) -> dict[str, str]:
+    """Return logical_path -> role mapping derived from manifest fields.
+
+    This is the source of truth for role assignment; it overrides path-based
+    fallbacks. Each path is normalized via normalize_manifest_ref.
+    """
+    roles: dict[str, str] = {}
+
+    def assign(field: Any, role: str) -> None:
+        if isinstance(field, str) and field.strip():
+            roles.setdefault(normalize_manifest_ref(field), role)
+        elif isinstance(field, list):
+            for entry in field:
+                if isinstance(entry, str) and entry.strip():
+                    roles.setdefault(normalize_manifest_ref(entry), role)
+
+    background = manifest.get("background") or {}
+    if isinstance(background, dict):
+        assign(background.get("service_worker"), "service_worker")
+        assign(background.get("scripts"), "background_script")
+        assign(background.get("page"), "background_page")
+
+    # MV2 packaged-app style nested under "app.background"
+    app_block = manifest.get("app") or {}
+    if isinstance(app_block, dict):
+        app_bg = app_block.get("background") or {}
+        if isinstance(app_bg, dict):
+            assign(app_bg.get("scripts"), "background_script")
+            assign(app_bg.get("page"), "background_page")
+
+    for cs in manifest.get("content_scripts") or []:
+        if isinstance(cs, dict):
+            assign(cs.get("js"), "content_script")
+            assign(cs.get("css"), "content_style")
+
+    for popup_field in (
+        ("action", "default_popup"),
+        ("browser_action", "default_popup"),
+        ("page_action", "default_popup"),
+    ):
+        block = manifest.get(popup_field[0])
+        if isinstance(block, dict):
+            assign(block.get(popup_field[1]), "popup_html")
+
+    assign(manifest.get("options_page"), "options_html")
+    options_ui = manifest.get("options_ui") or {}
+    if isinstance(options_ui, dict):
+        assign(options_ui.get("page"), "options_html")
+
+    assign(manifest.get("devtools_page"), "devtools_html")
+
+    sidebar = manifest.get("sidebar_action") or {}
+    if isinstance(sidebar, dict):
+        assign(sidebar.get("default_panel"), "sidebar_html")
+
+    overrides = manifest.get("chrome_url_overrides") or {}
+    if isinstance(overrides, dict):
+        for value in overrides.values():
+            assign(value, "override_html")
+
+    war = manifest.get("web_accessible_resources")
+    if isinstance(war, list):
+        for entry in war:
+            # MV2: list of strings; MV3: list of {resources: [...]}
+            if isinstance(entry, str):
+                assign(entry, "accessible_chunk")
+            elif isinstance(entry, dict):
+                assign(entry.get("resources"), "accessible_chunk")
+
+    return roles
+
+
+def role_for_path(logical_path: str, manifest_roles: dict[str, str]) -> str:
+    """Manifest references take precedence; otherwise path heuristics."""
+    direct = manifest_roles.get(logical_path)
+    if direct:
+        return direct
+    # Glob support (e.g. web_accessible_resources can use "images/*.png").
+    for pattern, role in manifest_roles.items():
+        if "*" in pattern and fnmatch.fnmatchcase(logical_path, pattern):
+            return role
+
+    lower = logical_path.lower()
+    name = Path(lower).name
+    if lower.endswith(SOURCE_MAP_SUFFIXES):
+        return "source_map"
+    if Path(lower).suffix in NATIVE_EXTS:
+        return "native_addon"
+    if name == "manifest.json" and "/" not in logical_path:
+        # Manifest at root — actual role version is finalized in mark_manifest.
+        return "manifest"
+    if lower.startswith("_locales/") and name == "messages.json":
+        return "locale_message"
+    if "offscreen" in lower and lower.endswith(HTML_EXTS):
+        return "offscreen_html"
+    if lower.endswith(HTML_EXTS):
+        return "html_entry"
+    if Path(lower).suffix in JS_EXTS:
+        return "js_chunk"
+    if lower.endswith(".css"):
+        return "asset"
+    if lower.endswith(".json"):
+        return "asset"
+    return "asset"
+
+
+def source_unit(
+    logical_path: str,
+    physical_path: Path | None,
+    role: str,
+    language: str,
+    ingest: bool,
+    entry: bool,
+    container: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": stable_id(logical_path),
+        "logical_path": logical_path,
+        "physical_path": str(physical_path.resolve()) if physical_path else None,
+        "role": role,
+        "language": language,
+        "ingest": ingest,
+        "entry": entry,
+        "container": container,
+        "metadata": metadata or {},
+    }
+
+
+def add_filesystem_sources(
+    sources: list[dict[str, Any]],
+    artifact_root: Path,
+    manifest_roles: dict[str, str],
+    container: str,
+    include_assets: bool,
+    include: list[str],
+    exclude: list[str],
+) -> None:
+    for path in sorted(artifact_root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = posix_path(path.relative_to(artifact_root))
+        language = language_for_path(rel)
+        role = role_for_path(rel, manifest_roles)
+        if not include_assets and language == "asset":
+            continue
+        ingest = should_ingest(rel, language, include, exclude)
+        sources.append(
+            source_unit(
+                rel,
+                path,
+                role,
+                language,
+                ingest,
+                entry=False,
+                container=container,
+                metadata={"file_size": path.stat().st_size},
+            )
+        )
+
+
+def mark_manifest_role(
+    sources: list[dict[str, Any]], manifest: dict[str, Any]
+) -> None:
+    version = manifest.get("manifest_version")
+    role = "manifest_v3" if version == 3 else "manifest_v2" if version == 2 else "manifest"
+    for source in sources:
+        if source["logical_path"] == "manifest.json":
+            source["role"] = role
+            source["entry"] = True
+            return
+
+
+def mark_entries(sources: list[dict[str, Any]]) -> None:
+    entry_roles = {
+        "service_worker",
+        "background_script",
+        "background_page",
+        "popup_html",
+        "options_html",
+        "devtools_html",
+        "sidebar_html",
+        "override_html",
+    }
+    for source in sources:
+        if source["role"] in entry_roles:
+            source["entry"] = True
+
+
+def id_by_logical(sources: list[dict[str, Any]]) -> dict[str, str]:
+    return {source["logical_path"]: source["id"] for source in sources}
+
+
+def resolve_logical(base_logical: str, ref: str) -> str | None:
+    if not ref or ref.startswith(("http://", "https://", "data:", "blob:", "javascript:")):
+        return None
+    clean = ref.split("#", 1)[0].split("?", 1)[0]
+    if not clean:
+        return None
+    base = Path(base_logical).parent
+    return posix_path((base / clean).as_posix())
+
+
+def build_edges(
+    sources: list[dict[str, Any]], manifest: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    lookup = id_by_logical(sources)
+    edges: list[dict[str, Any]] = []
+    unresolved_refs: list[dict[str, Any]] = []
+    manifest_source = next((s for s in sources if s["logical_path"] == "manifest.json"), None)
+
+    if manifest_source is not None:
+        manifest_id = manifest_source["id"]
+
+        def declare(value: Any, expected_role: str) -> None:
+            if isinstance(value, list):
+                for v in value:
+                    declare(v, expected_role)
+                return
+            if not isinstance(value, str) or not value.strip():
+                return
+            logical = normalize_manifest_ref(value)
+            metadata: dict[str, Any] = {"ref": value, "expected_role": expected_role}
+            if "*" in logical:
+                matched = sorted(path for path in lookup if fnmatch.fnmatchcase(path, logical))
+                if not matched:
+                    unresolved_refs.append({**metadata, "logical_path": logical})
+                    return
+                for target_logical in matched:
+                    edges.append(
+                        {
+                            "from": manifest_id,
+                            "to": lookup[target_logical],
+                            "kind": "manifest_declares",
+                            "metadata": {
+                                **metadata,
+                                "expanded_from": logical,
+                                "logical_path": target_logical,
+                            },
+                        }
+                    )
+                return
+
+            target_id = lookup.get(logical)
+            if target_id is None:
+                unresolved_refs.append({**metadata, "logical_path": logical})
+                return
+            edges.append(
+                {
+                    "from": manifest_id,
+                    "to": target_id,
+                    "kind": "manifest_declares",
+                    "metadata": metadata,
+                }
+            )
+
+        bg = manifest.get("background") or {}
+        if isinstance(bg, dict):
+            declare(bg.get("service_worker"), "service_worker")
+            declare(bg.get("scripts"), "background_script")
+            declare(bg.get("page"), "background_page")
+        app_block = manifest.get("app") or {}
+        if isinstance(app_block, dict):
+            app_bg = app_block.get("background") or {}
+            if isinstance(app_bg, dict):
+                declare(app_bg.get("scripts"), "background_script")
+                declare(app_bg.get("page"), "background_page")
+
+        for cs in manifest.get("content_scripts") or []:
+            if isinstance(cs, dict):
+                declare(cs.get("js"), "content_script")
+                declare(cs.get("css"), "content_style")
+
+        for action_field in ("action", "browser_action", "page_action"):
+            block = manifest.get(action_field) or {}
+            if isinstance(block, dict):
+                declare(block.get("default_popup"), "popup_html")
+
+        declare(manifest.get("options_page"), "options_html")
+        options_ui = manifest.get("options_ui") or {}
+        if isinstance(options_ui, dict):
+            declare(options_ui.get("page"), "options_html")
+
+        declare(manifest.get("devtools_page"), "devtools_html")
+        sidebar = manifest.get("sidebar_action") or {}
+        if isinstance(sidebar, dict):
+            declare(sidebar.get("default_panel"), "sidebar_html")
+
+        overrides = manifest.get("chrome_url_overrides") or {}
+        if isinstance(overrides, dict):
+            for value in overrides.values():
+                declare(value, "override_html")
+
+        war = manifest.get("web_accessible_resources")
+        if isinstance(war, list):
+            for entry in war:
+                if isinstance(entry, str):
+                    declare(entry, "accessible_chunk")
+                elif isinstance(entry, dict):
+                    declare(entry.get("resources"), "accessible_chunk")
+
+    for source in sources:
+        physical = Path(source["physical_path"]) if source.get("physical_path") else None
+        if not physical or not physical.is_file():
+            continue
+        logical = source["logical_path"]
+        if source["language"] == "html":
+            try:
+                parser = HtmlReferenceParser()
+                parser.feed(physical.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+            for ref in parser.scripts:
+                target = resolve_logical(logical, ref)
+                if target in lookup:
+                    edges.append({"from": source["id"], "to": lookup[target], "kind": "script", "metadata": {"ref": ref}})
+            for ref in parser.stylesheets:
+                target = resolve_logical(logical, ref)
+                if target in lookup:
+                    edges.append({"from": source["id"], "to": lookup[target], "kind": "stylesheet", "metadata": {"ref": ref}})
+        elif source["language"] in {"javascript", "typescript", "jsx", "tsx", "css"}:
+            try:
+                tail = physical.read_text(encoding="utf-8", errors="ignore")[-4096:]
+            except OSError:
+                continue
+            marker = "sourceMappingURL="
+            if marker in tail:
+                ref = tail.rsplit(marker, 1)[1].splitlines()[0].strip().strip("*/ ")
+                target = resolve_logical(logical, ref)
+                if target in lookup:
+                    source["source_map_id"] = lookup[target]
+                    edges.append({"from": source["id"], "to": lookup[target], "kind": "source_map", "metadata": {"ref": ref}})
+    return edges, unresolved_refs
+
+
+def validate_manifest(manifest: dict[str, Any], extension_manifest: dict[str, Any]) -> None:
+    sources = manifest.get("sources", [])
+    if not sources:
+        raise CollectorError("Manifest contains no source units")
+
+    ids = [source["id"] for source in sources]
+    logical_paths = [source["logical_path"] for source in sources]
+    duplicate_ids = [item for item, count in Counter(ids).items() if count > 1]
+    duplicate_paths = [item for item, count in Counter(logical_paths).items() if count > 1]
+    if duplicate_ids:
+        raise CollectorError(f"Duplicate source ids: {duplicate_ids[:5]}")
+    if duplicate_paths:
+        raise CollectorError(f"Duplicate logical paths: {duplicate_paths[:5]}")
+
+    id_set = set(ids)
+    invalid_edges = [
+        edge
+        for edge in manifest.get("edges", [])
+        if not isinstance(edge.get("from"), str)
+        or not isinstance(edge.get("to"), str)
+        or edge.get("from") not in id_set
+        or edge.get("to") not in id_set
+    ]
+    if invalid_edges:
+        raise CollectorError(
+            "Artifact edges must connect existing source-unit ids; "
+            f"invalid edge count: {len(invalid_edges)}"
+        )
+
+    manifest_units = [s for s in sources if s["role"] in {"manifest_v3", "manifest_v2", "manifest"}]
+    if len(manifest_units) != 1:
+        raise CollectorError(
+            f"Expected exactly one manifest source unit, found {len(manifest_units)}"
+        )
+    if not extension_manifest.get("name"):
+        raise CollectorError("manifest.json missing required field: name")
+    if not extension_manifest.get("version"):
+        raise CollectorError("manifest.json missing required field: version")
+    if "manifest_version" not in extension_manifest:
+        raise CollectorError("manifest.json missing required field: manifest_version")
+
+    # MV3 service-worker presence check
+    bg = extension_manifest.get("background") or {}
+    if isinstance(bg, dict):
+        sw_field = bg.get("service_worker")
+        if isinstance(sw_field, str) and sw_field.strip():
+            sw_logical = normalize_manifest_ref(sw_field)
+            sw_units = [s for s in sources if s["logical_path"] == sw_logical and s["role"] == "service_worker"]
+            if not sw_units:
+                raise CollectorError(
+                    f"Manifest declares service_worker {sw_field!r} but no source unit with that role exists"
+                )
+
+
+def collect(args: argparse.Namespace) -> dict[str, Any]:
+    output_manifest_path = args.output_manifest.resolve()
+    stage_dir = (
+        args.stage_dir.resolve()
+        if args.stage_dir
+        else output_manifest_path.parent / "browser-extension-collector-stage"
+    )
+    stage_dir.mkdir(parents=True, exist_ok=True)
+
+    location = locate_extension(args.input.resolve(), stage_dir)
+    extension_manifest = parse_manifest(location.artifact_root / "manifest.json")
+    manifest_roles = collect_manifest_role_map(extension_manifest)
+
+    sources: list[dict[str, Any]] = []
+    add_filesystem_sources(
+        sources,
+        location.artifact_root,
+        manifest_roles,
+        location.container,
+        not args.no_assets,
+        args.ingest_include,
+        args.ingest_exclude,
+    )
+    mark_manifest_role(sources, extension_manifest)
+    mark_entries(sources)
+    edges, unresolved_refs = build_edges(sources, extension_manifest)
+
+    metadata = {
+        "collector": "browser-extension-collector",
+        "collector_version": 1,
+        "input_path": str(location.input_path),
+        "resolved_artifact_root": str(location.artifact_root),
+        "container": location.container,
+        "extension": {
+            "name": extension_manifest.get("name"),
+            "version": extension_manifest.get("version"),
+            "manifest_version": extension_manifest.get("manifest_version"),
+            "default_locale": extension_manifest.get("default_locale"),
+            "minimum_chrome_version": extension_manifest.get("minimum_chrome_version"),
+        },
+        # Backstop for schema_v1: preserve the full collector-emitted role string
+        # per logical path so it survives even when SourceRole::from_str() collapses
+        # extension-namespace roles (service_worker, popup_html, accessible_chunk,
+        # locale_message, etc.) to Unknown server-side. Migration 041 will lift this
+        # into the source_units.role_tag column once schema_v2 lands.
+        "collector_roles": {
+            source["logical_path"]: source["role"] for source in sources
+        },
+        "unresolved_manifest_references": unresolved_refs,
+    }
+    if location.crx_metadata is not None:
+        metadata["crx"] = location.crx_metadata
+
+    manifest = {
+        "schema_version": 1,
+        "profile": "browser-extension",
+        "artifact_root": str(location.artifact_root),
+        "sources": sources,
+        "edges": edges,
+        "metadata": metadata,
+    }
+    validate_manifest(manifest, extension_manifest)
+    output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    output_manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return manifest
+
+
+def report(manifest: dict[str, Any], output_manifest_path: Path) -> dict[str, Any]:
+    sources = manifest["sources"]
+    by_role = Counter(source["role"] for source in sources)
+    by_language = Counter(source["language"] for source in sources)
+    ingest_enabled = sum(1 for source in sources if source.get("ingest"))
+    unresolved_references = len(
+        manifest.get("metadata", {}).get("unresolved_manifest_references") or []
+    )
+    return {
+        "status": "ok",
+        "manifest_path": str(output_manifest_path.resolve()),
+        "artifact_root": manifest["artifact_root"],
+        "container": manifest["metadata"]["container"],
+        "extension": manifest["metadata"]["extension"],
+        "source_units": len(sources),
+        "ingest_enabled": ingest_enabled,
+        "edges": len(manifest["edges"]),
+        "unresolved_edges": unresolved_references,
+        "unresolved_references": unresolved_references,
+        "by_role": dict(sorted(by_role.items())),
+        "by_language": dict(sorted(by_language.items())),
+    }
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "input",
+        type=Path,
+        help="Browser extension input: .crx file, .xpi file, or unpacked directory",
+    )
+    parser.add_argument(
+        "--output-manifest",
+        type=Path,
+        required=True,
+        help="Path to write artifact-manifest.json",
+    )
+    parser.add_argument(
+        "--stage-dir",
+        type=Path,
+        help="Persistent directory for CRX/XPI extracted files",
+    )
+    parser.add_argument(
+        "--no-assets",
+        action="store_true",
+        help="Skip generic asset source units while keeping code, maps, native files, and the manifest",
+    )
+    parser.add_argument(
+        "--ingest-include",
+        action="append",
+        default=[],
+        help="Glob for JS/TS logical paths to enable ingest; repeatable",
+    )
+    parser.add_argument(
+        "--ingest-exclude",
+        action="append",
+        default=[],
+        help="Glob for JS/TS logical paths to disable ingest; repeatable",
+    )
+    parser.add_argument(
+        "--json-report",
+        action="store_true",
+        help="Print machine-readable summary JSON",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    try:
+        manifest = collect(args)
+        summary = report(manifest, args.output_manifest)
+        if args.json_report:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        else:
+            print(f"Wrote {summary['manifest_path']}")
+            print(
+                f"source_units={summary['source_units']} "
+                f"ingest_enabled={summary['ingest_enabled']} "
+                f"edges={summary['edges']}"
+            )
+        return 0
+    except CollectorError as exc:
+        print(f"browser-extension-collector: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
