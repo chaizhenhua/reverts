@@ -137,11 +137,64 @@ struct RerouteRuntimeBarrelImportsPass;
 impl PlanningPass for RerouteRuntimeBarrelImportsPass {
     fn run(
         &self,
-        _context: &PlannerContext<'_>,
+        context: &PlannerContext<'_>,
         state: &mut PlanningState,
     ) -> Result<(), PlanError> {
-        reroute_runtime_barrel_imports(&mut state.plan, &mut state.runtime_helpers);
+        let scope = BundleScope::from_program(context.program());
+        reroute_runtime_barrel_imports(&mut state.plan, &mut state.runtime_helpers, &scope);
         Ok(())
+    }
+}
+
+/// Maps an emitted module path to its esbuild bundle (= its source file id) so
+/// a barrel-import reroute never crosses a bundle boundary. A source file with
+/// MANY sliced modules is a scope-hoisted bundle; a binding referenced inside it
+/// must resolve WITHIN it. Rerouting a sliced-bundle reader's binding to an
+/// owner in a DIFFERENT file (e.g. an Electron main module to a renderer
+/// `ion-dist` chunk that uses `document`) is the cross-bundle leak this blocks.
+/// A standalone (single-module) file keeps unrestricted reroute (explicit
+/// cross-chunk imports, e.g. inside one renderer build).
+struct BundleScope {
+    file_of_path: BTreeMap<String, u32>,
+    modules_per_file: BTreeMap<u32, usize>,
+}
+
+impl BundleScope {
+    fn from_program(program: &reverts_model::EnrichedProgram) -> Self {
+        let mut file_of_path = BTreeMap::new();
+        let mut modules_per_file = BTreeMap::new();
+        for module in program.model().modules() {
+            let Some(source_file_id) = module.source_file_id else {
+                continue;
+            };
+            *modules_per_file.entry(source_file_id).or_insert(0) += 1;
+            if let Some(path) = crate::module_output_path(program, module.id) {
+                file_of_path.insert(path, source_file_id);
+            }
+        }
+        Self {
+            file_of_path,
+            modules_per_file,
+        }
+    }
+
+    /// Whether a barrel binding may be rerouted from `reader_path` to
+    /// `owner_path`. Blocked when the reader sits in a sliced bundle file and
+    /// the owner is in a different file (a cross-bundle leak).
+    fn allows_reroute(&self, reader_path: &str, owner_path: &str) -> bool {
+        let Some(reader_file) = self.file_of_path.get(reader_path).copied() else {
+            return true;
+        };
+        if self
+            .modules_per_file
+            .get(&reader_file)
+            .copied()
+            .unwrap_or(0)
+            <= 1
+        {
+            return true;
+        }
+        self.file_of_path.get(owner_path).copied() == Some(reader_file)
     }
 }
 
@@ -352,6 +405,7 @@ fn occupied_runtime_bindings_for_entrypoint(
 fn reroute_runtime_barrel_imports(
     plan: &mut EmitPlan,
     runtime_helpers: &mut RuntimeHelperUsageAccumulator,
+    scope: &BundleScope,
 ) {
     let source_file_ids = runtime_helper_usage_source_file_ids(runtime_helpers);
     if source_file_ids.is_empty() {
@@ -381,6 +435,7 @@ fn reroute_runtime_barrel_imports(
                     file.path.as_str(),
                     specifiers,
                     &owner_paths,
+                    scope,
                 );
                 if partition.rerouted.is_empty() {
                     rewritten.push(source);
@@ -407,8 +462,12 @@ fn reroute_runtime_barrel_imports(
                     &source_file_ids,
                 )
             {
-                let partition =
-                    partition_runtime_barrel_reexports(file.path.as_str(), bindings, &owner_paths);
+                let partition = partition_runtime_barrel_reexports(
+                    file.path.as_str(),
+                    bindings,
+                    &owner_paths,
+                    scope,
+                );
                 if partition.rerouted.is_empty() {
                     rewritten.push(source);
                     continue;
@@ -513,6 +572,7 @@ fn partition_runtime_barrel_import_specifiers(
     file_path: &str,
     specifiers: Vec<NamedImportSpecifier>,
     owner_paths: &BTreeMap<BindingName, Option<String>>,
+    scope: &BundleScope,
 ) -> RuntimeBarrelImportPartition {
     let mut partition = RuntimeBarrelImportPartition::default();
     for specifier in specifiers {
@@ -521,7 +581,9 @@ fn partition_runtime_barrel_import_specifiers(
             continue;
         }
         match owner_paths.get(&specifier.imported).and_then(Clone::clone) {
-            Some(owner_path) if owner_path != file_path => {
+            Some(owner_path)
+                if owner_path != file_path && scope.allows_reroute(file_path, &owner_path) =>
+            {
                 partition
                     .rerouted
                     .entry(owner_path)
@@ -573,11 +635,14 @@ fn partition_runtime_barrel_reexports(
     file_path: &str,
     bindings: BTreeSet<BindingName>,
     owner_paths: &BTreeMap<BindingName, Option<String>>,
+    scope: &BundleScope,
 ) -> RuntimeBarrelReexportPartition {
     let mut partition = RuntimeBarrelReexportPartition::default();
     for binding in bindings {
         match owner_paths.get(&binding).and_then(Clone::clone) {
-            Some(owner_path) if owner_path != file_path => {
+            Some(owner_path)
+                if owner_path != file_path && scope.allows_reroute(file_path, &owner_path) =>
+            {
                 partition
                     .rerouted
                     .entry(owner_path)
