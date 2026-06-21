@@ -124,6 +124,7 @@ pub fn match_packages_with_pipeline(
     run_package_match_pass(AnonymousImportablePass, &context, &mut state, &mut timing);
     run_package_match_pass(CjsWrapperEntryThunkPass, &context, &mut state, &mut timing);
     run_package_match_pass(CacheAnchoredSurfacesPass, &context, &mut state, &mut timing);
+    run_package_match_pass(AttributionPrecisionPass, &context, &mut state, &mut timing);
 
     PackageMatchingPipelineReport {
         package_report: state.package_report,
@@ -1726,6 +1727,22 @@ impl PackageMatchPass for CjsWrapperEntryThunkPass {
 
     fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
         ownership::cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+            context.rows,
+            context.package_sources,
+            &mut state.package_report,
+        );
+    }
+}
+
+struct AttributionPrecisionPass;
+
+impl PackageMatchPass for AttributionPrecisionPass {
+    fn name(&self) -> &'static str {
+        "attribution_precision_denoise"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        ownership::attribution_precision::suppress_overattributed_function_soup(
             context.rows,
             context.package_sources,
             &mut state.package_report,

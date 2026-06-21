@@ -1,3 +1,4 @@
+pub(crate) mod attribution_precision;
 pub(crate) mod cascade;
 pub(crate) mod cjs_wrapper_entry;
 pub(crate) mod dependency_closure;

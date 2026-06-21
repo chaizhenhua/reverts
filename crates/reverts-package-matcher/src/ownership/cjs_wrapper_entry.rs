@@ -66,29 +66,18 @@ use super::promotion::{ExternalImportPromotion, apply_external_import_promotion}
 /// accidental name collision cannot pass.
 const MIN_PUBLIC_MEMBER_ASSIGNMENTS: usize = 4;
 
-pub(crate) fn promote_anonymous_cjs_wrapper_entry_thunks(
-    rows: &InputRows,
+/// Each package version's ROOT PUBLIC-API member names — the true
+/// `require("pkg")` / `import "pkg"` surface, NOT the union of every file's
+/// exports (so an internal sub-module's own members, e.g. semver/internal/re's
+/// `COMPARATOR`, never leak in). Combines: (a) re-export indirection
+/// (react index.js → cjs/react.js) via `package_source_public_export_proofs`;
+/// (b) object-literal aggregation (semver `module.exports = {valid, …}`) via the
+/// ROOT source's exported names; (f) function-export-with-attached-methods
+/// (picomatch) via form-(f)-only extraction over all sources.
+pub(crate) fn package_public_member_universe(
     package_sources: &[PackageSource],
-    report: &mut VersionedPackageMatchReport,
-) {
-    let already_accepted = accepted_external_modules(rows, report);
-    let modules_by_id = rows
-        .modules
-        .iter()
-        .map(|module| (module.id, module))
-        .collect::<BTreeMap<_, _>>();
-    // Precompute each package version's ROOT PUBLIC-API members ONCE. Use the
-    // RESOLVED public surface of the bare-package specifier (export_specifier ==
-    // package_name), NOT the union of every file's exports: a thunk that assigns
-    // an INTERNAL sub-module's names (e.g. semver/internal/re's `COMPARATOR`)
-    // must be rejected, because externalizing it to `import … from "semver"`
-    // would make consumers read `thunk().COMPARATOR` = undefined at runtime.
-    // `package_source_public_export_proofs` follows re-exports so the bare
-    // specifier resolves to the true `require("pkg")` surface.
+) -> BTreeMap<(String, String), BTreeSet<String>> {
     let mut members_by_package = BTreeMap::<(String, String), BTreeSet<String>>::new();
-    // (a) Re-export indirection surfaces (e.g. react index.js -> cjs/react.js):
-    // `package_source_public_export_proofs` follows `export {x} from './y'` /
-    // single-`require` re-exports to the resolved public members.
     for proof in package_source_public_export_proofs(package_sources) {
         if proof.export_specifier == proof.package_name {
             members_by_package
@@ -97,13 +86,6 @@ pub(crate) fn promote_anonymous_cjs_wrapper_entry_thunks(
                 .extend(proof.public_members);
         }
     }
-    // (b) Object-literal aggregation surfaces (e.g. semver index.js
-    // `module.exports = {valid: require(...), satisfies: require(...), …}`):
-    // the ROOT entry source's own top-level exported names ARE the public API.
-    // This stays the PUBLIC surface — an internal sub-module's own members (e.g.
-    // `re.js`'s `COMPARATOR`, which is reached as `require('semver').re.COMPARATOR`,
-    // NOT a top-level `semver` member) are never added, so a thunk that assigns
-    // those internal names is still rejected.
     for source in package_sources {
         if source.export_specifier == source.package_name {
             members_by_package
@@ -115,12 +97,6 @@ pub(crate) fn promote_anonymous_cjs_wrapper_entry_thunks(
                 ));
         }
     }
-    // (f) Function-export surfaces (e.g. picomatch: `module.exports = picomatch;
-    // picomatch.scan = …`). The exported function's attached methods are the
-    // public API. Run over ALL sources (form-(f)-only is safe: it never reads
-    // `exports.<x>=`, so internal sub-modules cannot leak in), since the methods
-    // live in the implementation source (e.g. picomatch/lib/picomatch.js), which
-    // the root entry re-exports via `Object.assign`.
     for source in package_sources {
         let attached = function_export_attached_members(source.source.as_str());
         if !attached.is_empty() {
@@ -130,6 +106,21 @@ pub(crate) fn promote_anonymous_cjs_wrapper_entry_thunks(
                 .extend(attached);
         }
     }
+    members_by_package
+}
+
+pub(crate) fn promote_anonymous_cjs_wrapper_entry_thunks(
+    rows: &InputRows,
+    package_sources: &[PackageSource],
+    report: &mut VersionedPackageMatchReport,
+) {
+    let already_accepted = accepted_external_modules(rows, report);
+    let modules_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let members_by_package = package_public_member_universe(package_sources);
 
     let mut promotions = Vec::<(usize, ExternalImportPromotion)>::new();
     for (idx, package_match) in report.matches.iter().enumerate() {
@@ -199,9 +190,9 @@ pub(crate) fn promote_anonymous_cjs_wrapper_entry_thunks(
 
 /// The two factory parameters of an esbuild `__commonJS` wrapper:
 /// `(<exports>[, <module>]) => …`. esbuild minifies both names.
-struct ThunkParams {
-    exports_param: String,
-    module_param: Option<String>,
+pub(crate) struct ThunkParams {
+    pub(crate) exports_param: String,
+    pub(crate) module_param: Option<String>,
 }
 
 /// Collect the member names the thunk assigns onto its exports object, across
@@ -212,7 +203,7 @@ struct ThunkParams {
 ///   (d) `<module>.exports = { <member>: …, … }`     (object-literal aggregation,
 ///        e.g. semver's index.js `module.exports = {parse, valid, …}`)
 /// These are the package's public surface as the bundle built it.
-fn exports_assigned_members(source: &str, params: &ThunkParams) -> BTreeSet<String> {
+pub(crate) fn exports_assigned_members(source: &str, params: &ThunkParams) -> BTreeSet<String> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::default()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
@@ -382,7 +373,7 @@ fn module_exports_object_target(target: &AssignmentTarget<'_>, module_param: &st
 /// Recognize esbuild's minified `__commonJS` package-entry thunk and return its
 /// factory parameter names. Shape:
 /// `var <NS> = <helper>((<exports>[, <module>]) => { … })`.
-fn esbuild_commonjs_entry_thunk_params(source: &str) -> Option<ThunkParams> {
+pub(crate) fn esbuild_commonjs_entry_thunk_params(source: &str) -> Option<ThunkParams> {
     let mut search_from = 0;
     while search_from < source.len() {
         let (offset, keyword_len) = next_var_like(source, search_from)?;

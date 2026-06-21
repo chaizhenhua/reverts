@@ -6,7 +6,7 @@ use crate::{
     PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch, PackageModuleSourceQuality, PackageSource,
     VersionedPackageMatchReport, VersionedPackageMatcher, match_packages_with_pipeline,
     match_structural_bags, match_structural_bags_with_excluded_modules,
-    ownership::{cascade, cjs_wrapper_entry, exact_hint, importable},
+    ownership::{attribution_precision, cascade, cjs_wrapper_entry, exact_hint, importable},
     package_import_names_from_sources, package_module_source_quality,
     package_source_normalized_hash, package_source_normalized_hashes,
     package_source_public_export_proofs, resolve_external_import_target,
@@ -407,6 +407,93 @@ fn package_sources_with_public_surface() -> [PackageSource; 2] {
             "export { alpha, beta, gamma, delta } from './impl.js';",
         ),
     ]
+}
+
+#[test]
+fn precision_gate_denoises_overattributed_package_keeps_entry_and_small_packages() {
+    // An over-attributed package ("noisepkg": 24 weak function-soup matches +
+    // 1 externalized entry) gets its function-soup tail suppressed but keeps the
+    // entry; a small package (1 match, below the de-noise threshold) is untouched.
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    let mut matches = Vec::new();
+    let weak_soup = |module_id: u32, package: &str| PackageMatch {
+        module_id: ModuleId(module_id),
+        package_name: package.to_string(),
+        package_version: "1.0.0".to_string(),
+        export_specifier: package.to_string(),
+        source_path: format!("anonymous-function-axis-source:{package}"),
+        normalized_source_hash: String::new(),
+        strategy: ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors,
+        function_signature_matches: 50,
+        string_anchor_matches: 0,
+        external_importable: false,
+    };
+    for i in 0..24u32 {
+        let id = 100 + i;
+        rows.source_files.push(SourceFileInput::new(
+            id,
+            format!("n{i}.js"),
+            Some(format!("function f{i}(){{return {i};}}")),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(id), format!("n{i}"), format!("modules/n{i}.ts"))
+                .with_source_file(id),
+        );
+        matches.push(weak_soup(id, "noisepkg"));
+    }
+    // the genuine externalized entry of noisepkg (must be kept)
+    rows.source_files.push(SourceFileInput::new(
+        199,
+        "entry.js",
+        Some("var e=p((x)=>{});".to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(199), "entry", "modules/entry.ts").with_source_file(199),
+    );
+    let mut entry = weak_soup(199, "noisepkg");
+    entry.external_importable = true;
+    matches.push(entry);
+    // a small package (below threshold) — untouched
+    rows.source_files.push(SourceFileInput::new(
+        200,
+        "small.js",
+        Some("function s(){return 1;}".to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(200), "small", "modules/small.ts").with_source_file(200),
+    );
+    matches.push(weak_soup(200, "smallpkg"));
+
+    let mut report = VersionedPackageMatchReport {
+        attributions: Vec::new(),
+        surfaces: Vec::new(),
+        matches,
+        version_matches: Vec::new(),
+        audit: reverts_observe::AuditReport::default(),
+    };
+
+    attribution_precision::suppress_overattributed_function_soup(&rows, &[], &mut report);
+
+    let noise = report
+        .matches
+        .iter()
+        .filter(|m| m.package_name == "noisepkg")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        noise.len(),
+        1,
+        "only the externalized entry of noisepkg survives"
+    );
+    assert!(noise[0].external_importable);
+    assert_eq!(
+        report
+            .matches
+            .iter()
+            .filter(|m| m.package_name == "smallpkg")
+            .count(),
+        1,
+        "a small (below-threshold) package must be untouched"
+    );
 }
 
 #[test]
