@@ -370,7 +370,12 @@ pub fn runtime_setter_migration_blocker_report_from_prepared(
 }
 
 pub fn prepare_and_enrich(input: InputBundle) -> Result<PreparedProgram, PipelineError> {
-    let (input, bundle_audit) = prepare_input_bundle_for_generation(input)?;
+    let (mut input, bundle_audit) = prepare_input_bundle_for_generation(input)?;
+    // Strip cross-bundle dependency leaks BEFORE the graph is built — the
+    // ImportExport graph records module imports from these edges, so the planner
+    // would otherwise resolve a binding to a foreign esbuild bundle (e.g. the
+    // Node main process importing a renderer `ion-dist` chunk using `document`).
+    input.strip_cross_bundle_dependencies();
     let model = ProgramModel::from_input(input);
     let enrichment = enrich_program(model);
     Ok(PreparedProgram {

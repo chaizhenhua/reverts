@@ -525,6 +525,44 @@ pub struct InputBundle {
 }
 
 impl InputBundle {
+    /// Remove module-dependency edges that leak across bundle boundaries: a
+    /// scope-hoisted bundle module (its source file holds MANY sliced modules)
+    /// wired to a DIFFERENT source file. esbuild emits a separate scope-hoisted
+    /// bundle per output (Electron main vs each renderer), and a free reference
+    /// inside one bundle resolves WITHIN that bundle's file — an edge to another
+    /// file is a cross-bundle leak (e.g. a main module pulling a renderer
+    /// `ion-dist` chunk that uses `document` into the Node main process). A
+    /// single-module file is a standalone module whose cross-file edges are
+    /// genuine explicit imports, so it is left untouched.
+    ///
+    /// Must run BEFORE graph construction (the ImportExport graph records module
+    /// imports from these edges), so the planner never resolves a binding to a
+    /// foreign bundle.
+    pub fn strip_cross_bundle_dependencies(&mut self) {
+        use std::collections::BTreeMap;
+        let file_of: BTreeMap<ModuleId, Option<u32>> = self
+            .modules
+            .iter()
+            .map(|module| (module.id, module.source_file_id))
+            .collect();
+        let mut modules_per_file: BTreeMap<u32, usize> = BTreeMap::new();
+        for file_id in file_of.values().flatten() {
+            *modules_per_file.entry(*file_id).or_insert(0) += 1;
+        }
+        self.dependencies.retain(|dependency| {
+            let ModuleDependencyTarget::Module(target) = dependency.target else {
+                return true;
+            };
+            let Some(from_file) = file_of.get(&dependency.from_module_id).copied().flatten() else {
+                return true;
+            };
+            if modules_per_file.get(&from_file).copied().unwrap_or(0) <= 1 {
+                return true;
+            }
+            file_of.get(&target).copied().flatten() == Some(from_file)
+        });
+    }
+
     pub fn from_rows(rows: InputRows) -> Result<Self, InputBundleError> {
         validate_project(&rows.project)?;
         let source_file_ids = collect_source_file_ids(&rows.source_files)?;

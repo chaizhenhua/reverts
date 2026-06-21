@@ -254,6 +254,36 @@ struct SynthesizedModuleWiring {
 
 fn synthesize_module_dependency_edges(model: &ProgramModel) -> SynthesizedModuleWiring {
     let def_use = model.graph().def_use();
+    // esbuild scope-hoisting shares ONE scope per bundle, and the decompiler
+    // slices that bundle into many modules sharing the bundle file's id. A free
+    // read in such a module resolves to an owner WITHIN the same bundle file —
+    // resolving it to a different file is a cross-bundle leak (e.g. an Electron
+    // main-bundle module wrongly wired to a renderer `ion-dist` chunk, dragging
+    // browser globals into the Node main process). So when the reader sits in a
+    // sliced bundle file (>1 module), restrict candidate owners to that file.
+    // A single-module file (a genuine standalone module, e.g. a code-split
+    // renderer chunk that uses explicit imports) keeps unrestricted resolution.
+    let file_of: BTreeMap<ModuleId, Option<u32>> = model
+        .modules()
+        .iter()
+        .map(|module| (module.id, module.source_file_id))
+        .collect();
+    let mut modules_per_file: BTreeMap<u32, usize> = BTreeMap::new();
+    for file_id in file_of.values().flatten() {
+        *modules_per_file.entry(*file_id).or_insert(0) += 1;
+    }
+    let restrict_owners = |reader: ModuleId, owners: BTreeSet<ModuleId>| -> BTreeSet<ModuleId> {
+        let Some(reader_file) = file_of.get(&reader).copied().flatten() else {
+            return owners;
+        };
+        if modules_per_file.get(&reader_file).copied().unwrap_or(0) <= 1 {
+            return owners;
+        }
+        owners
+            .into_iter()
+            .filter(|owner| file_of.get(owner).copied().flatten() == Some(reader_file))
+            .collect()
+    };
     let existing: BTreeSet<(ModuleId, ModuleId)> = model
         .input()
         .dependencies
@@ -276,6 +306,7 @@ fn synthesize_module_dependency_edges(model: &ProgramModel) -> SynthesizedModule
             .into_iter()
             .filter(|owner| *owner != module_id)
             .collect();
+        let owners = restrict_owners(module_id, owners);
         if !owners.is_empty() {
             pending_by_read
                 .entry((module_id, binding))
@@ -311,6 +342,7 @@ fn synthesize_module_dependency_edges(model: &ProgramModel) -> SynthesizedModule
                 .into_iter()
                 .filter(|owner| *owner != module.id)
                 .collect();
+            let owners = restrict_owners(module.id, owners);
             if !owners.is_empty() {
                 pending_by_read
                     .entry((module.id, binding))
