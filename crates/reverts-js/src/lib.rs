@@ -116,6 +116,13 @@ pub struct GeneratedRename {
     pub original: String,
     pub renamed: String,
     pub scope: GeneratedRenameScope,
+    /// When true, also rewrite the binding's module import/export *wire* name
+    /// (the `imported`/`exported` specifier name), collapsing the alias that the
+    /// local rename leaves behind (`import { Cb as parseDocument }` →
+    /// `import { parseDocument }`). The planner sets this only for bindings it
+    /// proved safe to rename project-wide; the wire pass still only touches a
+    /// specifier whose local was actually renamed.
+    pub wire: bool,
 }
 
 impl GeneratedRename {
@@ -125,6 +132,7 @@ impl GeneratedRename {
             original: original.into(),
             renamed: renamed.into(),
             scope: GeneratedRenameScope::Module,
+            wire: false,
         }
     }
 
@@ -134,6 +142,7 @@ impl GeneratedRename {
             original: original.into(),
             renamed: renamed.into(),
             scope: GeneratedRenameScope::All,
+            wire: false,
         }
     }
 
@@ -147,7 +156,15 @@ impl GeneratedRename {
             original: original.into(),
             renamed: renamed.into(),
             scope: GeneratedRenameScope::BindingIndex(binding_index),
+            wire: false,
         }
+    }
+
+    /// Mark this rename to also rewrite the module import/export wire name.
+    #[must_use]
+    pub fn with_wire(mut self) -> Self {
+        self.wire = true;
+        self
     }
 }
 

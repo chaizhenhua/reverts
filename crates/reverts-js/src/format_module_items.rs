@@ -29,7 +29,7 @@ use crate::recover::{
 use crate::rename_apply::{
     FunctionParamRename, ReadabilityRenameHint, ReadabilityRenameSource,
     apply_all_scope_readability_renames, apply_emit_safety_renames, apply_function_param_renames,
-    apply_readability_renames, resolve_readability_rename_hints,
+    apply_readability_renames, apply_wire_export_import_renames, resolve_readability_rename_hints,
 };
 use crate::rename_hints::collect_late_readability_rename_hints;
 use crate::type_annotations::{
@@ -264,6 +264,15 @@ pub fn format_source_with_module_items_request_with_report(
             &all_scope_renames,
             &mut report,
         );
+        // After local renames leave aliased wire names, collapse the alias for
+        // the planner-flagged project-wide-safe renames (export AND import sides
+        // carry the same flagged pair, so they stay consistent).
+        let wire_renames = readability_renames
+            .iter()
+            .filter(|rename| rename.wire)
+            .cloned()
+            .collect::<Vec<_>>();
+        apply_wire_export_import_renames(&allocator, &mut parsed.program, &wire_renames);
         apply_emit_safety_renames(&allocator, &mut parsed.program, &mut report);
         apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
         normalize_imports_after_emit(&mut parsed.program, &builder);
@@ -330,4 +339,92 @@ fn normalize_imports_after_emit<'a>(program: &mut Program<'a>, builder: &AstBuil
     coalesce_imports_in_program(program, builder);
     prune_unused_import_specifiers_in_program(program, builder);
     coalesce_imports_in_program(program, builder);
+}
+
+#[cfg(test)]
+mod wire_rename_tests {
+    use super::*;
+
+    fn format(body: &str, renames: &[GeneratedRename]) -> String {
+        format_source_with_module_items_request(FormatSourceRequest {
+            body_source: body,
+            generated_imports: &[],
+            generated_exports: &[],
+            readability_renames: renames,
+            function_param_renames: &[],
+            type_annotations: &[],
+            infer_literal_types: false,
+            path_hint: Some(Path::new("modules/consumer.ts")),
+            goal: ParseGoal::TypeScript,
+            lowering: CompilerLowering::None,
+        })
+        .expect("format should succeed")
+    }
+
+    #[test]
+    fn wire_rename_collapses_import_alias() {
+        let body = "import { Cb } from './m.js';\nvar v = Cb();\nexport { v };\n";
+        // Without --wire: local renamed, wire name preserved as an alias.
+        let aliased = format(
+            body,
+            &[GeneratedRename::new_all_scopes("Cb", "parseDocument")],
+        );
+        assert!(
+            aliased.contains("Cb as parseDocument"),
+            "baseline keeps the wire alias:\n{aliased}"
+        );
+        // With --wire: the import wire name is renamed too, collapsing the alias.
+        let wired = format(
+            body,
+            &[GeneratedRename::new_all_scopes("Cb", "parseDocument").with_wire()],
+        );
+        assert!(
+            wired.contains("import { parseDocument }") && !wired.contains("as parseDocument"),
+            "wire rename should drop the import alias:\n{wired}"
+        );
+        assert!(
+            wired.contains("parseDocument()"),
+            "the body still reads the semantic name:\n{wired}"
+        );
+    }
+
+    #[test]
+    fn wire_rename_collapses_export_alias() {
+        let body = "function Cb() { return 1; }\nexport { Cb };\n";
+        let aliased = format(body, &[GeneratedRename::new("Cb", "renderInline")]);
+        assert!(
+            aliased.contains("renderInline as Cb"),
+            "baseline keeps the export wire alias:\n{aliased}"
+        );
+        let wired = format(
+            body,
+            &[GeneratedRename::new("Cb", "renderInline").with_wire()],
+        );
+        assert!(
+            wired.contains("export { renderInline }") && !wired.contains("as Cb"),
+            "wire rename should drop the export alias:\n{wired}"
+        );
+    }
+
+    #[test]
+    fn wire_rename_leaves_unflagged_same_named_specifier_alone() {
+        // A different module's `Cb` import that is NOT wire-flagged (no rename)
+        // must keep its wire name; only the flagged, locally-renamed specifier
+        // collapses.
+        let body = "import { Cb } from './a.js';\nimport { Cb as other } from './b.js';\nvar v = [Cb(), other()];\nexport { v };\n";
+        let wired = format(
+            body,
+            &[GeneratedRename::new_all_scopes("Cb", "parseDocument").with_wire()],
+        );
+        // ./a.js Cb -> local parseDocument, wire collapsed.
+        assert!(
+            wired.contains("import { parseDocument } from './a.js'"),
+            "flagged import collapses:\n{wired}"
+        );
+        // ./b.js keeps its own alias (its local is `other`, not `parseDocument`).
+        assert!(
+            wired.contains("import { Cb as other } from './b.js'"),
+            "unflagged same-named import is untouched:\n{wired}"
+        );
+    }
 }

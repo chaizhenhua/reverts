@@ -112,6 +112,9 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
                     generated.scope = GeneratedRenameScope::BindingIndex(binding_index);
                 }
             }
+            if rename.wire {
+                generated = generated.with_wire();
+            }
             generated
         })
         .collect::<Vec<_>>();

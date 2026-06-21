@@ -4,14 +4,17 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     AstBuilder, Visit, VisitMut,
     ast::{
-        BindingIdentifier, BindingPatternKind, Expression, FormalParameters, Function,
-        IdentifierReference, Program, VariableDeclarator,
+        BindingIdentifier, BindingPatternKind, ExportNamedDeclaration, Expression,
+        FormalParameters, Function, IdentifierReference, ImportDeclaration,
+        ImportDeclarationSpecifier, Program, VariableDeclarator,
     },
 };
 use oxc_semantic::SemanticBuilder;
+use oxc_span::SPAN;
 use oxc_syntax::{reference::ReferenceId, scope::ScopeFlags, symbol::SymbolId};
 
 use crate::identifier::sanitize_identifier;
+use crate::module_export_name_text;
 use crate::{GeneratedRename, ReadabilityReport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -702,6 +705,91 @@ fn unique_safe_identifier(base: &str, used_names: &mut BTreeSet<String>) -> Stri
         }
     }
     unreachable!("unbounded suffix search should always find an identifier")
+}
+
+/// After local readability renames have run, an exported/imported binding reads
+/// semantically at its declaration and use sites but the module *wire* name is
+/// still the minified original — the emitter left an alias
+/// (`import { Cb as parseDocument }`, `export { parseDocument as Cb }`). For
+/// bindings the planner proved safe to rename project-wide (`wire_renames`
+/// carries `(minified_wire_name, semantic_name)` pairs), this pass rewrites the
+/// wire name to match the local, collapsing the alias to
+/// `import { parseDocument }` / `export { parseDocument }`.
+///
+/// It rewrites ONLY a specifier whose local was actually renamed to the semantic
+/// name (`imported == original && local == renamed`), so a same-named specifier
+/// the rename did not touch is left alone. Re-export barrels
+/// (`export { x } from './m'`) are skipped; the planner's gate excludes any
+/// binding that is re-exported under a different name, consumed via a namespace
+/// import, or whose semantic name is not unique project-wide.
+pub(crate) fn apply_wire_export_import_renames<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    wire_renames: &[GeneratedRename],
+) {
+    let by_wire: BTreeMap<&str, &str> = wire_renames
+        .iter()
+        .map(|rename| (rename.original.as_str(), rename.renamed.as_str()))
+        .collect();
+    if by_wire.is_empty() {
+        return;
+    }
+    let mut renamer = WireRenamer {
+        builder: AstBuilder::new(allocator),
+        by_wire,
+    };
+    renamer.visit_program(program);
+}
+
+struct WireRenamer<'a, 'm> {
+    builder: AstBuilder<'a>,
+    by_wire: BTreeMap<&'m str, &'m str>,
+}
+
+impl<'a> VisitMut<'a> for WireRenamer<'a, '_> {
+    fn visit_import_declaration(&mut self, declaration: &mut ImportDeclaration<'a>) {
+        let Some(specifiers) = declaration.specifiers.as_mut() else {
+            return;
+        };
+        for specifier in specifiers.iter_mut() {
+            let ImportDeclarationSpecifier::ImportSpecifier(import) = specifier else {
+                continue;
+            };
+            let Some(imported) = module_export_name_text(&import.imported) else {
+                continue;
+            };
+            if let Some(renamed) = self.by_wire.get(imported.as_str())
+                && import.local.name.as_str() == *renamed
+            {
+                import.imported = self
+                    .builder
+                    .module_export_name_identifier_name(SPAN, *renamed);
+            }
+        }
+    }
+
+    fn visit_export_named_declaration(&mut self, declaration: &mut ExportNamedDeclaration<'a>) {
+        // Only the defining module's own `export { x }`; a re-export barrel
+        // (`export { x } from './m'`) carries a source and is left untouched.
+        if declaration.source.is_some() {
+            return;
+        }
+        for specifier in declaration.specifiers.iter_mut() {
+            let (Some(local), Some(exported)) = (
+                module_export_name_text(&specifier.local),
+                module_export_name_text(&specifier.exported),
+            ) else {
+                continue;
+            };
+            if let Some(renamed) = self.by_wire.get(exported.as_str())
+                && local.as_str() == *renamed
+            {
+                specifier.exported = self
+                    .builder
+                    .module_export_name_identifier_name(SPAN, *renamed);
+            }
+        }
+    }
 }
 
 struct ReadabilityRenamer<'a> {

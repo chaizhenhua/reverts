@@ -2954,6 +2954,7 @@ fn format_source_transfers_function_param_names_through_full_emit_path() {
             original: "handler".to_string(),
             renamed: "processRequest".to_string(),
             scope: super::GeneratedRenameScope::All,
+            wire: false,
         }],
         function_param_renames: &[
             FunctionParamRename {

@@ -45,6 +45,7 @@ mod runtime_var_migration;
 mod source_module_facts;
 mod source_surgery;
 mod top_level_definitions;
+mod wire_export_renames;
 
 use runtime_source_read::{
     RuntimeBindingReadProfile, RuntimeSourceReadIndex, runtime_binding_read_profile_diagnostic,

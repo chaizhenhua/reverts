@@ -295,6 +295,11 @@ pub struct PlannedRename {
     pub original: BindingName,
     pub renamed: BindingName,
     pub scope: PlannedRenameScope,
+    /// When true, the emitter also rewrites the binding's module import/export
+    /// *wire* name (collapsing the `import { Cb as semantic }` alias to
+    /// `import { semantic }`). Set only for bindings the planner proved safe to
+    /// rename project-wide; see `wire_export_renames`.
+    pub wire: bool,
 }
 
 impl PlannedRename {
@@ -304,6 +309,7 @@ impl PlannedRename {
             original,
             renamed,
             scope: PlannedRenameScope::Module,
+            wire: false,
         }
     }
 
@@ -313,6 +319,7 @@ impl PlannedRename {
             original,
             renamed,
             scope: PlannedRenameScope::All,
+            wire: false,
         }
     }
 
@@ -326,7 +333,15 @@ impl PlannedRename {
             original,
             renamed,
             scope: PlannedRenameScope::BindingIndex(binding_index),
+            wire: false,
         }
+    }
+
+    /// Mark this rename to also rewrite the module import/export wire name.
+    #[must_use]
+    pub fn with_wire(mut self) -> Self {
+        self.wire = true;
+        self
     }
 }
 

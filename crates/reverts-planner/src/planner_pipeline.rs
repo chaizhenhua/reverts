@@ -90,6 +90,15 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     // already-finalised single body chunk, which the per-chunk coalescer can no
     // longer merge — sweep the whole body text to drop any duplicate export name.
     crate::export_completion::dedupe_redundant_named_exports(&mut state.plan);
+    // Final readability step: for exported bindings whose semantic name is
+    // provably safe to expose project-wide, flag their renames so the emitter
+    // also renames the public import/export wire name (dropping the alias). Runs
+    // last, after the import/export set is fully settled.
+    crate::wire_export_renames::flag_wire_safe_export_renames(
+        context.program(),
+        &context.analysis().externalized_packages,
+        &mut state.plan,
+    );
     Ok(state.plan)
 }
 

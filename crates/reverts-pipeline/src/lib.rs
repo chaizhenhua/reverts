@@ -1526,8 +1526,12 @@ mod tests {
         let source = run.project.files[0].source.as_str();
         assert!(source.contains("var lodashGlobalObjectInit: number = 1;"));
         assert!(source.contains("console.log(lodashGlobalObjectInit);"));
-        assert!(source.contains("export { lodashGlobalObjectInit as $F1 };"));
+        // The binding is exported, has a project-wide-unique semantic name, and
+        // is not re-exported or namespace-imported, so the wire-rename pass also
+        // renames the public export name (no `as $F1` alias to preserve).
+        assert!(source.contains("export { lodashGlobalObjectInit };"));
         assert!(!source.contains("console.log($F1);"));
+        assert!(!source.contains("as $F1"));
     }
 
     #[test]
