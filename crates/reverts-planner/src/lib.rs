@@ -5,6 +5,7 @@ mod cli_entrypoint;
 mod commonjs_lowering;
 mod compiler_preservation;
 mod complete_coupled_module_function_imports;
+mod complete_init_thunk_imports;
 mod complete_referenced_imports;
 mod complete_runtime_helper_imports;
 mod compute_modules;

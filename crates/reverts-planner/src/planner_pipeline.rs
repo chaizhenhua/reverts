@@ -71,6 +71,10 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     crate::complete_coupled_module_function_imports::complete_coupled_module_function_imports(
         &mut state.plan,
     );
+    // Add a NEW import for a referenced-but-unbound esbuild init-thunk call
+    // (`cdA()`) the eager entrypoint makes to a sliced module it has no other
+    // edge to. Deferred-call + same-bundle (shared runtime helpers) → cycle-safe.
+    crate::complete_init_thunk_imports::complete_init_thunk_imports(&mut state.plan);
     // Symmetric completion: every name a consumer imports from a sibling module
     // must actually be exported by it. Works from the final emitted imports, so
     // it closes export gaps the def-use graph missed (esbuild scope-hoisted

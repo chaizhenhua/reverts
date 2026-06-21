@@ -269,6 +269,24 @@ pub(crate) fn top_level_function_declaration_names(source: &str) -> BTreeSet<Str
 /// (`a.b = () => …`) are excluded: only a bare identifier in binding position
 /// is recorded.
 pub(crate) fn top_level_function_valued_names(source: &str) -> BTreeSet<String> {
+    top_level_assigned_value_names(source, true, rhs_is_function_value)
+}
+
+/// Top-level names bound to an esbuild lazy-init thunk: `var X = nt(() => {…})`
+/// (`__esm`) or `var X = We((exports, module) => {…})` (`__commonJS`). The thunk
+/// holds a memoized, deferred-call initializer; a consumer that calls `X()` can
+/// safely import it across a module edge (the call is deferred, so the binding
+/// is live even if the new edge closes a cycle). `function`-keyword declarations
+/// are NOT thunks, so they are excluded.
+pub(crate) fn top_level_init_thunk_names(source: &str) -> BTreeSet<String> {
+    top_level_assigned_value_names(source, false, rhs_is_init_thunk)
+}
+
+fn top_level_assigned_value_names(
+    source: &str,
+    include_function_declarations: bool,
+    rhs_pred: fn(&str, usize) -> bool,
+) -> BTreeSet<String> {
     let bytes = source.as_bytes();
     let mut names = BTreeSet::new();
     let mut cursor = 0usize;
@@ -288,7 +306,10 @@ pub(crate) fn top_level_function_valued_names(source: &str) -> BTreeSet<String> 
             b'/' if looks_like_regex_literal(bytes, cursor) => {
                 cursor = skip_regex_literal(bytes, cursor);
             }
-            _ if top_level && keyword_at(source, cursor, "function") => {
+            _ if include_function_declarations
+                && top_level
+                && keyword_at(source, cursor, "function") =>
+            {
                 if let Some((name, next)) = parse_identifier_after_function_keyword(source, cursor)
                 {
                     names.insert(name.to_string());
@@ -305,7 +326,7 @@ pub(crate) fn top_level_function_valued_names(source: &str) -> BTreeSet<String> 
                     let equals = skip_ws(bytes, after);
                     if bytes.get(equals) == Some(&b'=')
                         && !matches!(bytes.get(equals + 1), Some(&b'=') | Some(&b'>'))
-                        && rhs_is_function_value(source, skip_ws(bytes, equals + 1))
+                        && rhs_pred(source, skip_ws(bytes, equals + 1))
                     {
                         names.insert(identifier.to_string());
                     }
@@ -384,6 +405,25 @@ fn rhs_is_function_value(source: &str, pos: usize) -> bool {
         return bytes.get(arrow) == Some(&b'=') && bytes.get(arrow + 1) == Some(&b'>');
     }
     false
+}
+
+/// True when the RHS at `pos` is an esbuild lazy-init thunk: a call `H(<fn>)`
+/// whose first argument is a function/arrow — `nt(() => {…})` (`__esm`),
+/// `We((e, m) => {…})` (`__commonJS`). The call's callee is the bundle helper;
+/// the thunk value is a memoized, deferred-call initializer.
+fn rhs_is_init_thunk(source: &str, pos: usize) -> bool {
+    let bytes = source.as_bytes();
+    if pos >= bytes.len() || !is_identifier_start(bytes[pos]) {
+        return false;
+    }
+    let Some((_, after)) = parse_identifier(source, pos) else {
+        return false;
+    };
+    let open = skip_ws(bytes, after);
+    if bytes.get(open) != Some(&b'(') {
+        return false;
+    }
+    rhs_is_function_value(source, skip_ws(bytes, open + 1))
 }
 
 pub(crate) fn source_contains_identifier_token(source: &str, identifier: &str) -> bool {
