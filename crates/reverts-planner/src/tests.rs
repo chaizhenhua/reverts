@@ -5443,6 +5443,63 @@ fn entrypoint_runtime_uses_shared_helper_module_with_tail_side_effects() {
 }
 
 #[test]
+fn entrypoint_island_inlines_enum_augmentation_iife_with_its_binding() {
+    // esbuild lowers a TypeScript `enum` to two top-level statements: a bare
+    // `var Lk;` declaration and an initializer IIFE
+    // `(function(e){ e[e.Classic=1]="Classic"; })(Lk || (Lk = {}));`. The
+    // entrypoint island inlines runtime-prelude bindings reachable from the
+    // entrypoint callee; it must inline the initializer IIFE alongside the
+    // declaration, otherwise the enum object is never built and stays
+    // `undefined` at runtime.
+    let planner = ImportExportPlanner;
+    let prelude = "var Lk;\n(function(e){e[e.Classic=1]=\"Classic\",e[e.Both=2]=\"Both\";})(Lk||(Lk={}));\nfunction main() { return Lk.Classic; }\n";
+    let body = "var cliEntry = () => 'ok';\n";
+    let tail = "main();\n";
+    let source = format!("{prelude}{body}{tail}");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                prelude.len() as u32,
+                (prelude.len() + body.len()) as u32,
+            )),
+    );
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let enriched = reverts_model::EnrichedProgram::new(
+        model,
+        reverts_model::SemanticNameMap::default(),
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
+    let compact: String = entrypoint_source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+
+    assert!(
+        compact.contains("varLk;"),
+        "island keeps the enum declaration:\n{entrypoint_source}"
+    );
+    assert!(
+        compact.contains("(Lk||(Lk={}))"),
+        "island must inline the enum initializer IIFE, not just the bare var:\n{entrypoint_source}"
+    );
+    assert!(
+        compact.contains("e[e.Classic=1]=\"Classic\""),
+        "the IIFE body that populates the enum must be inlined:\n{entrypoint_source}"
+    );
+}
+
+#[test]
 fn entrypoint_runtime_and_module_setters_share_single_helper_state() {
     let planner = ImportExportPlanner;
     let prelude = "var yA;\nfunction main() { initModule(); return yA(); }\n";

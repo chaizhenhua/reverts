@@ -976,7 +976,7 @@ fn collect_runtime_prelude_declarations(
     module_spans: &[(u32, u32)],
 ) -> RuntimePreludeCollection {
     let mut bindings = BTreeMap::new();
-    let mut snippets_by_binding = BTreeMap::new();
+    let mut snippets_by_binding: BTreeMap<BindingName, RuntimePreludeSnippet> = BTreeMap::new();
     let mut snippets = Vec::new();
     let mut namespace_exports = Vec::new();
     let mut entrypoint_candidate = None;
@@ -1000,6 +1000,24 @@ fn collect_runtime_prelude_declarations(
         }
         let declarations = runtime_prelude_declarations_from_statement(statement, source);
         if declarations.is_empty() {
+            // esbuild lowers a TypeScript `enum`/`namespace` to two top-level
+            // statements: a bare `var X;` declaration followed by an initializer
+            // IIFE `(function(e){ e[e.A=1]="A"; })(X || (X = {}));` that populates
+            // `X`. The `var X;` becomes `X`'s prelude snippet, but the IIFE is a
+            // standalone expression statement with no declared binding — so it
+            // would be dropped here, leaving `X` an uninitialized `var` wherever
+            // it is later inlined (e.g. into the entrypoint island). Attach the
+            // initializer IIFE to `X`'s snippet so it always travels with the
+            // binding it populates.
+            if let Some(binding) = namespace_augmentation_iife_binding(statement)
+                && let Some(snippet) = snippets_by_binding.get_mut(&binding)
+            {
+                let statement_source = statement_snippet(statement, source);
+                snippet.source.push('\n');
+                snippet.source.push_str(statement_source.as_str());
+                snippets.push(statement_source);
+                continue;
+            }
             if span.start >= tail_runtime_start
                 && let Some(side_effect) =
                     runtime_entrypoint_side_effect_from_statement(statement, source)
@@ -2751,6 +2769,23 @@ fn statement_is_enum_reverse_mapping(statement: &Statement<'_>, binding: &str) -
         _ => return false,
     };
     expression_identifier(inner_object) == Some(binding)
+}
+
+/// Recognize an esbuild TypeScript `enum`/`namespace` initializer IIFE
+/// `(function(X){ … })(X || (X = {}));` (or the arrow / `X = X || {}` variants)
+/// and return the binding `X` it populates. Used by the prelude collector to
+/// keep the initializer attached to `X`'s snippet instead of dropping it as an
+/// unowned expression statement.
+fn namespace_augmentation_iife_binding(statement: &Statement<'_>) -> Option<BindingName> {
+    let Statement::ExpressionStatement(statement) = statement else {
+        return None;
+    };
+    let Expression::CallExpression(call) = &statement.expression else {
+        return None;
+    };
+    iife_kind(&call.callee)?;
+    let binding = call.arguments.first().and_then(enum_initializer_binding)?;
+    Some(BindingName::new(binding))
 }
 
 fn enum_initializer_binding<'a>(argument: &'a Argument<'a>) -> Option<&'a str> {
