@@ -46,11 +46,32 @@ impl GenerateProjectV2Args {
 }
 
 pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
+    let timing_enabled = std::env::var_os("REVERTS_GENERATE_TIMING").is_some();
+    let started = std::time::Instant::now();
+    let mut last = started;
+    macro_rules! mark_timing {
+        ($stage:literal) => {
+            if timing_enabled {
+                let now = std::time::Instant::now();
+                eprintln!(
+                    "generate-project cli timing: {} stage={:.3}s total={:.3}s",
+                    $stage,
+                    now.duration_since(last).as_secs_f64(),
+                    now.duration_since(started).as_secs_f64()
+                );
+                last = now;
+            }
+        };
+    }
     validate_accepted_naming_gate_records(&args.input, args.project_id)?;
+    mark_timing!("validate_naming");
     let input = load_project_bundle_with_package_externalization(&args.input, args.project_id)
         .map_err(CliRunError::LoadInput)?;
+    mark_timing!("load_input");
     let local_binding_renames = load_local_binding_renames(&args.input, args.project_id)?;
+    mark_timing!("load_binding_renames");
     let function_param_renames = load_function_param_renames(&args.input, args.project_id)?;
+    mark_timing!("load_param_renames");
     let run = generate_project_from_input_with_options(
         input,
         GenerateProjectOptions {
@@ -59,6 +80,7 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         },
     )
     .map_err(CliRunError::Pipeline)?;
+    mark_timing!("pipeline");
 
     // Only errors block writing the output. Warnings (e.g. duplicate
     // top-level binding, ambiguous binding shape) describe input-bundle
@@ -86,10 +108,12 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
     // the CLI (not the generation pipeline) can see.
     let manifests =
         load_materialized_package_manifests(&args.input).map_err(CliRunError::LoadInput)?;
+    mark_timing!("load_manifests");
     let runtime_dependencies = prune_transitively_provided_scope_incoherent_dependencies(
         run.runtime_dependencies.clone(),
         &manifests,
     );
+    mark_timing!("prune_dependencies");
     let mut assets = run.assets.clone();
     assets.extend(run.source_mirror_assets.clone());
     let written = write_accepted_project(
@@ -98,6 +122,7 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         &args.output,
         &runtime_dependencies,
     )?;
+    mark_timing!("write_project");
     let symbol_index_path = args.output.join("symbol-index.json");
     std::fs::write(
         &symbol_index_path,
@@ -122,6 +147,9 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         args.output.display(),
         run.symbol_index.len()
     );
+    if timing_enabled {
+        let _ = last;
+    }
     Ok(())
 }
 

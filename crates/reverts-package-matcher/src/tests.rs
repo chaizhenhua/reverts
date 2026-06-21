@@ -6,7 +6,7 @@ use crate::{
     PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch, PackageModuleSourceQuality, PackageSource,
     VersionedPackageMatchReport, VersionedPackageMatcher, match_packages_with_pipeline,
     match_structural_bags, match_structural_bags_with_excluded_modules,
-    ownership::{cascade, exact_hint, importable},
+    ownership::{cascade, cjs_wrapper_entry, exact_hint, importable},
     package_import_names_from_sources, package_module_source_quality,
     package_source_normalized_hash, package_source_normalized_hashes,
     package_source_public_export_proofs, resolve_external_import_target,
@@ -250,6 +250,203 @@ fn anonymous_bundle_stays_inlined_when_export_is_package_internal() {
         "module exporting a package-internal binding must not externalize"
     );
     assert!(report.attributions.is_empty());
+}
+
+#[test]
+fn cjs_wrapper_entry_thunk_externalizes_when_it_assigns_package_members() {
+    // A self-contained esbuild __commonJS package-entry thunk whose body assigns
+    // the matched package's real public members onto its exports object is the
+    // package: externalize it as a whole-namespace passthrough via a
+    // semantic-path proof (the thunk binding `entry` is re-provided by the
+    // planner as `function entry() { return ns; }`, never `ns.entry`). This is
+    // how cc-2.1.89's react entry externalizes despite `--minify` stripping the
+    // public __export surface map.
+    let module_source =
+        "var entry=cjs((ex)=>{ex.alpha=function(){};ex.beta=function(){};ex.gamma=1;ex.delta=2;});";
+    let (rows, mut report) = anonymous_bundle_report_with_match(
+        module_source,
+        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors,
+        128,
+        0,
+    );
+    let package_sources = package_sources_with_public_surface();
+
+    cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+        &rows,
+        &package_sources,
+        &mut report,
+    );
+
+    assert!(
+        report.matches[0].external_importable,
+        "CJS-wrapper thunk assigning the package's public members must externalize: {:?}",
+        report.matches[0]
+    );
+    assert_eq!(report.attributions.len(), 1);
+    assert_eq!(
+        report.attributions[0].export_specifier.as_deref(),
+        Some("pkg")
+    );
+    assert_eq!(
+        report.attributions[0].resolved_file.as_deref(),
+        Some("forced-external:semantic-path:pkg@1.0.0/index.js"),
+    );
+}
+
+#[test]
+fn cjs_wrapper_entry_thunk_stays_inlined_when_members_mismatch_package() {
+    // Identity gate: a thunk that function-matched the WRONG package (its body
+    // assigns members that are NOT the package's public surface — the ajv-codegen
+    // vs react false-positive from cc-2.1.89) must NOT externalize. Otherwise the
+    // emitter would write `import … from "pkg"` and break at runtime.
+    let module_source = "var entry=cjs((ex)=>{ex.regexpCode=function(){};ex.safeStringify=function(){};ex.str=1;ex.strConcat=2;});";
+    let (rows, mut report) = anonymous_bundle_report_with_match(
+        module_source,
+        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors,
+        128,
+        0,
+    );
+    let package_sources = package_sources_with_public_surface();
+
+    cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+        &rows,
+        &package_sources,
+        &mut report,
+    );
+
+    assert!(
+        !report.matches[0].external_importable,
+        "thunk assigning non-package members must not externalize (misattribution guard)"
+    );
+    assert!(report.attributions.is_empty());
+}
+
+/// A package whose bare specifier (`pkg`) resolves — through a re-export stub —
+/// to a public surface of `alpha`/`beta`/`gamma`/`delta`, modelling how a real
+/// npm package (e.g. react's `index.js` → `cjs/react.development.js`) exposes
+/// its public API. The identity gate resolves members via this public surface,
+/// NOT the union of every file, so internal sub-module names never count.
+fn package_sources_with_public_surface() -> [PackageSource; 2] {
+    [
+        PackageSource::source_only(
+            "pkg",
+            "1.0.0",
+            "pkg/internal/impl",
+            "pkg@1.0.0/impl.js",
+            "function alpha(){return \"alpha-anchor\"}\nfunction beta(){return \"beta-anchor\"}\nfunction gamma(){return \"gamma-anchor\"}\nfunction delta(){return \"delta-anchor\"}\nexports.alpha=alpha;exports.beta=beta;exports.gamma=gamma;exports.delta=delta;",
+        ),
+        PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg",
+            "pkg@1.0.0/index.js",
+            "export { alpha, beta, gamma, delta } from './impl.js';",
+        ),
+    ]
+}
+
+#[test]
+fn pipeline_externalizes_anonymous_bundle_with_public_subset_surface() {
+    // End-to-end through the full match pipeline (not a direct pass call): an
+    // anonymous esbuild-inlined module whose normalized source matches a single
+    // package (AnonymousExactSourcePass → promotable NormalizedSourceHash) AND
+    // whose exported member is a public export of that package is promoted to an
+    // external import by AnonymousImportablePass.
+    let source =
+        r#"export function validateThing(x){return ["anchor-alpha","anchor-beta",x].join(":");}"#;
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "bundle.js",
+        Some(source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(
+            ModuleId(20),
+            "20-esbuild-anon",
+            "modules/20-esbuild-anon.ts",
+        )
+        .with_source_file(1),
+    );
+    let package_sources = [PackageSource::external(
+        "pkg", "1.0.0", "pkg", "index.js", source,
+    )];
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    assert!(report.package_report.audit.is_clean());
+    assert_eq!(report.package_report.matches.len(), 1);
+    let package_match = &report.package_report.matches[0];
+    assert_eq!(package_match.module_id, ModuleId(20));
+    assert_eq!(package_match.package_name, "pkg");
+    assert!(
+        package_match.external_importable,
+        "anonymous bundle with public-subset surface must externalize through the full pipeline: {package_match:?}"
+    );
+    assert!(
+        report
+            .package_report
+            .attributions
+            .iter()
+            .any(|attribution| attribution.module_id == ModuleId(20)),
+        "an accepted-external attribution must be recorded so the emitter swaps source for an import"
+    );
+}
+
+#[test]
+fn pipeline_keeps_anonymous_bundle_inlined_when_surface_is_package_internal() {
+    // Same full-pipeline path, but the module's only exported member is NOT a
+    // public export of the recognized package, so externalizing would break
+    // consumers reading it — the module must stay source-preserved (recognized
+    // but not external_importable).
+    let module_source =
+        r#"export function internalHelper(x){return ["anchor-alpha","anchor-beta",x].join(":");}"#;
+    let package_source =
+        r#"export function validateThing(x){return ["anchor-alpha","anchor-beta",x].join(":");}"#;
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "bundle.js",
+        Some(module_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(
+            ModuleId(20),
+            "20-esbuild-anon",
+            "modules/20-esbuild-anon.ts",
+        )
+        .with_source_file(1),
+    );
+    let package_sources = [PackageSource::external(
+        "pkg",
+        "1.0.0",
+        "pkg",
+        "index.js",
+        package_source,
+    )];
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    assert!(report.package_report.audit.is_clean());
+    if let Some(package_match) = report
+        .package_report
+        .matches
+        .iter()
+        .find(|package_match| package_match.module_id == ModuleId(20))
+    {
+        assert!(
+            !package_match.external_importable,
+            "anonymous bundle exporting a package-internal binding must not externalize: {package_match:?}"
+        );
+    }
+    assert!(
+        !report
+            .package_report
+            .attributions
+            .iter()
+            .any(|attribution| attribution.module_id == ModuleId(20)),
+        "no accepted-external attribution may be recorded for a package-internal surface"
+    );
 }
 
 #[test]

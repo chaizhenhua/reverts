@@ -371,7 +371,15 @@ pub fn generate_project_from_input_with_options(
     input: InputBundle,
     options: GenerateProjectOptions,
 ) -> Result<OutputRun, PipelineError> {
+    let timing_enabled = std::env::var_os("REVERTS_GENERATE_TIMING").is_some();
+    let started = std::time::Instant::now();
     let prepared = prepare_and_enrich(input)?;
+    if timing_enabled {
+        eprintln!(
+            "generate-project timing: prepare_and_enrich total={:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
     generate_project_from_prepared_with_options(prepared, options)
 }
 
@@ -385,6 +393,23 @@ pub fn generate_project_from_prepared_with_options(
     prepared: PreparedProgram,
     options: GenerateProjectOptions,
 ) -> Result<OutputRun, PipelineError> {
+    let timing_enabled = std::env::var_os("REVERTS_GENERATE_TIMING").is_some();
+    let started = std::time::Instant::now();
+    let mut last = started;
+    macro_rules! mark_timing {
+        ($stage:literal) => {
+            if timing_enabled {
+                let now = std::time::Instant::now();
+                eprintln!(
+                    "generate-project timing: {} stage={:.3}s total={:.3}s",
+                    $stage,
+                    now.duration_since(last).as_secs_f64(),
+                    now.duration_since(started).as_secs_f64()
+                );
+                last = now;
+            }
+        };
+    }
     let PreparedProgram {
         program,
         bundle_audit,
@@ -399,6 +424,7 @@ pub fn generate_project_from_prepared_with_options(
     let source_mirror_assets = collect_source_mirror_assets(input);
     audit.extend(audit_required_sources(&program));
     audit.extend(audit_required_assets(input, &asset_references));
+    mark_timing!("pre_plan_audits");
     // Only errors zero-out emission. Warnings (e.g. UnprotectedNullableMemberRead
     // by design per ADR 0002 — surfaced rather than repaired) must not strand
     // the entire project at files=0.
@@ -420,9 +446,11 @@ pub fn generate_project_from_prepared_with_options(
     let mut plan = planner
         .plan_enriched_program(&program)
         .map_err(PipelineError::Plan)?;
+    mark_timing!("plan");
     apply_local_binding_renames(&mut plan, &options.local_binding_renames);
     apply_function_param_renames_to_plan(&mut plan, &options.function_param_renames);
     audit.extend(audit_emit_plan_synthesis(&plan));
+    mark_timing!("plan_audit");
     if audit.has_errors() {
         return Ok(OutputRun {
             project: PreAcceptProject::empty(),
@@ -439,7 +467,9 @@ pub fn generate_project_from_prepared_with_options(
 
     let module_output_paths = module_output_paths(&program);
     let validated_plan = plan.clone().validate().map_err(PipelineError::Plan)?;
+    mark_timing!("validate_plan");
     let outcome = emit_validated_project(&validated_plan).map_err(PipelineError::Emit)?;
+    mark_timing!("emit");
     for finding in outcome.findings {
         audit.push(finding);
     }
@@ -453,21 +483,30 @@ pub fn generate_project_from_prepared_with_options(
     );
     let emitted_project = pre_accept.project.clone();
     let pre_accept_report = pre_accept.report.clone();
+    mark_timing!("pre_accept");
 
     audit.extend(audit_emitted_project_parse(&emitted_project));
+    mark_timing!("parse_audit");
     audit.extend(audit_emitted_relative_import_targets(
         &emitted_project,
         &assets,
         input,
         &module_output_paths,
     ));
+    mark_timing!("relative_import_audit");
     audit.extend(audit_binding_shape_consistency(&plan, &emitted_project));
+    mark_timing!("binding_shape_audit");
     audit.extend(audit_namespace_object_member_consistency(
         &plan,
         &emitted_project,
     ));
+    mark_timing!("namespace_audit");
     let accepted_project = pre_accept.clone().accept_if_clean(&audit);
     let symbol_index = build_symbol_index(&program, &module_output_paths, &emitted_project);
+    mark_timing!("symbol_index");
+    if timing_enabled {
+        let _ = last;
+    }
 
     Ok(OutputRun {
         project: pre_accept,
@@ -625,6 +664,11 @@ pub fn generate_project_inventory_from_prepared(
 }
 
 fn missing_module_source_file_ids(input: &InputBundle) -> HashSet<u32> {
+    let has_persisted_bundle_split = input.modules.iter().any(|module| {
+        module.original_name.starts_with("esbuild:")
+            || module.original_name.starts_with("webpack:")
+            || module.original_name.starts_with("rollup:")
+    });
     let attached: HashSet<u32> = input
         .modules
         .iter()
@@ -633,7 +677,21 @@ fn missing_module_source_file_ids(input: &InputBundle) -> HashSet<u32> {
     input
         .source_files
         .iter()
-        .filter_map(|source_file| (!attached.contains(&source_file.id)).then_some(source_file.id))
+        .filter_map(|source_file| {
+            if attached.contains(&source_file.id) {
+                return None;
+            }
+            if has_persisted_bundle_split
+                && source_file.path.ends_with(".js")
+                && source_file
+                    .source
+                    .as_deref()
+                    .is_some_and(|source| source.contains("@bun @bytecode @bun-cjs"))
+            {
+                return None;
+            }
+            Some(source_file.id)
+        })
         .collect()
 }
 
@@ -1932,6 +1990,40 @@ mod tests {
             run.project.files[1]
                 .source
                 .contains("export const two: number = 2")
+        );
+    }
+
+    #[test]
+    fn persisted_bun_bundle_split_does_not_reextract_original_bundle_source() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/entrypoints/cli.js",
+            Some(
+                "// @bun @bytecode @bun-cjs\n(function(exports, require, module, __filename, __dirname) {\nvar o=(H,$)=>()=>($||H(($={exports:{}}).exports,$),$.exports);\nvar pkg=o((ex,m)=>{ex.answer=42;});\n})"
+                    .to_string(),
+            ),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "__reverts_synthetic__/source-2.js",
+            Some(
+                "var o=(H,$)=>()=>($||H(($={exports:{}}).exports,$),$.exports);\nvar pkg=o((ex,m)=>{ex.answer=42;});"
+                    .to_string(),
+            ),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "esbuild:pkg", "modules/pkg.ts")
+                .with_source_file(2)
+                .with_source_span(SourceSpan::new(0, 98)),
+        );
+        let input = InputBundle::from_rows(rows).expect("persisted bundle rows should be valid");
+
+        let missing = super::missing_module_source_file_ids(&input);
+
+        assert!(
+            missing.is_empty(),
+            "original Bun bundle source must not be re-extracted once synthetic esbuild modules are persisted: {missing:?}"
         );
     }
 

@@ -1,4 +1,5 @@
 pub(crate) mod cascade;
+pub(crate) mod cjs_wrapper_entry;
 pub(crate) mod dependency_closure;
 pub(crate) mod dependency_neighborhood;
 pub(crate) mod exact_hint;
