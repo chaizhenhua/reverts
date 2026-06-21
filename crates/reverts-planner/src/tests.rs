@@ -92,6 +92,29 @@ fn module_output_path_normalizes_virtual_bundle_ids_to_typescript_modules() {
 }
 
 #[test]
+fn module_output_path_reroutes_node_modules_paths_off_the_special_directory() {
+    // Preserved-layout bundles (Electron) keep `node_modules/<pkg>/...` paths.
+    // An emitted source/adapter file under a literal `node_modules` directory
+    // never compiles (tsc skips it) and its consumers' relative imports dangle,
+    // so the path must be rerouted under `modules/` with the special segment
+    // neutralized — never reintroducing a `node_modules` directory.
+    let path = super::normalized_module_output_path(
+        ModuleId(43),
+        "Contents/Resources/app/node_modules/ws/lib/event-target.ts",
+    );
+
+    assert!(
+        !path.split('/').any(|segment| segment == "node_modules"),
+        "rerouted path must not contain a node_modules directory segment: {path}"
+    );
+    assert!(
+        path.starts_with("modules/43-"),
+        "node_modules path should reroute under modules/: {path}"
+    );
+    assert!(path.ends_with(".ts"), "{path}");
+}
+
+#[test]
 fn rewritable_externalized_package_init_shim_calls_are_erased() {
     let mut shims = BTreeSet::from([BindingName::new("packageInit")]);
     let rewritten = super::erase_rewritable_package_init_shim_calls(

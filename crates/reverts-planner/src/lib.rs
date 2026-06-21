@@ -7959,7 +7959,9 @@ pub(crate) fn normalized_module_output_path(module_id: ModuleId, raw_path: &str)
     if is_safe_typescript_module_path(raw_path) {
         return raw_path.to_string();
     }
-    let slug = output_path_slug(strip_source_extension(raw_path));
+    let slug = output_path_slug(&neutralize_node_modules_segments(strip_source_extension(
+        raw_path,
+    )));
     format!("modules/{}-{slug}.ts", module_id.0)
 }
 
@@ -7971,6 +7973,14 @@ fn is_safe_typescript_module_path(path: &str) -> bool {
         !segment.is_empty()
             && segment != "."
             && segment != ".."
+            // `node_modules` is a real path segment in preserved-layout bundles
+            // (Electron apps), but tsc and Node both treat a `node_modules`
+            // directory specially: tsc skips it during compilation and Node
+            // resolves it as a package root. An emitted source/adapter file
+            // living under it never compiles and its consumers' relative
+            // imports dangle, so route such modules to the safe `modules/`
+            // slug location instead of preserving the literal path.
+            && segment != "node_modules"
             && segment
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
@@ -7984,6 +7994,23 @@ fn strip_source_extension(path: &str) -> &str {
         }
     }
     path
+}
+
+/// Rename any `node_modules` path segment so the slugged output path never
+/// reintroduces a `node_modules` DIRECTORY (which tsc would skip and Node would
+/// treat as a package root). Keeping it as a regular filename fragment is fine —
+/// only the directory name is special to the tooling.
+fn neutralize_node_modules_segments(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            if segment == "node_modules" {
+                "node_modules_src"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn output_path_slug(value: &str) -> String {
