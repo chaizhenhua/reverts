@@ -10,7 +10,7 @@ use reverts_input::sqlite::load_project_rows_from_connection;
 use reverts_ir::ModuleKind;
 use reverts_observe::AuditReport;
 use reverts_package_matcher::match_packages_with_pipeline;
-use reverts_pipeline::prepare_input_rows_for_pipeline;
+use reverts_pipeline::prepare_input_rows_for_pipeline_with_reserved_ids;
 use rusqlite::Connection;
 
 use crate::args::MatchPackagesArgs;
@@ -29,6 +29,29 @@ use crate::{
     remove_package_attributions_for_revalidation,
     resolve_package_version_hints_to_available_sources,
 };
+
+/// Largest id used by ANY module across the whole `modules` table, over both
+/// the module-id and the referenced `file_id` namespaces. The synthetic-id
+/// allocator must start past this so a reconstructed source cannot alias an
+/// orphan module's `file_id` (orphans are invisible to the project-scoped load
+/// because their `file_id` is absent from `project_files`).
+fn max_module_id_space(
+    connection: &Connection,
+    _project_id: u32,
+) -> Result<u32, MatchPackagesError> {
+    let max_id: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(v), 0) FROM (
+                 SELECT id AS v FROM modules
+                 UNION ALL
+                 SELECT file_id AS v FROM modules WHERE file_id IS NOT NULL
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    Ok(u32::try_from(max_id.max(0)).unwrap_or(u32::MAX))
+}
 
 pub(crate) fn match_packages_from_connection(
     connection: &mut Connection,
@@ -57,7 +80,12 @@ pub(crate) fn match_packages_from_connection(
 
     // Shared bundle-aware row preparation: split recognised bundle wrappers
     // into per-module rows before either matcher or generator sees them.
-    let prepared = prepare_input_rows_for_pipeline(rows);
+    // Reserve the whole-table id space so freshly reconstructed synthetic
+    // sources cannot alias an orphan module's file_id (a legacy reconstruction
+    // dropped from the load by the project_files filter) and resurrect it
+    // against a mismatched span when persisted.
+    let reserved_max_id = max_module_id_space(connection, args.project_id)?;
+    let prepared = prepare_input_rows_for_pipeline_with_reserved_ids(rows, reserved_max_id);
     let extraction_audit = prepared.audit;
     // Snapshot new_modules from the shared preparation — we need them later
     // to persist synthetic rows into the SQLite modules table so

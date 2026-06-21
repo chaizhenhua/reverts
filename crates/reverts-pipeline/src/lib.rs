@@ -278,8 +278,26 @@ pub struct PreparedProgram {
 /// `reverts_bundle::extract`'s synthetic-id allocator starting past
 /// `max_real_id`, so re-runs after persistence produce no new modules.
 #[must_use]
-pub fn prepare_input_rows_for_pipeline(mut rows: InputRows) -> PreparedInputRows {
-    let extraction = reverts_bundle::extract(&rows.source_files, &rows.modules);
+pub fn prepare_input_rows_for_pipeline(rows: InputRows) -> PreparedInputRows {
+    prepare_input_rows_for_pipeline_with_reserved_ids(rows, 0)
+}
+
+/// Like [`prepare_input_rows_for_pipeline`], but reserves `0..=reserved_max_id`
+/// for the synthetic-id allocator. Matcher callers pass the WHOLE-table
+/// `MAX(modules.id, modules.file_id)` so freshly reconstructed synthetic
+/// sources cannot alias an orphan module's `file_id` (a legacy reconstruction
+/// dropped from the load by the `project_files` filter) and resurrect it
+/// against a mismatched source span on the next load.
+#[must_use]
+pub fn prepare_input_rows_for_pipeline_with_reserved_ids(
+    mut rows: InputRows,
+    reserved_max_id: u32,
+) -> PreparedInputRows {
+    let extraction = reverts_bundle::extract_with_reserved_ids(
+        &rows.source_files,
+        &rows.modules,
+        reserved_max_id,
+    );
     let synthetic_modules = extraction.new_modules.clone();
     let audit = extraction.audit.clone();
     extraction.merge_into(&mut rows);

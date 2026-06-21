@@ -64,6 +64,23 @@ impl BundleExtraction {
 /// caller apply changes in one shot.
 #[must_use]
 pub fn extract(source_files: &[SourceFileInput], modules: &[ModuleInput]) -> BundleExtraction {
+    extract_with_reserved_ids(source_files, modules, 0)
+}
+
+/// Like [`extract`], but reserves the id range `0..=reserved_max_id` so the
+/// synthetic module- and source-file-id allocators start past it. The matcher
+/// loader drops modules whose `file_id` is not in `project_files` (legacy
+/// half-persisted reconstructions), so those orphan ids are invisible to the
+/// `modules` slice here; persisting a synthetic source onto one of them
+/// resurrects the orphan module against a mismatched span. Callers with DB
+/// access pass `MAX(modules.id, modules.file_id)` over the WHOLE table to keep
+/// the synthetic id space globally disjoint.
+#[must_use]
+pub fn extract_with_reserved_ids(
+    source_files: &[SourceFileInput],
+    modules: &[ModuleInput],
+    reserved_max_id: u32,
+) -> BundleExtraction {
     let mut classifications = std::collections::BTreeMap::new();
     let mut new_modules = Vec::new();
     let mut new_source_files = Vec::new();
@@ -79,7 +96,12 @@ pub fn extract(source_files: &[SourceFileInput], modules: &[ModuleInput]) -> Bun
     // would require > 4 billion modules — astronomically out of range
     // for any real bundle, but we still saturate-checked-add below so a
     // pathological input fails loudly rather than silently aliasing.
-    let max_real_id = modules.iter().map(|m| m.id.0).max().unwrap_or(0);
+    let max_real_id = modules
+        .iter()
+        .map(|m| m.id.0)
+        .max()
+        .unwrap_or(0)
+        .max(reserved_max_id);
     let mut next_synthetic_id = max_real_id.saturating_add(1);
     // Synthetic SOURCE FILE ids for reconstructed multi-handle modules,
     // allocated past the largest real source file id (a separate namespace
@@ -92,7 +114,8 @@ pub fn extract(source_files: &[SourceFileInput], modules: &[ModuleInput]) -> Bun
         .map(|sf| sf.id)
         .chain(modules.iter().filter_map(|m| m.source_file_id))
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .max(reserved_max_id);
     let mut next_synthetic_source_file_id = max_source_file_id.saturating_add(1);
 
     for source_file in source_files {
@@ -254,6 +277,42 @@ mod public_api_tests {
             extraction.classifications.get(&1),
             Some(BundleClassification::Marked(_))
         ));
+    }
+
+    #[test]
+    fn reserved_id_floor_pushes_synthetic_ids_past_orphan_space() {
+        // Multi-handle esbuild var statement reconstructs per-handle synthetic
+        // SOURCE files. The matcher loader drops orphan modules whose file_id
+        // is absent from project_files, so their ids are invisible here; the
+        // reserved floor keeps the synthetic allocator from aliasing them and
+        // resurrecting an orphan against a mismatched span on the next load.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        let src = "var st=(A,Q)=>()=>(A&&(Q=A(A=0)),Q);\n\
+                   var a,X=st(()=>{a=1}),b,c,Y=st(()=>{b=2;c=3});";
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(src.to_string())));
+
+        let reserved = 5000;
+        let extraction = extract_with_reserved_ids(&rows.source_files, &rows.modules, reserved);
+
+        assert!(
+            !extraction.new_source_files.is_empty(),
+            "multi-handle reconstruction should emit synthetic source files"
+        );
+        for sf in &extraction.new_source_files {
+            assert!(
+                sf.id > reserved,
+                "synthetic source file id {} must exceed reserved floor {reserved}",
+                sf.id
+            );
+        }
+        for module in &extraction.new_modules {
+            assert!(
+                module.id.0 > reserved,
+                "synthetic module id {} must exceed reserved floor {reserved}",
+                module.id.0
+            );
+        }
     }
 
     #[test]
