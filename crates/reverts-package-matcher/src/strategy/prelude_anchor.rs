@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use reverts_graph::FunctionExtractor;
+use reverts_graph::{FunctionExtractor, RuntimePrelude, RuntimePreludeBindingKind};
 use reverts_input::AttributionConfidence;
 use reverts_ir::{ByteRange, FunctionFingerprint, ModuleId};
 
@@ -57,6 +57,31 @@ pub struct PreludeBindingAnchor {
     /// Whether the matched package source is safe to emit as an external import
     /// (vs. source-only ownership evidence).
     pub external_importable: bool,
+}
+
+/// Collect a runtime prelude's eager (`SourceBacked`) bindings as anchor inputs.
+///
+/// Lazy-initializer (`__esm`) and CommonJS-wrapper bindings are skipped: those
+/// carry their own boundary marker and already become model modules the
+/// per-module matcher handles. Only the eager, scope-hoisted `SourceBacked`
+/// bindings are flattened into the entry island with no module of their own, so
+/// they are the ones that need per-binding anchoring. A binding without a
+/// recorded snippet (no source slice to fingerprint) is skipped.
+#[must_use]
+pub fn prelude_binding_sources(prelude: &RuntimePrelude) -> Vec<PreludeBindingSource> {
+    prelude
+        .bindings
+        .iter()
+        .filter(|(_, kind)| matches!(kind, RuntimePreludeBindingKind::SourceBacked))
+        .filter_map(|(name, _)| {
+            let snippet = prelude.snippets.get(name)?;
+            Some(PreludeBindingSource {
+                binding: name.as_str().to_string(),
+                byte_start: snippet.byte_start,
+                source: snippet.source.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Fingerprint each eager prelude binding and anchor it to a package source via
@@ -125,7 +150,62 @@ fn anchor_from_ownership(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use reverts_graph::{RuntimePreludeBindingKind, RuntimePreludeSnippet};
+    use reverts_ir::BindingName;
+
     use super::*;
+
+    fn snippet(source: &str, byte_start: u32) -> RuntimePreludeSnippet {
+        RuntimePreludeSnippet {
+            source: source.to_string(),
+            byte_start,
+            sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prelude_binding_sources_selects_only_eager_source_backed_bindings() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            BindingName::new("Cb"),
+            RuntimePreludeBindingKind::SourceBacked,
+        );
+        bindings.insert(
+            BindingName::new("lazyMod"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        );
+        bindings.insert(
+            BindingName::new("cjsMod"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        );
+
+        let mut snippets = BTreeMap::new();
+        snippets.insert(BindingName::new("Cb"), snippet("var Cb = 1;", 4096));
+        snippets.insert(
+            BindingName::new("lazyMod"),
+            snippet("var lazyMod = nt(() => {});", 8192),
+        );
+
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: String::new(),
+            bindings,
+            snippets,
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+
+        let sources = prelude_binding_sources(&prelude);
+
+        assert_eq!(sources.len(), 1, "only the eager binding: {sources:?}");
+        assert_eq!(sources[0].binding, "Cb");
+        assert_eq!(sources[0].byte_start, 4096);
+        assert_eq!(sources[0].source, "var Cb = 1;");
+    }
 
     /// A distinctive function body shared between an eager-inlined library
     /// binding and the package source. The bodies are byte-identical here, but
