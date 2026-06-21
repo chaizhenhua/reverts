@@ -489,13 +489,17 @@ fn serialize_symbol_index(entries: &[reverts_pipeline::SymbolIndexEntry]) -> Str
         .iter()
         .map(|entry| {
             serde_json::json!({
-                "module_id": entry.module_id.0,
+                // `null` for bindings in unmodularized recovered-code files
+                // (e.g. the eager entrypoint island) — named via the
+                // file-path-keyed binding-name channel, not the symbols table.
+                "module_id": entry.module_id.map(|module_id| module_id.0),
                 "original_name": entry.original_name,
                 "emitted_name": entry.emitted_name,
                 "semantic_named": entry.semantic_named,
                 "file_path": entry.file_path,
                 "function_like": entry.function_like,
                 "dead": entry.dead,
+                "exported": entry.exported,
             })
         })
         .collect();

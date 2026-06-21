@@ -5527,6 +5527,59 @@ fn entrypoint_island_inlines_enum_augmentation_iife_with_its_binding() {
 }
 
 #[test]
+fn entrypoint_island_file_is_marked_unmodularized_recovered_code() {
+    // The island aggregates eager top-level application code owned by no model
+    // module. Downstream symbol indexing recognizes such files ONLY through
+    // this marker (never by path), so an unmarked island would silently drop
+    // every one of its declarations from the naming universe.
+    let planner = ImportExportPlanner;
+    let prelude = "function main() { return 1; }\n";
+    let body = "var cliEntry = () => 'ok';\n";
+    let tail = "main();\n";
+    let source = format!("{prelude}{body}{tail}");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                prelude.len() as u32,
+                (prelude.len() + body.len()) as u32,
+            )),
+    );
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let enriched = reverts_model::EnrichedProgram::new(
+        model,
+        reverts_model::SemanticNameMap::default(),
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+
+    let island = plan
+        .files
+        .iter()
+        .find(|file| file.unmodularized_recovered_code)
+        .expect("an island file should be planned and marked");
+    assert!(
+        planned_source(&plan, island.path.as_str()).contains("function main()"),
+        "the marked file should be the island holding the eager entry code"
+    );
+    for file in &plan.files {
+        assert!(
+            file.path == island.path || !file.unmodularized_recovered_code,
+            "only the island may carry the unmodularized-recovered-code marker, found {}",
+            file.path
+        );
+    }
+}
+
+#[test]
 fn entrypoint_island_inlines_static_member_augmentation_with_its_binding() {
     // zod attaches each class's factory via a top-level static member
     // assignment `ZodBoolean.create = (e) => new ZodBoolean(e);` that follows

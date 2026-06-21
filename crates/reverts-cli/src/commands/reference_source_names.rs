@@ -547,7 +547,7 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     let index = build_reference_source_index(&args.reference_source_root, &args.reference_version)
         .map_err(CliRunError::ReferenceSourceNames)?;
     trace_reference_source_names(trace_start, "build_reference_source_index");
-    let (subjects, island_source) = if args.module_only {
+    let (subjects, island) = if args.module_only {
         (subject_modules_from_extracted_input(&args)?, None)
     } else {
         subject_modules(&args)?
@@ -631,8 +631,8 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     // root-scope first-party functions that carry no model ModuleId and so never
     // enter the per-module subject set. Kept separate from the per-module flow so
     // it never perturbs module promotion / graph propagation above.
-    if let Some(island_source) = island_source.as_deref() {
-        let island_fns = collect_island_functions(island_source);
+    if let Some((island_path, island_source)) = island.as_ref() {
+        let island_fns = collect_island_functions(island_path, island_source);
         let mut island_rows =
             match_function_lists_inner(&island_fns, &reference_fns, &BTreeMap::new(), true);
         // Keep only committed accepts; island proposals carry no value downstream.
@@ -877,9 +877,13 @@ struct SubjectModule {
     bindings: Vec<(String, String)>, // (original_name, emitted_name)
 }
 
+/// `(emitted path, source)` of the unmodularized recovered-code file (the
+/// entrypoint island) when the generated output carries one.
+type IslandSubjectSource = (String, String);
+
 fn subject_modules(
     args: &ReferenceSourceNamesArgs,
-) -> Result<(Vec<SubjectModule>, Option<String>), CliRunError> {
+) -> Result<(Vec<SubjectModule>, Option<IslandSubjectSource>), CliRunError> {
     let bundle = load_project_bundle_with_package_externalization(&args.input, args.project_id)
         .map_err(|error| CliRunError::ReferenceSourceNames(format!("load input: {error}")))?;
     // Exclude only EXTERNALIZED package modules (`Accepted` → emitted as a runtime
@@ -912,7 +916,7 @@ fn subject_modules(
 fn generate_subject_modules(
     bundle: InputBundle,
     include_module: impl Fn(u32) -> bool,
-) -> Result<(Vec<SubjectModule>, Option<String>), CliRunError> {
+) -> Result<(Vec<SubjectModule>, Option<IslandSubjectSource>), CliRunError> {
     // Subject module dependency edges (module_id -> imported module_ids), captured
     // before the bundle is consumed, for graph-based module-match propagation.
     let mut dependency_map: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
@@ -938,7 +942,13 @@ fn generate_subject_modules(
     // wrappers) still need source/package matching coverage.
     let mut bindings_for_path: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for entry in &run.symbol_index {
-        if !include_module(entry.module_id.0) {
+        // Module-less entries (unmodularized recovered-code files, e.g. the
+        // entrypoint island) are matched by the dedicated island flow below,
+        // not the per-module subject set.
+        let Some(module_id) = entry.module_id else {
+            continue;
+        };
+        if !include_module(module_id.0) {
             continue;
         }
         bindings_for_path
@@ -954,15 +964,17 @@ fn generate_subject_modules(
         .collect::<BTreeMap<_, _>>();
 
     let mut modules = Vec::new();
-    // The entrypoint island aggregates thousands of root-scope first-party
-    // functions but is not a model module (no `ModuleId`), so it is absent from
-    // `module_for_path` and would otherwise be silently dropped. Capture its
-    // source so its functions can be matched as synthetic-module subjects.
-    let mut island_source = None;
+    // An unmodularized recovered-code file (e.g. the entrypoint island)
+    // aggregates thousands of root-scope first-party functions but is not a
+    // model module (no `ModuleId`), so it is absent from `module_for_path` and
+    // would otherwise be silently dropped. The pipeline marks such files in
+    // `unmodularized_code_paths`; capture (path, source) so its functions can
+    // be matched as synthetic-module subjects keyed by the real emitted path.
+    let mut island: Option<(String, String)> = None;
     for file in &run.project.files {
         let Some(&module_id) = module_for_path.get(file.path.as_str()) else {
-            if file.path == ENTRYPOINT_ISLAND_PATH {
-                island_source = Some(file.source.clone());
+            if run.unmodularized_code_paths.contains(file.path.as_str()) {
+                island = Some((file.path.clone(), file.source.clone()));
             }
             continue; // scaffold/runtime file with no owning module
         };
@@ -986,7 +998,7 @@ fn generate_subject_modules(
                 .unwrap_or_default(),
         });
     }
-    Ok((modules, island_source))
+    Ok((modules, island))
 }
 
 fn subject_modules_from_extracted_input(
@@ -4460,12 +4472,6 @@ fn collect_param_name_transfers(
 /// global per-function matching the island requires (it has no single owner file).
 const ISLAND_MODULE_ID: u32 = u32::MAX;
 
-/// Fixed synthetic emit path of the entrypoint island (mirrors reverts-planner's
-/// `ENTRYPOINT_ISLAND_PATH`). The island is not a model module, so it never reaches
-/// the per-module subject set; this path keys its recovered binding names so the
-/// planner applies them to the emitted `modules/entrypoint.ts`.
-const ENTRYPOINT_ISLAND_PATH: &str = "modules/entrypoint.ts";
-
 /// Every named function across all subject (emitted) modules.
 fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction> {
     let mut out = Vec::new();
@@ -4484,15 +4490,13 @@ fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction>
 /// is a single emitted file aggregating thousands of root-scope first-party
 /// functions that carry no model `ModuleId`, so they never enter the per-module
 /// subject set. Matched with an empty `module_matched_file` they earn names only
-/// from the module-independent (precision-gated) passes.
-fn collect_island_functions(island_source: &str) -> Vec<SubjectFunction> {
+/// from the module-independent (precision-gated) passes. `island_path` is the
+/// pipeline-reported emitted path of the island (from `unmodularized_code_paths`),
+/// which keys the recovered binding names so the planner applies them back to the
+/// emitted file.
+fn collect_island_functions(island_path: &str, island_source: &str) -> Vec<SubjectFunction> {
     let mut out = Vec::new();
-    push_subject_functions_from_source(
-        &mut out,
-        ISLAND_MODULE_ID,
-        ENTRYPOINT_ISLAND_PATH,
-        island_source,
-    );
+    push_subject_functions_from_source(&mut out, ISLAND_MODULE_ID, island_path, island_source);
     out
 }
 
@@ -9099,6 +9103,11 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             "unique composite should accept without corroboration: {rows:?}"
         );
     }
+
+    /// Synthetic island emit path used as fixture data by the island-mode
+    /// tests (production code receives the real path from the pipeline's
+    /// `unmodularized_code_paths`).
+    const ENTRYPOINT_ISLAND_PATH: &str = "modules/entrypoint.ts";
 
     #[test]
     fn island_mode_accepts_distinctive_anchor_match() {

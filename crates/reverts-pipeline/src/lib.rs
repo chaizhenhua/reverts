@@ -56,18 +56,29 @@ pub struct OutputRun {
     /// file it lands in, so a downstream naming agent can read the generated
     /// TypeScript and route names back to the right `(module_id, original)`.
     pub symbol_index: Vec<SymbolIndexEntry>,
+    /// Emitted paths of planner-marked unmodularized recovered-code files
+    /// (e.g. the eager entrypoint island): first-party application code owned
+    /// by no model module. Consumers must use this set — never path
+    /// comparisons — to recognize such files.
+    pub unmodularized_code_paths: std::collections::BTreeSet<String>,
 }
 
 /// One emitted module-level binding: where it appears and under which name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolIndexEntry {
-    pub module_id: ModuleId,
+    /// Owning model module, or `None` for a binding declared in an
+    /// unmodularized recovered-code file (e.g. the eager entrypoint island a
+    /// scope-hoisting bundler leaves around the entry). Module-less bindings
+    /// are still first-party naming work; they are renamed through the
+    /// file-path-keyed binding-name channel instead of the symbols table.
+    pub module_id: Option<ModuleId>,
     /// Binding name as it exists in the graph / DB key space.
     pub original_name: String,
     /// Name as actually emitted (semantic name if assigned, else original).
     pub emitted_name: String,
     /// True only when the emitted name came from an accepted
-    /// `symbols.semantic_name` entry. Meaningful-looking preserved names do not
+    /// `symbols.semantic_name` entry or an accepted file-level binding rename
+    /// (`semantic_binding_names`). Meaningful-looking preserved names do not
     /// count as semantic naming evidence.
     pub semantic_named: bool,
     /// Emitted file the binding lands in.
@@ -79,6 +90,10 @@ pub struct SymbolIndexEntry {
     /// hoist or unused constant). Dead bindings carry no semantic role and are
     /// excluded from the naming worklist/denominator.
     pub dead: bool,
+    /// Whether the emitted file exports this binding (parsed from the emitted
+    /// source). Authoritative for module-less bindings, whose exports exist in
+    /// no graph; informational alongside graph exports for module bindings.
+    pub exported: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -116,16 +131,26 @@ pub struct FunctionParamRenameRow {
 /// recovered from the semantic-name overlay so already-renamed bindings still
 /// map back to their `(module_id, original)` DB key; unnamed bindings key by
 /// their own (still-minified) identifier.
+///
+/// Files owned by no module are scaffold/runtime glue and contribute nothing —
+/// EXCEPT the planner-marked unmodularized recovered-code files
+/// (`unmodularized_code_paths`, e.g. the eager entrypoint island): those hold
+/// first-party application declarations that must enter the naming universe,
+/// keyed by `module_id: None` + file path. Their accepted renames arrive
+/// through `local_binding_renames` (the file-path-keyed binding-name channel),
+/// which also supplies the renamed→original overlay for every file.
 fn build_symbol_index(
     program: &EnrichedProgram,
     module_output_paths: &std::collections::BTreeMap<ModuleId, String>,
     emitted: &reverts_emitter::EmittedProject,
+    unmodularized_code_paths: &std::collections::BTreeSet<String>,
+    local_binding_renames: &[LocalBindingRename],
 ) -> Vec<SymbolIndexEntry> {
     use std::path::Path;
 
     use reverts_js::{
         ParseGoal, TopLevelStatementKind, collect_dead_top_level_bindings,
-        collect_top_level_statement_facts,
+        collect_exported_top_level_bindings, collect_top_level_statement_facts,
     };
 
     // Emitted file path -> owning module. Merged modules collapse to the last
@@ -158,11 +183,30 @@ fn build_symbol_index(
         }
     }
 
+    // (file path, semantic emitted name) -> original name, from accepted
+    // file-level binding renames. Those rewrite the emitted text directly, so
+    // the index must map the renamed binding back to its original key and count
+    // it as semantically named — for module files and module-less files alike.
+    // Index-scoped renames target inner (non-top-level) bindings and are
+    // excluded: matching them by name alone could mislabel an unrelated
+    // top-level binding.
+    let mut original_for_renamed: std::collections::BTreeMap<(&str, &str), &str> =
+        std::collections::BTreeMap::new();
+    for rename in local_binding_renames {
+        if rename.binding_index.is_none() {
+            original_for_renamed.insert(
+                (rename.file_path.as_str(), rename.semantic_name.as_str()),
+                rename.original_name.as_str(),
+            );
+        }
+    }
+
     let mut entries = Vec::new();
     for file in &emitted.files {
-        let Some(module_id) = module_for_path.get(file.path.as_str()).copied() else {
+        let module_id = module_for_path.get(file.path.as_str()).copied();
+        if module_id.is_none() && !unmodularized_code_paths.contains(file.path.as_str()) {
             continue; // scaffold / runtime files with no owning module
-        };
+        }
         let Ok(facts) = collect_top_level_statement_facts(
             &file.source,
             Some(Path::new(&file.path)),
@@ -174,6 +218,12 @@ fn build_symbol_index(
         // vestigial hoists and unused constants — carry no semantic role and are
         // excluded from the naming worklist downstream.
         let dead_bindings = collect_dead_top_level_bindings(
+            &file.source,
+            Some(Path::new(&file.path)),
+            ParseGoal::TypeScript,
+        )
+        .unwrap_or_default();
+        let exported_bindings = collect_exported_top_level_bindings(
             &file.source,
             Some(Path::new(&file.path)),
             ParseGoal::TypeScript,
@@ -200,19 +250,28 @@ fn build_symbol_index(
                 if !seen.insert(emitted_name.clone()) {
                     continue;
                 }
-                let semantic_original = original_for_semantic_emitted
-                    .get(&(module_id, emitted_name.as_str()))
+                let semantic_original = module_id.and_then(|module_id| {
+                    original_for_semantic_emitted
+                        .get(&(module_id, emitted_name.as_str()))
+                        .copied()
+                });
+                let renamed_original = original_for_renamed
+                    .get(&(file.path.as_str(), emitted_name.as_str()))
                     .copied();
-                let (original_name, semantic_named) = if let Some(semantic_original) =
-                    semantic_original
-                {
-                    (semantic_original.to_string(), true)
-                } else if accepted_source_symbols.contains(&(module_id, emitted_name.as_str())) {
-                    continue;
-                } else {
-                    (emitted_name.clone(), false)
-                };
+                let (original_name, semantic_named) =
+                    if let Some(semantic_original) = semantic_original {
+                        (semantic_original.to_string(), true)
+                    } else if let Some(renamed_original) = renamed_original {
+                        (renamed_original.to_string(), true)
+                    } else if module_id.is_some_and(|module_id| {
+                        accepted_source_symbols.contains(&(module_id, emitted_name.as_str()))
+                    }) {
+                        continue;
+                    } else {
+                        (emitted_name.clone(), false)
+                    };
                 let dead = dead_bindings.contains(&emitted_name);
+                let exported = exported_bindings.contains(&emitted_name);
                 entries.push(SymbolIndexEntry {
                     module_id,
                     original_name,
@@ -221,6 +280,7 @@ fn build_symbol_index(
                     file_path: file.path.clone(),
                     function_like,
                     dead,
+                    exported,
                 });
             }
         }
@@ -465,6 +525,7 @@ pub fn generate_project_from_prepared_with_options(
             source_mirror_assets,
             module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
+            unmodularized_code_paths: std::collections::BTreeSet::new(),
         });
     }
 
@@ -488,6 +549,7 @@ pub fn generate_project_from_prepared_with_options(
             source_mirror_assets,
             module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
+            unmodularized_code_paths: std::collections::BTreeSet::new(),
         });
     }
 
@@ -528,7 +590,22 @@ pub fn generate_project_from_prepared_with_options(
     ));
     mark_timing!("namespace_audit");
     let accepted_project = pre_accept.clone().accept_if_clean(&audit);
-    let symbol_index = build_symbol_index(&program, &module_output_paths, &emitted_project);
+    // Planner-marked unmodularized recovered-code files (e.g. the eager
+    // entrypoint island): owned by no module, but their declarations are
+    // first-party naming work and must enter the symbol index.
+    let unmodularized_code_paths = plan
+        .files
+        .iter()
+        .filter(|file| file.unmodularized_recovered_code)
+        .map(|file| file.path.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let symbol_index = build_symbol_index(
+        &program,
+        &module_output_paths,
+        &emitted_project,
+        &unmodularized_code_paths,
+        &options.local_binding_renames,
+    );
     mark_timing!("symbol_index");
     if timing_enabled {
         let _ = last;
@@ -544,6 +621,7 @@ pub fn generate_project_from_prepared_with_options(
         source_mirror_assets,
         module_output_paths,
         symbol_index,
+        unmodularized_code_paths,
     })
 }
 
@@ -638,6 +716,7 @@ pub fn generate_project_inventory_from_prepared(
             source_mirror_assets: Vec::new(),
             module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
+            unmodularized_code_paths: std::collections::BTreeSet::new(),
         });
     }
 
@@ -657,6 +736,7 @@ pub fn generate_project_inventory_from_prepared(
             source_mirror_assets: Vec::new(),
             module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
+            unmodularized_code_paths: std::collections::BTreeSet::new(),
         });
     }
 
@@ -676,6 +756,12 @@ pub fn generate_project_inventory_from_prepared(
     );
     let pre_accept_report = pre_accept.report.clone();
 
+    let unmodularized_code_paths = plan
+        .files
+        .iter()
+        .filter(|file| file.unmodularized_recovered_code)
+        .map(|file| file.path.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     Ok(OutputRun {
         project: pre_accept,
         accepted_project: None,
@@ -686,6 +772,7 @@ pub fn generate_project_inventory_from_prepared(
         source_mirror_assets: Vec::new(),
         module_output_paths,
         symbol_index: Vec::new(),
+        unmodularized_code_paths,
     })
 }
 
@@ -2796,7 +2883,13 @@ main();"#
             }],
         };
 
-        let entries = super::build_symbol_index(&program, &module_paths, &emitted);
+        let entries = super::build_symbol_index(
+            &program,
+            &module_paths,
+            &emitted,
+            &std::collections::BTreeSet::new(),
+            &[],
+        );
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].original_name, "pendingName");
@@ -2822,11 +2915,183 @@ main();"#
             }],
         };
 
-        let entries = super::build_symbol_index(&program, &module_paths, &emitted);
+        let entries = super::build_symbol_index(
+            &program,
+            &module_paths,
+            &emitted,
+            &std::collections::BTreeSet::new(),
+            &[],
+        );
 
         assert!(
             entries.is_empty(),
             "emitted-only name `value` must not be reported as an actionable fallback: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn symbol_index_registers_unmodularized_recovered_code_file_bindings() {
+        // Failure mode: a scope-hoisting bundler's eager entry island is
+        // emitted as one synthesized file owned by no model module. Without the
+        // planner marker, its top-level declarations were silently absent from
+        // the symbol index — the naming denominator excluded virtually the
+        // whole application while reporting itself complete.
+        let rows = rows_with_application_source("var x = 1;");
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let program = super::prepare_and_enrich(input)
+            .expect("fixture should enrich")
+            .program;
+        let mut module_paths = BTreeMap::new();
+        module_paths.insert(ModuleId(1), "modules/1.ts".to_string());
+        let island_source =
+            "var qT = 1;\nfunction Fv() { return qT; }\nvar dead0;\nexport { Fv };\n";
+        let emitted = EmittedProject {
+            files: vec![
+                EmittedFile {
+                    path: "modules/1.ts".to_string(),
+                    source: "var x = 1;".to_string(),
+                },
+                EmittedFile {
+                    path: "modules/entry-island.ts".to_string(),
+                    source: island_source.to_string(),
+                },
+            ],
+        };
+        let marked = std::collections::BTreeSet::from(["modules/entry-island.ts".to_string()]);
+
+        let entries = super::build_symbol_index(&program, &module_paths, &emitted, &marked, &[]);
+
+        let island_entries: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.file_path == "modules/entry-island.ts")
+            .collect();
+        assert!(
+            island_entries.iter().all(|entry| entry.module_id.is_none()),
+            "island bindings own no module id: {island_entries:?}"
+        );
+        let exported_fn = island_entries
+            .iter()
+            .find(|entry| entry.original_name == "Fv")
+            .expect("island function must be indexed");
+        assert!(exported_fn.function_like);
+        assert!(
+            exported_fn.exported,
+            "export {{ Fv }} must mark the binding"
+        );
+        assert!(!exported_fn.semantic_named);
+        let value = island_entries
+            .iter()
+            .find(|entry| entry.original_name == "qT")
+            .expect("island value must be indexed");
+        assert!(!value.exported);
+        assert!(!value.dead, "qT is read by Fv");
+        let dead = island_entries
+            .iter()
+            .find(|entry| entry.original_name == "dead0")
+            .expect("dead island binding still indexed, flagged dead");
+        assert!(dead.dead);
+
+        // The same unowned file WITHOUT the marker stays excluded: scaffold and
+        // runtime-glue files are not naming work.
+        let unmarked = super::build_symbol_index(
+            &program,
+            &module_paths,
+            &emitted,
+            &std::collections::BTreeSet::new(),
+            &[],
+        );
+        assert!(
+            unmarked
+                .iter()
+                .all(|entry| entry.file_path != "modules/entry-island.ts"),
+            "unmarked unowned files must stay out of the symbol index"
+        );
+    }
+
+    #[test]
+    fn symbol_index_maps_renamed_island_binding_back_to_original_key() {
+        // After `binding-names --accept`, regeneration emits the island with the
+        // semantic name applied. The index must key the entry by its ORIGINAL
+        // minified name (so the DB key space stays stable) and count it as
+        // semantically named — otherwise every accepted island rename would
+        // re-enter the worklist as a fresh unnamed binding.
+        let rows = rows_with_application_source("var x = 1;");
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let program = super::prepare_and_enrich(input)
+            .expect("fixture should enrich")
+            .program;
+        let module_paths = BTreeMap::new();
+        let emitted = EmittedProject {
+            files: vec![EmittedFile {
+                path: "modules/entry-island.ts".to_string(),
+                source: "var configRegistry = 1;\nexport { configRegistry };\n".to_string(),
+            }],
+        };
+        let marked = std::collections::BTreeSet::from(["modules/entry-island.ts".to_string()]);
+        let renames = vec![LocalBindingRename {
+            file_path: "modules/entry-island.ts".to_string(),
+            original_name: "qT".to_string(),
+            binding_index: None,
+            semantic_name: "configRegistry".to_string(),
+        }];
+
+        let entries =
+            super::build_symbol_index(&program, &module_paths, &emitted, &marked, &renames);
+
+        let entry = entries
+            .iter()
+            .find(|entry| entry.emitted_name == "configRegistry")
+            .expect("renamed island binding must be indexed");
+        assert_eq!(entry.original_name, "qT");
+        assert!(entry.semantic_named);
+        assert!(entry.exported);
+        assert!(entry.module_id.is_none());
+    }
+
+    #[test]
+    fn generated_island_bindings_enter_symbol_index_end_to_end() {
+        // Full pipeline run on a bundle whose runtime entrypoint pulls eager
+        // top-level code into the planner's entrypoint island. The island file
+        // must surface in `unmodularized_code_paths` and its declarations must
+        // land in the symbol index with `module_id: None`.
+        let prelude = "function main() { return helper(); }\nfunction helper() { return 1; }\n";
+        let body = "var cliEntry = () => 'ok';\n";
+        let tail = "main();\n";
+        let source = format!("{prelude}{body}{tail}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        let island_path = run
+            .unmodularized_code_paths
+            .iter()
+            .next()
+            .expect("the eager entry code should be planned as a marked island file");
+        let island_entries: Vec<_> = run
+            .symbol_index
+            .iter()
+            .filter(|entry| &entry.file_path == island_path)
+            .collect();
+        assert!(
+            island_entries
+                .iter()
+                .any(|entry| entry.original_name == "main"),
+            "island entry function must be indexed for naming: {island_entries:?}"
+        );
+        assert!(
+            island_entries.iter().all(|entry| entry.module_id.is_none()),
+            "island bindings own no module id: {island_entries:?}"
         );
     }
 

@@ -174,6 +174,13 @@ pub struct PlannedFile {
     pub type_annotations: Vec<PlannedTypeAnnotation>,
     pub body: Vec<String>,
     pub compiler_preservation: CompilerPreservationDecision,
+    /// True for a file that aggregates recovered application top-level code
+    /// owned by no model module (e.g. the eager entrypoint island a
+    /// scope-hoisting bundler leaves around the entry). Downstream passes
+    /// (symbol indexing, naming) must recognize such files through this
+    /// marker — never by comparing output paths — so their declarations enter
+    /// the naming universe even though no `ModuleId` exists for them.
+    pub unmodularized_recovered_code: bool,
 }
 
 /// A request to rename the `param_index`-th formal parameter of the function
@@ -198,6 +205,7 @@ impl PlannedFile {
             type_annotations: Vec::new(),
             body: Vec::new(),
             compiler_preservation: CompilerPreservationDecision::default(),
+            unmodularized_recovered_code: false,
         }
     }
 

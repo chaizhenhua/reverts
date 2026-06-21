@@ -70,7 +70,9 @@ pub struct TierBreakdown {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleNamingProgress {
-    pub module_id: ModuleId,
+    /// `None` for the per-file progress of an unmodularized recovered-code
+    /// file (e.g. the eager entrypoint island), which no model module owns.
+    pub module_id: Option<ModuleId>,
     pub semantic_path: String,
     pub imported_by_count: usize,
     pub imports_count: usize,
@@ -279,13 +281,32 @@ pub(crate) fn classify_emitted_entry(
     entry: &SymbolIndexEntry,
     universe: &EmittedUniverse,
 ) -> Option<SymbolDetail> {
-    if !universe.first_party.contains(&entry.module_id.0) {
-        return None;
-    }
     // Dead module-scope bindings (esbuild vestigial hoists / unused unexported
     // constants — never read, written, or exported) carry no semantic role, so
     // they are excluded from both the naming worklist and the denominator.
     if entry.dead {
+        return None;
+    }
+    let kind = if entry.function_like {
+        NamingKind::FunctionLike
+    } else {
+        NamingKind::ValueLike
+    };
+    let Some(module_id) = entry.module_id else {
+        // Module-less binding from an unmodularized recovered-code file (e.g.
+        // the eager entrypoint island): first-party application code by
+        // construction, so it always counts toward the naming universe.
+        // Exportedness comes from the emitted file itself — the binding exists
+        // in no module graph.
+        return Some(SymbolDetail {
+            original_name: entry.original_name.clone(),
+            tier: symbol_tier(entry.exported, kind),
+            named: entry.semantic_named,
+            global_api_surface: entry.exported,
+            internal_module_surface: false,
+        });
+    };
+    if !universe.first_party.contains(&module_id.0) {
         return None;
     }
     // Named means the emitted binding came from an explicit accepted
@@ -294,19 +315,14 @@ pub(crate) fn classify_emitted_entry(
     let named = entry.semantic_named;
     let exported = universe
         .exported_by_module
-        .get(&entry.module_id.0)
+        .get(&module_id.0)
         .is_some_and(|names| names.contains(&entry.original_name));
     let internal_module_surface = universe
         .imported_by_count
-        .get(&entry.module_id.0)
+        .get(&module_id.0)
         .copied()
         .unwrap_or(0)
         > 0;
-    let kind = if entry.function_like {
-        NamingKind::FunctionLike
-    } else {
-        NamingKind::ValueLike
-    };
     Some(SymbolDetail {
         original_name: entry.original_name.clone(),
         tier: symbol_tier(exported, kind),
@@ -332,14 +348,22 @@ pub(crate) fn compute_naming_progress(
     symbol_index: &[SymbolIndexEntry],
     universe: &EmittedUniverse,
 ) -> NamingProgressReport {
-    let mut by_module: BTreeMap<u32, (String, Vec<SymbolDetail>)> = BTreeMap::new();
-    let mut global_surface_by_module = BTreeMap::<u32, Vec<SurfaceSymbol>>::new();
-    let mut internal_surface_by_module = BTreeMap::<u32, Vec<SurfaceSymbol>>::new();
+    // Keyed by `(module id, emitted file path)`; a `None` module id groups the
+    // bindings of an unmodularized recovered-code file (e.g. the entrypoint
+    // island) under its emitted file path.
+    type ProgressKey = (Option<u32>, String);
+    let mut by_module: BTreeMap<ProgressKey, Vec<SymbolDetail>> = BTreeMap::new();
+    let mut global_surface_by_module = BTreeMap::<ProgressKey, Vec<SurfaceSymbol>>::new();
+    let mut internal_surface_by_module = BTreeMap::<ProgressKey, Vec<SurfaceSymbol>>::new();
     let mut all_symbols: Vec<SymbolDetail> = Vec::new();
     for entry in symbol_index {
         let Some(detail) = classify_emitted_entry(entry, universe) else {
             continue;
         };
+        let module_key = (
+            entry.module_id.map(|module_id| module_id.0),
+            entry.file_path.clone(),
+        );
         let surface_symbol = SurfaceSymbol {
             original_name: entry.original_name.clone(),
             emitted_name: entry.emitted_name.clone(),
@@ -348,22 +372,18 @@ pub(crate) fn compute_naming_progress(
         };
         if detail.global_api_surface {
             global_surface_by_module
-                .entry(entry.module_id.0)
+                .entry(module_key.clone())
                 .or_default()
                 .push(surface_symbol.clone());
         }
         if detail.internal_module_surface {
             internal_surface_by_module
-                .entry(entry.module_id.0)
+                .entry(module_key.clone())
                 .or_default()
                 .push(surface_symbol);
         }
         all_symbols.push(detail.clone());
-        by_module
-            .entry(entry.module_id.0)
-            .or_insert_with(|| (entry.file_path.clone(), Vec::new()))
-            .1
-            .push(detail);
+        by_module.entry(module_key).or_default().push(detail);
     }
     let global_surface = global_surface_by_module
         .values()
@@ -377,22 +397,22 @@ pub(crate) fn compute_naming_progress(
         .collect::<Vec<_>>();
     let modules = by_module
         .into_iter()
-        .map(|(module_id, (file_path, symbols))| ModuleNamingProgress {
-            module_id: ModuleId(module_id),
-            semantic_path: file_path,
-            imported_by_count: universe
-                .imported_by_count
-                .get(&module_id)
-                .copied()
+        .map(|((module_id, file_path), symbols)| ModuleNamingProgress {
+            module_id: module_id.map(ModuleId),
+            imported_by_count: module_id
+                .and_then(|module_id| universe.imported_by_count.get(&module_id).copied())
                 .unwrap_or(0),
-            imports_count: universe.imports_count.get(&module_id).copied().unwrap_or(0),
+            imports_count: module_id
+                .and_then(|module_id| universe.imports_count.get(&module_id).copied())
+                .unwrap_or(0),
             breakdown: tier_breakdown(&symbols),
             global_api_surface: global_surface_by_module
-                .remove(&module_id)
+                .remove(&(module_id, file_path.clone()))
                 .unwrap_or_default(),
             internal_module_surface: internal_surface_by_module
-                .remove(&module_id)
+                .remove(&(module_id, file_path.clone()))
                 .unwrap_or_default(),
+            semantic_path: file_path,
         })
         .collect();
     NamingProgressReport {
@@ -517,7 +537,11 @@ pub fn naming_progress_json(report: &NamingProgressReport, target: NamingProgres
         },
         "modules": report.modules.iter().map(|module| {
             serde_json::json!({
-                "module_id": module.module_id.0,
+                // `null` for an unmodularized recovered-code file (e.g. the
+                // entrypoint island); its names are accepted through the
+                // file-path-keyed `binding-names` channel.
+                "module_id": module.module_id.map(|module_id| module_id.0),
+                "rename_channel": if module.module_id.is_some() { "symbol-names" } else { "binding-names" },
                 "file_path": module.semantic_path,
                 "imported_by_count": module.imported_by_count,
                 "imports_count": module.imports_count,
@@ -736,13 +760,14 @@ mod tests {
         semantic_named: bool,
     ) -> SymbolIndexEntry {
         SymbolIndexEntry {
-            module_id: reverts_ir::ModuleId(module_id),
+            module_id: Some(reverts_ir::ModuleId(module_id)),
             original_name: original.to_string(),
             emitted_name: emitted.to_string(),
             semantic_named,
             file_path: format!("modules/{module_id}.ts"),
             function_like,
             dead: false,
+            exported: false,
         }
     }
 
@@ -820,6 +845,96 @@ mod tests {
         );
     }
 
+    fn island_entry(
+        original: &str,
+        emitted: &str,
+        function_like: bool,
+        semantic_named: bool,
+        exported: bool,
+    ) -> SymbolIndexEntry {
+        SymbolIndexEntry {
+            module_id: None,
+            original_name: original.to_string(),
+            emitted_name: emitted.to_string(),
+            semantic_named,
+            file_path: "modules/entry-island.ts".to_string(),
+            function_like,
+            dead: false,
+            exported,
+        }
+    }
+
+    #[test]
+    fn classify_counts_module_less_island_bindings_as_first_party() {
+        // Failure mode: the eager entry island holds most of a scope-hoisted
+        // app's declarations but no ModuleId. If classification dropped
+        // module-less entries, naming-progress would exclude virtually the
+        // whole application from its denominator and report a fake 100%.
+        let universe = universe(&[], &[]);
+
+        let exported_fn =
+            classify_emitted_entry(&island_entry("Fv", "Fv", true, false, true), &universe)
+                .expect("island binding is first-party naming work");
+        assert_eq!(exported_fn.tier, Tier::PublicSurface);
+        assert!(exported_fn.global_api_surface);
+        assert!(!exported_fn.named);
+
+        let internal_fn =
+            classify_emitted_entry(&island_entry("qT", "qT", true, false, false), &universe)
+                .expect("island function counts");
+        assert_eq!(internal_fn.tier, Tier::Declarations);
+
+        let value =
+            classify_emitted_entry(&island_entry("v1", "v1", false, false, false), &universe)
+                .expect("island value counts");
+        assert_eq!(value.tier, Tier::Full);
+
+        let named = classify_emitted_entry(
+            &island_entry("aB", "configRegistry", false, true, false),
+            &universe,
+        )
+        .expect("named island binding counts");
+        assert!(named.named);
+
+        let mut dead = island_entry("dd", "dd", false, false, false);
+        dead.dead = true;
+        assert!(
+            classify_emitted_entry(&dead, &universe).is_none(),
+            "dead island bindings stay out of the worklist"
+        );
+    }
+
+    #[test]
+    fn island_bindings_appear_in_progress_report_and_json_with_binding_names_channel() {
+        let universe = universe(&[1], &[]);
+        let index = [
+            entry(1, "aB", "aB", false, false),
+            island_entry("Fv", "Fv", true, false, true),
+            island_entry("qT", "qT", false, false, false),
+        ];
+
+        let report = compute_naming_progress(7, &index, &universe);
+
+        assert_eq!(report.totals.full.universe, 3, "island symbols must count");
+        let island_module = report
+            .modules
+            .iter()
+            .find(|module| module.module_id.is_none())
+            .expect("island file gets its own progress group");
+        assert_eq!(island_module.semantic_path, "modules/entry-island.ts");
+        assert_eq!(island_module.breakdown.full.universe, 2);
+
+        let json = super::naming_progress_json(&report, crate::args::NamingProgressTier::Full);
+        assert!(
+            json.contains("\"rename_channel\": \"binding-names\""),
+            "module-less group must advertise the binding-names channel: {json}"
+        );
+        assert!(
+            json.contains("\"module_id\": null"),
+            "module-less group serializes module_id as null: {json}"
+        );
+    }
+
     #[test]
     fn compute_aggregates_emitted_index_and_excludes_external() {
         let universe = universe(&[1], &[(1, "aB")]);
@@ -834,7 +949,7 @@ mod tests {
 
         assert_eq!(report.project_id, 7);
         assert_eq!(report.modules.len(), 1);
-        assert_eq!(report.modules[0].module_id, reverts_ir::ModuleId(1));
+        assert_eq!(report.modules[0].module_id, Some(reverts_ir::ModuleId(1)));
         assert_eq!(report.totals.full.universe, 4); // module 2 excluded
         assert_eq!(report.totals.full.named, 1); // only `pretty`
         assert_eq!(report.totals.public_surface.universe, 1); // `aB`
@@ -858,7 +973,7 @@ mod tests {
         let provider = report
             .modules
             .iter()
-            .find(|module| module.module_id == reverts_ir::ModuleId(1))
+            .find(|module| module.module_id == Some(reverts_ir::ModuleId(1)))
             .expect("provider module");
 
         assert_eq!(report.global_api_surface.universe, 1);

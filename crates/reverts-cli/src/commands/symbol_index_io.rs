@@ -46,20 +46,27 @@ fn symbol_index_entry_from_json(
             })
         })
     };
-    let module_id_u64 = field("module_id").and_then(|value| {
-        value.as_u64().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("symbol index row {index} field `module_id` must be a positive integer"),
-            )
-        })
-    })?;
-    let module_id = u32::try_from(module_id_u64).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("symbol index row {index} field `module_id` exceeds u32"),
-        )
-    })?;
+    // `module_id` is `null` (or absent) for bindings declared in an
+    // unmodularized recovered-code file (e.g. the eager entrypoint island).
+    let module_id = match row.get("module_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => {
+            let module_id_u64 = value.as_u64().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "symbol index row {index} field `module_id` must be a positive integer or null"
+                    ),
+                )
+            })?;
+            Some(ModuleId(u32::try_from(module_id_u64).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("symbol index row {index} field `module_id` exceeds u32"),
+                )
+            })?))
+        }
+    };
     let semantic_named = field("semantic_named").and_then(|value| {
         value.as_bool().ok_or_else(|| {
             std::io::Error::new(
@@ -83,13 +90,15 @@ fn symbol_index_entry_from_json(
     };
     let function_like = bool_field("function_like")?;
     let dead = bool_field("dead")?;
+    let exported = bool_field("exported")?;
     Ok(SymbolIndexEntry {
-        module_id: ModuleId(module_id),
+        module_id,
         original_name: string_field("original_name")?,
         emitted_name: string_field("emitted_name")?,
         semantic_named,
         file_path: string_field("file_path")?,
         function_like,
         dead,
+        exported,
     })
 }

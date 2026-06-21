@@ -318,6 +318,35 @@ pub fn collect_top_level_statement_facts(
     Err(JsError::ParseFailed(errors))
 }
 
+/// Local binding names the module exports, parsed from `source`. Same
+/// definition as the dead-binding pass uses internally: declaration-form
+/// exports, local named specifiers, and named default declarations; re-exports
+/// bind no local symbol and are excluded.
+pub fn collect_exported_top_level_bindings(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<BTreeSet<String>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+        return Ok(collect_exported_local_names(&parsed.program));
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
 /// Module-scope binding names that are dead in the emitted module: declared but
 /// never read or written, and not exported. These are esbuild's vestigial
 /// hoists (`var A, i, n, o, s;` shadowed by function-local `let`s) and unused

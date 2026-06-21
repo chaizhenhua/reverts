@@ -45,7 +45,11 @@ pub fn naming_plan_json(args: &NamingPlanArgs) -> Result<String, NamingProgressE
         run.symbol_index
     };
 
-    let mut by_module: BTreeMap<u32, (String, Vec<serde_json::Value>)> = BTreeMap::new();
+    // Keyed by `(module id, emitted file path)`; a `None` module id groups the
+    // unnamed bindings of an unmodularized recovered-code file (e.g. the
+    // entrypoint island), whose names are accepted through the file-path-keyed
+    // `binding-names` channel instead of `symbol-names`.
+    let mut by_module: BTreeMap<(Option<u32>, String), Vec<serde_json::Value>> = BTreeMap::new();
     let mut target_count = 0_usize;
     for entry in &symbol_index {
         let Some(detail) = classify_emitted_entry(entry, &universe) else {
@@ -55,9 +59,12 @@ pub fn naming_plan_json(args: &NamingPlanArgs) -> Result<String, NamingProgressE
             continue;
         }
         let slot = by_module
-            .entry(entry.module_id.0)
-            .or_insert_with(|| (entry.file_path.clone(), Vec::new()));
-        slot.1.push(serde_json::json!({
+            .entry((
+                entry.module_id.map(|module_id| module_id.0),
+                entry.file_path.clone(),
+            ))
+            .or_default();
+        slot.push(serde_json::json!({
             "original_name": entry.original_name,
             "emitted_name": entry.emitted_name,
             "tier": tier_str(detail.tier),
@@ -71,9 +78,10 @@ pub fn naming_plan_json(args: &NamingPlanArgs) -> Result<String, NamingProgressE
 
     let modules: Vec<serde_json::Value> = by_module
         .into_iter()
-        .map(|(module_id, (file_path, targets))| {
+        .map(|((module_id, file_path), targets)| {
             serde_json::json!({
                 "module_id": module_id,
+                "rename_channel": if module_id.is_some() { "symbol-names" } else { "binding-names" },
                 "file_path": file_path,
                 "targets": targets,
             })

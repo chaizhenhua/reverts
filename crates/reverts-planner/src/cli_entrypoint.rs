@@ -38,6 +38,11 @@ use crate::{
     runtime_entrypoint_side_effects, scan_runtime_externalized_bindings,
 };
 
+/// Fixed emit path of the entrypoint island: the single file aggregating the
+/// eager top-level (non-module) code reachable from the runtime entrypoint. It
+/// is synthesized at plan time and is NOT a model module — downstream passes
+/// must recognize it via [`PlannedFile::unmodularized_recovered_code`], never
+/// by comparing paths.
 pub(crate) const ENTRYPOINT_ISLAND_PATH: &str = "modules/entrypoint.ts";
 
 pub(crate) fn emit_cli_entrypoint(
@@ -344,6 +349,9 @@ pub(crate) fn emit_planned_entrypoint_island(
         return false;
     };
     let mut file = PlannedFile::new(ENTRYPOINT_ISLAND_PATH);
+    // The island aggregates recovered application code that no model module
+    // owns; mark it so symbol indexing/naming include its declarations.
+    file.unmodularized_recovered_code = true;
     let mut planned_bindings = BTreeSet::<BindingName>::new();
     push_packed_runtime_helper_imports(
         program,
