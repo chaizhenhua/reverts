@@ -500,7 +500,7 @@ fn missing_required_argument(message: &str) -> &'static str {
         "--output",
         "--output-root",
         "--all-projects",
-        "--list | --set | --clear | --batch",
+        "--list | --propose | --accept | --clear-active | --batch",
     ] {
         if message.contains(argument) {
             return argument;

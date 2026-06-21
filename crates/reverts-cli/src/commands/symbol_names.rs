@@ -4,8 +4,8 @@
 //! `--accept` records the suggestion and updates the active
 //! `symbols.semantic_name` input field, so the next `generate-project-v2` run
 //! carries the accepted name through the normal input → analyze → plan → emit
-//! path. Deprecated `--set`/`--clear` aliases are kept for compatibility, but
-//! help text advertises the clearer propose/accept/clear-active verbs.
+//! path. The verbs are `propose` / `accept` / `clear-active`, matching the batch
+//! TSV ops and the `binding-names` schema (`op⇥key⇥original⇥semantic⇥[evidence]`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -43,10 +43,10 @@ pub struct SymbolNamesArgs {
     #[arg(long = "propose", value_parser = parse_name_spec)]
     pub proposals: Vec<SymbolNameSpec>,
     /// Accept a semantic name and make it active for the next emit.
-    #[arg(long = "accept", alias = "set", value_parser = parse_name_spec)]
+    #[arg(long = "accept", value_parser = parse_name_spec)]
     pub accepts: Vec<SymbolNameSpec>,
-    /// Clear the active semantic name; `--clear` is a compatibility alias.
-    #[arg(long = "clear-active", alias = "clear", value_parser = parse_clear_spec)]
+    /// Clear the active semantic name.
+    #[arg(long = "clear-active", value_parser = parse_clear_spec)]
     pub clear_active: Vec<SymbolNameClearSpec>,
     #[arg(long)]
     pub batch: Option<PathBuf>,
@@ -363,8 +363,7 @@ fn parse_batch_operations(content: &str) -> Result<Vec<SymbolNameOperation>, Sym
             continue;
         }
         match fields.as_slice() {
-            ["propose", module_id, original_name, semantic_name]
-            | ["add", module_id, original_name, semantic_name] => {
+            ["propose", module_id, original_name, semantic_name] => {
                 operations.push(SymbolNameOperation::Propose(batch_name_spec(
                     module_id,
                     original_name,
@@ -374,8 +373,7 @@ fn parse_batch_operations(content: &str) -> Result<Vec<SymbolNameOperation>, Sym
                     "propose",
                 )?));
             }
-            ["propose", module_id, original_name, semantic_name, evidence]
-            | ["add", module_id, original_name, semantic_name, evidence] => {
+            ["propose", module_id, original_name, semantic_name, evidence] => {
                 operations.push(SymbolNameOperation::Propose(batch_name_spec(
                     module_id,
                     original_name,
@@ -385,8 +383,7 @@ fn parse_batch_operations(content: &str) -> Result<Vec<SymbolNameOperation>, Sym
                     "propose",
                 )?));
             }
-            ["accept", module_id, original_name, semantic_name]
-            | ["set", module_id, original_name, semantic_name] => {
+            ["accept", module_id, original_name, semantic_name] => {
                 operations.push(SymbolNameOperation::Accept(batch_name_spec(
                     module_id,
                     original_name,
@@ -396,8 +393,7 @@ fn parse_batch_operations(content: &str) -> Result<Vec<SymbolNameOperation>, Sym
                     "accept",
                 )?));
             }
-            ["accept", module_id, original_name, semantic_name, evidence]
-            | ["set", module_id, original_name, semantic_name, evidence] => {
+            ["accept", module_id, original_name, semantic_name, evidence] => {
                 operations.push(SymbolNameOperation::Accept(batch_name_spec(
                     module_id,
                     original_name,
@@ -407,7 +403,7 @@ fn parse_batch_operations(content: &str) -> Result<Vec<SymbolNameOperation>, Sym
                     "accept",
                 )?));
             }
-            ["clear-active", module_id, original_name] | ["clear", module_id, original_name] => {
+            ["clear-active", module_id, original_name] => {
                 if original_name.is_empty() {
                     return Err(SymbolNamesError::InvalidBatchLine {
                         line: line_number,
@@ -1298,9 +1294,9 @@ mod tests {
     }
 
     #[test]
-    fn batch_parser_accepts_propose_accept_clear_and_legacy_aliases() {
+    fn batch_parser_accepts_propose_accept_clear_active() {
         let operations = parse_batch_operations(
-            "action\tmodule_id\toriginal_name\tsemantic_name\tevidence\npropose\t10\t$F1\tmaybeClient\tcandidate:maybe client\naccept\t10\ta\tsettings\tconfig:settings\nclear\t10\toldName\n",
+            "action\tmodule_id\toriginal_name\tsemantic_name\tevidence\npropose\t10\t$F1\tmaybeClient\tcandidate:maybe client\naccept\t10\ta\tsettings\tconfig:settings\nclear-active\t10\toldName\n",
         )
         .expect("batch should parse");
 
