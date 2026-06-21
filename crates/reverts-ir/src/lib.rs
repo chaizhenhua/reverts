@@ -867,6 +867,12 @@ pub struct IntraproceduralFlow {
     /// sees inside function bodies and nested blocks, unlike the top-level
     /// [`ControlFlowGraph`] statement skeleton.
     unreachable: BTreeMap<ModuleId, Vec<ByteRange>>,
+    /// Source spans of functions that may complete without an explicit value
+    /// return — i.e. some path reaches the end of the body (or a bare `return;`)
+    /// and implicitly yields `undefined`. Flow-sensitive over all paths: a
+    /// function whose every path returns a value is *not* listed. Feeds
+    /// return-type nullability (`T` vs `T | undefined`).
+    may_return_undefined: BTreeMap<ModuleId, Vec<ByteRange>>,
 }
 
 impl IntraproceduralFlow {
@@ -874,16 +880,27 @@ impl IntraproceduralFlow {
     /// per module so the projection is deterministic regardless of CFG
     /// traversal order.
     pub fn add_unreachable(&mut self, module_id: ModuleId, span: ByteRange) {
-        let spans = self.unreachable.entry(module_id).or_default();
-        if let Err(index) = spans.binary_search(&span) {
-            spans.insert(index, span);
-        }
+        insert_sorted_unique(self.unreachable.entry(module_id).or_default(), span);
+    }
+
+    /// Record a function (by source span) that may complete without an explicit
+    /// value return.
+    pub fn add_may_return_undefined(&mut self, module_id: ModuleId, span: ByteRange) {
+        insert_sorted_unique(
+            self.may_return_undefined.entry(module_id).or_default(),
+            span,
+        );
     }
 
     pub fn extend(&mut self, other: Self) {
         for (module_id, spans) in other.unreachable {
             for span in spans {
                 self.add_unreachable(module_id, span);
+            }
+        }
+        for (module_id, spans) in other.may_return_undefined {
+            for span in spans {
+                self.add_may_return_undefined(module_id, span);
             }
         }
     }
@@ -907,6 +924,33 @@ impl IntraproceduralFlow {
     #[must_use]
     pub fn unreachable_count(&self) -> usize {
         self.unreachable.values().map(Vec::len).sum()
+    }
+
+    /// Spans of functions in `module_id` that may implicitly return `undefined`,
+    /// ordered by position.
+    #[must_use]
+    pub fn may_return_undefined_in(&self, module_id: ModuleId) -> &[ByteRange] {
+        self.may_return_undefined
+            .get(&module_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Whether the function at `span` in `module_id` may implicitly return
+    /// `undefined` (so its inferred return type needs `| undefined`).
+    #[must_use]
+    pub fn function_may_return_undefined(&self, module_id: ModuleId, span: ByteRange) -> bool {
+        self.may_return_undefined
+            .get(&module_id)
+            .is_some_and(|spans| spans.binary_search(&span).is_ok())
+    }
+}
+
+/// Insert `span` into a position-sorted vec, skipping duplicates. Keeps every
+/// [`IntraproceduralFlow`] collection deterministic regardless of insert order.
+fn insert_sorted_unique(spans: &mut Vec<ByteRange>, span: ByteRange) {
+    if let Err(index) = spans.binary_search(&span) {
+        spans.insert(index, span);
     }
 }
 
@@ -1309,6 +1353,23 @@ mod tests {
         assert!(!flow.has_unreachable(ModuleId(3)));
         assert_eq!(flow.unreachable_in(ModuleId(3)), &[]);
         assert_eq!(flow.unreachable_count(), 3);
+    }
+
+    #[test]
+    fn intraprocedural_flow_tracks_functions_that_may_return_undefined() {
+        let mut flow = IntraproceduralFlow::default();
+        flow.add_may_return_undefined(ModuleId(1), ByteRange::new(30, 60));
+        flow.add_may_return_undefined(ModuleId(1), ByteRange::new(0, 20));
+        flow.add_may_return_undefined(ModuleId(1), ByteRange::new(0, 20)); // dup
+
+        assert_eq!(
+            flow.may_return_undefined_in(ModuleId(1)),
+            &[ByteRange::new(0, 20), ByteRange::new(30, 60)],
+        );
+        assert!(flow.function_may_return_undefined(ModuleId(1), ByteRange::new(0, 20)));
+        // A function not recorded (always returns a value) answers false.
+        assert!(!flow.function_may_return_undefined(ModuleId(1), ByteRange::new(70, 80)));
+        assert!(!flow.function_may_return_undefined(ModuleId(2), ByteRange::new(0, 20)));
     }
 
     #[test]

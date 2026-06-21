@@ -36,7 +36,7 @@ use oxc_ast::{
         walk_ts_type_parameter_instantiation, walk_variable_declarator,
     },
 };
-use oxc_cfg::{EdgeType, InstructionKind};
+use oxc_cfg::{EdgeType, InstructionKind, ReturnInstructionKind};
 use oxc_parser::Parser;
 use oxc_semantic::{ScopeTree, Semantic, SemanticBuilder};
 use oxc_span::GetSpan;
@@ -1665,15 +1665,9 @@ fn is_parameter(semantic: &Semantic<'_>, symbol_id: SymbolId) -> bool {
     matches!(semantic.nodes().kind(node_id), AstKind::FormalParameter(_))
 }
 
-/// Project oxc's intraprocedural CFG into owned flow facts. Currently: the
-/// source spans of statements unreachable within their enclosing function.
-///
-/// Reachability is a multi-source BFS seeded from every CFG entry — the graph
-/// roots (no incoming edge) plus every function-subgraph entry (the target of a
-/// `NewFunction` edge) — traversing all edges *except* `NewFunction` (which
-/// would descend into a nested function, analysed from its own entry) and
-/// `Unreachable` (which oxc inserts to dead blocks). Any block left unvisited is
-/// dead code; its real statements' spans are reported.
+/// Project oxc's intraprocedural CFG into owned flow facts:
+/// - unreachable-code spans (dead code within a function body), and
+/// - functions that may complete without an explicit value return.
 fn project_intraprocedural_flow(
     module_id: ModuleId,
     semantic: &Semantic<'_>,
@@ -1682,8 +1676,26 @@ fn project_intraprocedural_flow(
     let Some(cfg) = semantic.cfg() else {
         return flow;
     };
-    let graph = cfg.graph();
+    project_unreachable_code(module_id, semantic, cfg, &mut flow);
+    project_return_completeness(module_id, semantic, cfg, &mut flow);
+    flow
+}
 
+/// Mark statements unreachable within their enclosing function.
+///
+/// Reachability is a multi-source BFS seeded from every CFG entry — the graph
+/// roots (no incoming edge) plus every function-subgraph entry (the target of a
+/// `NewFunction` edge) — traversing all edges *except* `NewFunction` (which
+/// would descend into a nested function, analysed from its own entry) and
+/// `Unreachable` (which oxc inserts to dead blocks). Any block left unvisited is
+/// dead code; its real statements' spans are reported.
+fn project_unreachable_code(
+    module_id: ModuleId,
+    semantic: &Semantic<'_>,
+    cfg: &oxc_cfg::ControlFlowGraph,
+    flow: &mut IntraproceduralFlow,
+) {
+    let graph = cfg.graph();
     let mut reachable: BTreeSet<NodeIndex> = BTreeSet::new();
     let mut queue: VecDeque<NodeIndex> = VecDeque::new();
     for node in graph.node_indices() {
@@ -1731,7 +1743,71 @@ fn project_intraprocedural_flow(
             flow.add_unreachable(module_id, ByteRange::new(span.start, span.end));
         }
     }
-    flow
+}
+
+/// Mark functions whose body may complete without an explicit value return.
+///
+/// Every function AST node carries the `cfg_id` of its body entry block (oxc
+/// creates the function subgraph before recording the node). From that entry we
+/// BFS the function's own blocks — not crossing `NewFunction` (nested functions
+/// analyse themselves) or `Unreachable` (dead code does not count) — and flag
+/// the function if any reachable block implicitly returns or returns a bare
+/// `return;` (oxc's `ImplicitReturn` / `Return(ImplicitUndefined)`).
+fn project_return_completeness(
+    module_id: ModuleId,
+    semantic: &Semantic<'_>,
+    cfg: &oxc_cfg::ControlFlowGraph,
+    flow: &mut IntraproceduralFlow,
+) {
+    for node in semantic.nodes().iter() {
+        let kind = node.kind();
+        // Expression-body arrows (`x => expr`) always yield their expression, so
+        // oxc's `ImplicitReturn` there is a value, not a fall-through undefined —
+        // exclude them. Block-bodied functions/arrows can fall off the end.
+        let analyse = match kind {
+            AstKind::Function(_) => true,
+            AstKind::ArrowFunctionExpression(arrow) => !arrow.expression,
+            _ => false,
+        };
+        if !analyse {
+            continue;
+        }
+        if function_may_complete_without_value(cfg, node.cfg_id()) {
+            let span = kind.span();
+            flow.add_may_return_undefined(module_id, ByteRange::new(span.start, span.end));
+        }
+    }
+}
+
+/// BFS a single function's blocks from `entry` (intra-function edges only) and
+/// report whether any reachable block ends a path without an explicit value.
+fn function_may_complete_without_value(cfg: &oxc_cfg::ControlFlowGraph, entry: NodeIndex) -> bool {
+    let graph = cfg.graph();
+    let mut seen: BTreeSet<NodeIndex> = BTreeSet::new();
+    let mut queue: VecDeque<NodeIndex> = VecDeque::new();
+    seen.insert(entry);
+    queue.push_back(entry);
+    while let Some(node) = queue.pop_front() {
+        for instruction in cfg.basic_block(node).instructions() {
+            if matches!(
+                instruction.kind,
+                InstructionKind::ImplicitReturn
+                    | InstructionKind::Return(ReturnInstructionKind::ImplicitUndefined)
+            ) {
+                return true;
+            }
+        }
+        for edge in graph.edges_directed(node, Direction::Outgoing) {
+            if matches!(edge.weight(), EdgeType::NewFunction | EdgeType::Unreachable) {
+                continue;
+            }
+            let target = edge.target();
+            if seen.insert(target) {
+                queue.push_back(target);
+            }
+        }
+    }
+    false
 }
 
 /// Lexical nesting depth of `scope_id`: `0` for the program root scope.
@@ -3267,6 +3343,47 @@ function live() {
         // Live statements are never flagged.
         assert!(!covers("return 1"), "live return flagged: {ranges:?}");
         assert!(!covers("return 2"), "live function flagged: {ranges:?}");
+    }
+
+    #[test]
+    fn from_input_flags_functions_that_may_return_undefined() {
+        let source = "\
+function alwaysValue() { return 1; }
+function bothBranches(x) { if (x) return 1; else return 2; }
+function someBranches(x) { if (x) return 1; }
+function noReturn() { globalThis.x = 1; }
+function bareReturn() { return; }
+const arrowValue = (x) => x + 1;
+";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let flow = graph.intraprocedural_flow();
+
+        let flagged: Vec<&str> = flow
+            .may_return_undefined_in(ModuleId(1))
+            .iter()
+            .map(|range| &source[range.start as usize..range.end as usize])
+            .collect();
+        let flagged_has = |needle: &str| flagged.iter().any(|slice| slice.contains(needle));
+
+        // Functions with a path that falls through / returns bare are flagged.
+        assert!(flagged_has("someBranches"), "flagged: {flagged:?}");
+        assert!(flagged_has("noReturn"), "flagged: {flagged:?}");
+        assert!(flagged_has("bareReturn"), "flagged: {flagged:?}");
+        // Functions that always return a value are not flagged.
+        assert!(!flagged_has("alwaysValue"), "flagged: {flagged:?}");
+        assert!(!flagged_has("bothBranches"), "flagged: {flagged:?}");
+        // Exactly three functions qualify (the expression-body arrow returns a value).
+        assert_eq!(flagged.len(), 3, "flagged: {flagged:?}");
     }
 
     #[test]
