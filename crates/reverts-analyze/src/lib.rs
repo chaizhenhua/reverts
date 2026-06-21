@@ -53,6 +53,7 @@ pub fn enrich_program(mut model: ProgramModel) -> EnrichmentOutput {
     audit.extend(audit_unprotected_nullable_member_reads(&model));
     audit.extend(audit_unreachable_top_level_code(&model));
     audit.extend(audit_unreachable_function_code(&model));
+    audit.extend(audit_cross_module_imported_writes(&model));
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
     let mut function_fingerprints: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
@@ -890,6 +891,40 @@ fn audit_unreachable_function_code(model: &ProgramModel) -> AuditReport {
                 .with_module(module.id.0.to_string()),
             );
         }
+    }
+    audit
+}
+
+/// Flag assignments to a binding the writing module only imports (never defines
+/// locally). ESM import bindings are read-only — the write throws `TypeError` at
+/// runtime — so this catches a class of decompiler-introduced crash where module
+/// splitting separates a mutable `var` writer from its owning module. Reports
+/// the writing module, the binding, and (in the message) the owning module(s).
+fn audit_cross_module_imported_writes(model: &ProgramModel) -> AuditReport {
+    let mut audit = AuditReport::default();
+    let def_use = model.graph().def_use();
+    for (module_id, binding) in def_use.imported_writes() {
+        let owners: Vec<String> = def_use
+            .modules_defining(&binding)
+            .into_iter()
+            .map(|owner| owner.0.to_string())
+            .collect();
+        let owner_note = if owners.is_empty() {
+            String::new()
+        } else {
+            format!(" (owned by module(s) {})", owners.join(", "))
+        };
+        audit.push(
+            AuditFinding::warning(
+                FindingCode::CrossModuleImportedWrite,
+                format!(
+                    "module assigns to imported read-only binding `{binding}`{owner_note}; \
+                     this throws at runtime"
+                ),
+            )
+            .with_module(module_id.0.to_string())
+            .with_binding(binding.as_str().to_string()),
+        );
     }
     audit
 }
@@ -1996,6 +2031,56 @@ mod tests {
         assert!(
             !output.audit.has(FindingCode::UnreachableFunctionCode),
             "no dead code expected, got: {:?}",
+            output.audit.findings(),
+        );
+    }
+
+    #[test]
+    fn write_to_imported_binding_is_reported_as_cross_module_write() {
+        // module `a` imports `shared` from `b` and assigns to it — an ESM import
+        // is read-only, so this throws at runtime. The owner is module `b`.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "a.js",
+            Some("import { shared } from './b.js';\nshared = 5;\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "b.js",
+            Some("export var shared = 1;\n".to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "a", "a.ts").with_source_file(1));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(2), "b", "b.ts").with_source_file(2));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(
+            output.audit.has(FindingCode::CrossModuleImportedWrite),
+            "expected CrossModuleImportedWrite, got: {:?}",
+            output.audit.findings(),
+        );
+    }
+
+    #[test]
+    fn write_to_locally_defined_binding_is_not_a_cross_module_write() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "a.js",
+            Some("var local = 1;\nlocal = 2;\n".to_string()),
+        ));
+        rows.modules[0] = ModuleInput::application(ModuleId(1), "a", "a.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(
+            !output.audit.has(FindingCode::CrossModuleImportedWrite),
+            "locally-defined write must not be flagged, got: {:?}",
             output.audit.findings(),
         );
     }

@@ -41,6 +41,11 @@ pub enum FindingCode {
     /// inside function bodies (unlike `UnreachableTopLevelCode`, which only
     /// covers the module's top-level statement sequence).
     UnreachableFunctionCode,
+    /// A module assigns to a binding it only *imports* (never defines locally).
+    /// ESM import bindings are read-only, so the write throws `TypeError` at
+    /// runtime. Surfaces the decompiler defect where module splitting strands a
+    /// mutable `var` writer apart from the module that owns the binding.
+    CrossModuleImportedWrite,
     MissingRequiredAsset,
     /// A source-backed package surface was discovered, but an explicit
     /// Agent-authored `package-surface-decisions` reject/block row suppresses

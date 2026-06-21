@@ -449,6 +449,24 @@ impl DefUseGraph {
             .collect()
     }
 
+    /// Writes to a binding the writing module only *imports* — it never defines
+    /// the binding locally. In ESM an imported binding is a read-only live
+    /// binding, so assigning to it throws `TypeError` at runtime. Each result is
+    /// `(writing_module, binding)`; the owning module(s) are
+    /// [`Self::modules_defining`]. Surfaces the class of decompiler defect where
+    /// module splitting strands a mutable `var` writer apart from its owner.
+    #[must_use]
+    pub fn imported_writes(&self) -> Vec<(ModuleId, BindingName)> {
+        self.writes
+            .iter()
+            .filter(|(module_id, binding)| {
+                self.imports.contains(&(*module_id, binding.clone()))
+                    && !self.definitions.contains(&(*module_id, binding.clone()))
+            })
+            .cloned()
+            .collect()
+    }
+
     #[must_use]
     pub fn constraints(&self) -> &[BindingConstraint] {
         &self.constraints
@@ -1395,6 +1413,31 @@ mod tests {
         graph.write(ModuleId(1), "namespace");
 
         assert!(graph.unresolved_writes().is_empty());
+    }
+
+    #[test]
+    fn write_to_imported_binding_is_flagged_with_its_owner() {
+        let mut graph = DefUseGraph::default();
+        // module 2 owns `shared`; module 1 imports and (illegally) writes it.
+        graph.define(ModuleId(2), "shared");
+        graph.import(ModuleId(1), "shared");
+        graph.write(ModuleId(1), "shared");
+        // a binding module 1 both imports and defines locally is fine.
+        graph.import(ModuleId(1), "local");
+        graph.define(ModuleId(1), "local");
+        graph.write(ModuleId(1), "local");
+
+        let imported_writes = graph.imported_writes();
+        assert_eq!(
+            imported_writes,
+            vec![(ModuleId(1), BindingName::new("shared"))],
+            "only the import-only write is flagged",
+        );
+        // The owner module is recoverable for the fix/report.
+        assert_eq!(
+            graph.modules_defining(&BindingName::new("shared")),
+            std::collections::BTreeSet::from([ModuleId(2)]),
+        );
     }
 
     #[test]
