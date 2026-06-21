@@ -176,11 +176,23 @@ pub(crate) fn best_source_match(
                 } else {
                     ModuleMatchStrategy::FunctionSignatureAndStringAnchors
                 };
-                let direct_importable = is_function_string_match
-                    || is_property_shape_match
-                    || is_object_shape_match
-                    || is_class_shape_match
-                    || is_switch_shape_match;
+                // A source-overlap match may externalize to a bare package
+                // import ONLY when the module carries no function the package
+                // source lacks. Otherwise the module is a partial/superset of
+                // the package (it has app-specific functions like a local
+                // helper folded into its exports), and rewriting its body to
+                // `import … from "pkg"` would silently drop that surplus code.
+                // Such modules must be retained as application source. An empty
+                // module function set is trivially a subset (nothing to drop).
+                let module_functions_subset_of_source = module
+                    .function_signature_hashes
+                    .is_subset(&source.function_signature_hashes);
+                let direct_importable = module_functions_subset_of_source
+                    && (is_function_string_match
+                        || is_property_shape_match
+                        || is_object_shape_match
+                        || is_class_shape_match
+                        || is_switch_shape_match);
                 Some((
                     source,
                     function_signature_matches
@@ -459,4 +471,142 @@ fn weighted_score(
         + (matched_modules as u32 * MODULE_MATCH_WEIGHT)
         + (function_signature_matches as u32 * FUNCTION_SIGNATURE_WEIGHT)
         + (string_anchor_matches as u32 * STRING_ANCHOR_WEIGHT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PackageSource;
+    use reverts_ir::ModuleId;
+
+    fn anchors<const N: usize>(values: [&str; N]) -> BTreeSet<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    fn package_source(external_importable: bool) -> PackageSource {
+        PackageSource {
+            package_name: "pkg".to_string(),
+            package_version: "1.2.3".to_string(),
+            export_specifier: "pkg/partial".to_string(),
+            source_path: "partial.js".to_string(),
+            source: String::new(),
+            external_importable,
+            fingerprint: None,
+        }
+    }
+
+    fn source_fingerprint(
+        source: &PackageSource,
+        function_signature_hashes: BTreeSet<String>,
+        string_anchors: BTreeSet<String>,
+    ) -> PackageSourceFingerprint<'_> {
+        PackageSourceFingerprint {
+            source,
+            normalized_source_hash: "src-hash".to_string(),
+            normalized_source_hashes: anchors(["src-hash"]),
+            function_signature_hashes,
+            top_level_declaration_hashes: BTreeSet::new(),
+            import_export_surface_hashes: BTreeSet::new(),
+            class_member_hashes: BTreeSet::new(),
+            statement_window_hashes: BTreeSet::new(),
+            block_branch_hashes: BTreeSet::new(),
+            pq_gram_hashes: BTreeSet::new(),
+            wl_hashes: BTreeSet::new(),
+            string_anchors,
+            function_axis_anchors: BTreeSet::new(),
+            jsx_react_shape_anchors: BTreeSet::new(),
+        }
+    }
+
+    fn module_fingerprint(
+        function_signature_hashes: BTreeSet<String>,
+        string_anchors: BTreeSet<String>,
+    ) -> ModuleMatchFingerprint {
+        ModuleMatchFingerprint {
+            module_id: ModuleId(10),
+            package_name: Some("pkg".to_string()),
+            package_version: Some("1.2.3".to_string()),
+            normalized_source_hash: "module-hash".to_string(),
+            normalized_source_hashes: anchors(["module-hash"]),
+            function_signature_hashes,
+            top_level_declaration_hashes: BTreeSet::new(),
+            import_export_surface_hashes: BTreeSet::new(),
+            class_member_hashes: BTreeSet::new(),
+            statement_window_hashes: BTreeSet::new(),
+            block_branch_hashes: BTreeSet::new(),
+            pq_gram_hashes: BTreeSet::new(),
+            wl_hashes: BTreeSet::new(),
+            string_anchors,
+            function_axis_anchors: BTreeSet::new(),
+            jsx_react_shape_anchors: BTreeSet::new(),
+        }
+    }
+
+    /// Anchors shared by both fixtures so the function-signature+string-anchor
+    /// strategy fires; the only variable under test is module-side surplus.
+    fn shared_anchors() -> BTreeSet<String> {
+        anchors(["sa0", "sa1", "sa2"])
+    }
+
+    #[test]
+    fn full_function_coverage_match_is_externalizable() {
+        // The module's functions are all present in the package source — nothing
+        // would be dropped by rewriting the body to an `import`, so the match may
+        // externalize.
+        let source = package_source(true);
+        let source_fp = source_fingerprint(
+            &source,
+            anchors(["fn_first", "fn_second"]),
+            shared_anchors(),
+        );
+        let version = PackageVersionCandidate {
+            package_name: "pkg".to_string(),
+            package_version: "1.2.3".to_string(),
+            sources: vec![source_fp],
+        };
+        let module = module_fingerprint(anchors(["fn_first", "fn_second"]), shared_anchors());
+
+        let matched =
+            best_source_match(&version, &module, &VersionedPackageMatcherConfig::default())
+                .expect("full-coverage source overlap should match");
+        assert_eq!(
+            matched.strategy,
+            ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+        );
+        assert!(
+            matched.external_importable,
+            "a module whose functions are a subset of the package source may externalize"
+        );
+    }
+
+    #[test]
+    fn partial_coverage_match_with_surplus_function_stays_source_only() {
+        // The module has `fn_local`, which the package source lacks. Externalizing
+        // to `import … from "pkg"` would silently drop it, so the match must be
+        // retained as application source (not externalizable) even though enough
+        // shared signatures/anchors exist to recognize ownership.
+        let source = package_source(true);
+        let source_fp = source_fingerprint(
+            &source,
+            anchors(["fn_first", "fn_second"]),
+            shared_anchors(),
+        );
+        let version = PackageVersionCandidate {
+            package_name: "pkg".to_string(),
+            package_version: "1.2.3".to_string(),
+            sources: vec![source_fp],
+        };
+        let module = module_fingerprint(
+            anchors(["fn_first", "fn_second", "fn_local"]),
+            shared_anchors(),
+        );
+
+        let matched =
+            best_source_match(&version, &module, &VersionedPackageMatcherConfig::default())
+                .expect("partial overlap still recognizes ownership");
+        assert!(
+            !matched.external_importable,
+            "a module carrying a function the package source lacks must not externalize"
+        );
+    }
 }
