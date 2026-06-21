@@ -1520,8 +1520,18 @@ mod tests {
 
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
-        assert!(source.contains("const createClient: number = 1;"));
-        assert!(source.contains("module.exports = { createClient };"));
+        // `module.exports = { createClient: a }` drives the late name `a` →
+        // `createClient`; the CommonJS→ESM lowering then emits the object as a
+        // shorthand ESM re-export of the (renamed) binding.
+        assert!(
+            source.contains("const createClient: number = 1;"),
+            "SRC:\n{source}"
+        );
+        assert!(
+            source.contains("export { createClient };"),
+            "SRC:\n{source}"
+        );
+        assert!(!source.contains("module.exports"), "SRC:\n{source}");
     }
 
     #[test]
