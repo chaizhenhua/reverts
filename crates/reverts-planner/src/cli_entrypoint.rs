@@ -345,9 +345,26 @@ pub(crate) fn emit_planned_entrypoint_island(
     if entrypoint_island_is_planned(plan) {
         return true;
     }
-    let Some((_prelude, entrypoint)) = runtime_entrypoint(program) else {
+    let Some((prelude, entrypoint)) = runtime_entrypoint(program) else {
         return false;
     };
+    // Recover the latent module structure of the flattened island: community
+    // detection over the eager bindings' reference graph partitions them into
+    // module-sized clusters. Reported now; a follow-up emits one file per
+    // cluster instead of the single aggregate below.
+    let island_clusters = crate::island_clustering::cluster_island_prelude(prelude);
+    if !island_clusters.is_empty() {
+        let cluster_count = island_clusters
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |max| max + 1);
+        eprintln!(
+            "generate-project: entry island has {} eager binding(s) in {} reference cluster(s)",
+            island_clusters.len(),
+            cluster_count
+        );
+    }
     let mut file = PlannedFile::new(ENTRYPOINT_ISLAND_PATH);
     // The island aggregates recovered application code that no model module
     // owns; mark it so symbol indexing/naming include its declarations.

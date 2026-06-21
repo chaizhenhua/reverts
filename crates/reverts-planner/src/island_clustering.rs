@@ -17,7 +17,55 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use reverts_graph::{RuntimePrelude, RuntimePreludeBindingKind};
 use reverts_ir::BindingName;
+
+use crate::runtime_source_scan::value_identifiers_in_source;
+
+/// Cluster a runtime prelude's eager (`SourceBacked`) island bindings into
+/// modules by community detection over their reference graph.
+///
+/// Each eager binding is a node; an edge joins two eager bindings when one
+/// reads the other. Reference sets come from the precomputed per-statement
+/// `reads` on each snippet's sub-snippets (no re-parsing); a binding whose
+/// snippet was never split into statements falls back to scanning its source.
+/// Returns `binding -> module-cluster id`.
+#[must_use]
+pub(crate) fn cluster_island_prelude(prelude: &RuntimePrelude) -> BTreeMap<BindingName, usize> {
+    let island_bindings: BTreeSet<BindingName> = prelude
+        .bindings
+        .iter()
+        .filter(|(_, kind)| matches!(kind, RuntimePreludeBindingKind::SourceBacked))
+        .map(|(binding, _)| binding.clone())
+        .collect();
+
+    let mut references: BTreeMap<BindingName, BTreeSet<BindingName>> = BTreeMap::new();
+    for binding in &island_bindings {
+        let mut refs = BTreeSet::new();
+        if let Some(snippet) = prelude.snippets.get(binding) {
+            if snippet.sub_snippets.is_empty() {
+                for identifier in value_identifiers_in_source(snippet.source.as_str()) {
+                    let read = BindingName::new(identifier);
+                    if island_bindings.contains(&read) {
+                        refs.insert(read);
+                    }
+                }
+            } else {
+                for sub in &snippet.sub_snippets {
+                    for read in &sub.reads {
+                        if island_bindings.contains(read) {
+                            refs.insert(read.clone());
+                        }
+                    }
+                }
+            }
+        }
+        refs.remove(binding);
+        references.insert(binding.clone(), refs);
+    }
+
+    cluster_bindings_by_references(&references)
+}
 
 /// Cluster island bindings into modules by community detection over their
 /// reference graph.
@@ -29,10 +77,6 @@ use reverts_ir::BindingName;
 /// detection. Returns `binding -> cluster id` (contiguous from 0); an island
 /// binding that references nothing and is referenced by nothing forms its own
 /// singleton cluster.
-///
-// Consumed by the planner's island emission (split the one synthesized island
-// file into one file per cluster); wired in a follow-up.
-#[allow(dead_code)]
 pub(crate) fn cluster_bindings_by_references(
     references: &BTreeMap<BindingName, BTreeSet<BindingName>>,
 ) -> BTreeMap<BindingName, usize> {
@@ -294,6 +338,78 @@ mod tests {
         assert_eq!(b, clusters[&BindingName::new("b2")]);
         assert_eq!(b, clusters[&BindingName::new("b3")]);
         assert_ne!(a, b, "the two reference cliques must be distinct modules");
+    }
+
+    fn source_backed_prelude(
+        cliques: &[&[&str]],
+        bridges: &[(&str, &str)],
+    ) -> RuntimePrelude {
+        use reverts_graph::{RuntimePreludeSnippet, RuntimePreludeSubSnippet};
+
+        let mut bindings = BTreeMap::new();
+        let mut snippets = BTreeMap::new();
+        for clique in cliques {
+            for &name in *clique {
+                bindings.insert(
+                    BindingName::new(name),
+                    RuntimePreludeBindingKind::SourceBacked,
+                );
+                // Reads = the rest of the clique (a dense intra-module reference
+                // set) plus any bridge targets from this node.
+                let mut reads: BTreeSet<BindingName> = clique
+                    .iter()
+                    .filter(|&&other| other != name)
+                    .map(|&other| BindingName::new(other))
+                    .collect();
+                for &(from, to) in bridges {
+                    if from == name {
+                        reads.insert(BindingName::new(to));
+                    }
+                }
+                snippets.insert(
+                    BindingName::new(name),
+                    RuntimePreludeSnippet {
+                        source: format!("var {name} = 1;"),
+                        byte_start: 0,
+                        sub_snippets: vec![RuntimePreludeSubSnippet {
+                            source: format!("var {name} = 1;"),
+                            byte_start: 0,
+                            byte_end: 0,
+                            defines: BTreeSet::from([BindingName::new(name)]),
+                            reads,
+                            writes: BTreeSet::new(),
+                        }],
+                        augmentations: Vec::new(),
+                    },
+                );
+            }
+        }
+        RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: String::new(),
+            bindings,
+            snippets,
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        }
+    }
+
+    #[test]
+    fn island_prelude_partitions_eager_bindings_into_reference_modules() {
+        let prelude = source_backed_prelude(
+            &[&["a1", "a2", "a3"], &["b1", "b2", "b3"]],
+            &[("a1", "b1")],
+        );
+        let clusters = cluster_island_prelude(&prelude);
+        assert_eq!(clusters.len(), 6);
+        let a = clusters[&BindingName::new("a1")];
+        assert_eq!(a, clusters[&BindingName::new("a2")]);
+        assert_eq!(a, clusters[&BindingName::new("a3")]);
+        let b = clusters[&BindingName::new("b1")];
+        assert_eq!(b, clusters[&BindingName::new("b2")]);
+        assert_eq!(b, clusters[&BindingName::new("b3")]);
+        assert_ne!(a, b);
     }
 
     #[test]
