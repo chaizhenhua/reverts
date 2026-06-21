@@ -7,20 +7,21 @@ use oxc_ast::{
     ast::{
         Argument, ArrowFunctionExpression, BindingPatternKind, BlockStatement, CallExpression,
         Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
-        Expression, FunctionBody, IdentifierReference, ImportDeclaration, ImportExpression,
-        ModuleExportName, NewExpression, Program, Statement, StringLiteral,
+        Expression, Function, FunctionBody, IdentifierReference, ImportDeclaration,
+        ImportExpression, ModuleExportName, NewExpression, Program, Statement, StringLiteral,
     },
     visit::walk::{
-        walk_block_statement, walk_call_expression, walk_export_all_declaration,
-        walk_export_named_declaration, walk_expression, walk_function_body,
-        walk_import_declaration, walk_import_expression, walk_new_expression, walk_program,
-        walk_string_literal,
+        walk_arrow_function_expression, walk_block_statement, walk_call_expression,
+        walk_export_all_declaration, walk_export_named_declaration, walk_expression, walk_function,
+        walk_function_body, walk_import_declaration, walk_import_expression, walk_new_expression,
+        walk_program, walk_string_literal,
     },
 };
 use oxc_parser::Parser;
-use oxc_semantic::SemanticBuilder;
+use oxc_semantic::{ScopeTree, SemanticBuilder, SymbolTable};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::{LogicalOperator, UnaryOperator};
+use oxc_syntax::scope::ScopeFlags;
 use oxc_syntax::symbol::SymbolFlags;
 
 use crate::errors::{JsError, ParseError, ParseGoal, Result};
@@ -410,6 +411,113 @@ pub fn collect_dead_top_level_bindings(
     }
 
     Err(JsError::ParseFailed(errors))
+}
+
+/// Names of top-level function declarations whose body assigns to a *free*
+/// variable that is itself a module-scope (root) binding — i.e. the function
+/// mutates shared module state.
+///
+/// Such a function is NOT safe to relocate into a separate cluster module: an
+/// ESM import binding is read-only, so the write would either throw or — once
+/// the cluster file is rewritten by `localize_written_imports` — fork a private
+/// local copy of the variable, severing it from the entry's copy that the rest
+/// of the program reads and writes. The function must stay co-located with the
+/// state it mutates.
+///
+/// Resolution is scope-accurate (oxc semantic): a write counts only when it
+/// resolves to a root-scope symbol other than the function itself. Writes to a
+/// closure variable declared inside the same top-level function (which would
+/// move with it) and writes to unresolved globals (handled by implicit-global
+/// pinning) do not count.
+pub fn top_level_functions_writing_module_state(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<BTreeSet<String>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+        let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+        let mut collector = ModuleStateWriteCollector {
+            fn_depth: 0,
+            current_top: None,
+            symbols: semantic.symbols(),
+            scopes: semantic.scopes(),
+            pinned: BTreeSet::new(),
+        };
+        collector.visit_program(&parsed.program);
+        return Ok(collector.pinned);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+struct ModuleStateWriteCollector<'s> {
+    /// Enclosing function/arrow nesting depth. `0` means module top level.
+    fn_depth: u32,
+    /// Name of the outermost top-level function declaration currently being
+    /// visited (the one a write would be attributed to), if any.
+    current_top: Option<String>,
+    symbols: &'s SymbolTable,
+    scopes: &'s ScopeTree,
+    pinned: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for ModuleStateWriteCollector<'_> {
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        if self.fn_depth == 0 {
+            self.current_top = it.id.as_ref().map(|id| id.name.as_str().to_string());
+        }
+        self.fn_depth += 1;
+        walk_function(self, it, flags);
+        self.fn_depth -= 1;
+        if self.fn_depth == 0 {
+            self.current_top = None;
+        }
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        // A top-level arrow has no declaration name to pin; just track depth so
+        // writes inside it are not misattributed to an outer function.
+        self.fn_depth += 1;
+        walk_arrow_function_expression(self, it);
+        self.fn_depth -= 1;
+        if self.fn_depth == 0 {
+            self.current_top = None;
+        }
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        let Some(top) = self.current_top.as_ref() else {
+            return;
+        };
+        let reference = self.symbols.get_reference(identifier.reference_id());
+        if !reference.is_write() {
+            return;
+        }
+        let Some(symbol_id) = reference.symbol_id() else {
+            return;
+        };
+        // A module-scope (root) target other than the function itself is shared
+        // state the function mutates in place.
+        let scope_id = self.symbols.get_scope_id(symbol_id);
+        if self.scopes.get_parent_id(scope_id).is_none()
+            && self.symbols.get_name(symbol_id) != top.as_str()
+        {
+            self.pinned.insert(top.clone());
+        }
+    }
 }
 
 /// Local binding names that the module exports (declaration form

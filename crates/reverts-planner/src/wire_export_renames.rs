@@ -247,7 +247,10 @@ mod tests {
             specs.contains(&"./b.js".to_string()),
             "namespace import: {specs:?}"
         );
-        assert!(specs.contains(&"./c.js".to_string()), "re-export: {specs:?}");
+        assert!(
+            specs.contains(&"./c.js".to_string()),
+            "re-export: {specs:?}"
+        );
         assert!(
             specs.contains(&"./d.js".to_string()),
             "star re-export: {specs:?}"

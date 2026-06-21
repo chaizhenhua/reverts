@@ -4,15 +4,24 @@
 //! evaluation-order meaning. A scope-hoisted island runs top-to-bottom and
 //! contains side-effecting top-level statements (e.g. a library's global
 //! registry init) and order-dependent initializers; moving those across a module
-//! boundary changes when they run. Function and class *declarations*, by
-//! contrast, are hoisted and side-effect-free to define — relocating one to an
-//! imported module and importing it back does not change observable behavior, as
-//! long as the binding is never reassigned (an ES import is read-only).
+//! boundary changes when they run. Only hoisted `function` *declarations* are
+//! safe to relocate: they are defined by hoisting and are inert until called, so
+//! moving one to an imported module and importing it back does not change
+//! observable behavior — provided the binding is never reassigned (an ES import
+//! is read-only) and the function does not mutate shared module state (which
+//! would fork once relocated; see `top_level_functions_writing_module_state`).
+//!
+//! Classes are NOT moved even though they are declarations: a `class` evaluates
+//! its `extends` base and any static field/block at definition time, and esbuild
+//! initializes an imported cluster module *before* the entry that imports it — so
+//! a relocated `class X extends na {}` runs `extends na` before the entry defines
+//! the eager binding `na`, crashing. Equivalence on the real bundle was verified
+//! by comparing the recovered split's module-init interaction trace against the
+//! unsplit recovery: identical multiset, no load error.
 //!
 //! This module performs only the source-level extraction: which statements move,
 //! the moved file's body, and the remainder. Import/export wiring between the
-//! remainder and the extracted file is layered on separately. Nothing here is
-//! wired into emission yet, so the verified single-island output is unchanged.
+//! remainder and the extracted file is layered on by `cli_entrypoint`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,12 +44,21 @@ pub(crate) struct ClusterExtraction {
 /// Extract the hoistable (`function`/`class`) declarations whose bindings belong
 /// to `cluster_bindings` out of `island_source`.
 ///
-/// A declaration is moved only when it is a function or class declaration, every
+/// A declaration is moved only when it is a hoisted function declaration, every
 /// binding it introduces is in `cluster_bindings`, and none of those bindings is
 /// in `written_bindings` (a reassigned binding cannot become a read-only import).
 /// Every other statement — side-effecting expressions, variable initializers,
-/// imports/exports, setters, lazy thunks — stays in `remaining_source` in its
-/// original position, preserving evaluation order and side effects.
+/// class declarations, imports/exports, setters, lazy thunks — stays in
+/// `remaining_source` in its original position, preserving evaluation order and
+/// side effects.
+///
+/// Classes are deliberately NOT moved: unlike a function declaration (hoisted,
+/// inert until called), a `class` declaration evaluates its `extends` base and
+/// any static field/block at definition time. esbuild initializes an imported
+/// cluster module *before* the entry that imports it, so a moved
+/// `class X extends na {}` would run its `extends na` before the entry defines
+/// the eager binding `na` — a `Class extends undefined` crash. Relocating
+/// classes safely needs eager-dependency analysis; functions need none.
 ///
 /// Returns `None` when nothing is extractable (so callers leave the island
 /// untouched) or when the source cannot be parsed.
@@ -49,25 +67,30 @@ pub(crate) fn extract_hoistable_cluster(
     cluster_bindings: &BTreeSet<BindingName>,
     written_bindings: &BTreeSet<BindingName>,
 ) -> Option<ClusterExtraction> {
-    let facts = collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript).ok()?;
+    let facts =
+        collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript).ok()?;
 
     // Byte ranges of the statements to lift, in source order.
     let mut extracted: Vec<(usize, usize)> = Vec::new();
     let mut moved_bindings: BTreeSet<BindingName> = BTreeSet::new();
     for fact in &facts {
-        if !matches!(
-            fact.kind,
-            TopLevelStatementKind::Function | TopLevelStatementKind::Class
-        ) {
+        if !matches!(fact.kind, TopLevelStatementKind::Function) {
             continue;
         }
         if fact.bindings.is_empty() {
             continue;
         }
-        let bindings: Vec<BindingName> =
-            fact.bindings.iter().map(|name| BindingName::new(name.as_str())).collect();
-        let all_in_cluster = bindings.iter().all(|binding| cluster_bindings.contains(binding));
-        let any_written = bindings.iter().any(|binding| written_bindings.contains(binding));
+        let bindings: Vec<BindingName> = fact
+            .bindings
+            .iter()
+            .map(|name| BindingName::new(name.as_str()))
+            .collect();
+        let all_in_cluster = bindings
+            .iter()
+            .all(|binding| cluster_bindings.contains(binding));
+        let any_written = bindings
+            .iter()
+            .any(|binding| written_bindings.contains(binding));
         if !all_in_cluster || any_written {
             continue;
         }
@@ -111,6 +134,116 @@ fn remove_ranges(source: &str, ranges: &[(usize, usize)]) -> String {
         remaining.push_str(source.get(cursor..).unwrap_or_default());
     }
     remaining
+}
+
+/// One cluster's extracted declarations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClusterGroup {
+    pub(crate) cluster_id: usize,
+    pub(crate) moved_bindings: BTreeSet<BindingName>,
+    pub(crate) cluster_source: String,
+}
+
+/// The result of partitioning the whole island in a single parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IslandPartition {
+    pub(crate) remaining_source: String,
+    pub(crate) clusters: Vec<ClusterGroup>,
+}
+
+/// Partition the island in ONE parse: assign each hoistable (`function`/`class`)
+/// declaration whose bindings share a cluster to that cluster, leaving every
+/// other statement — and any declaration that is reassigned, spans multiple
+/// clusters, or has an unclustered binding — in `remaining_source` in place.
+///
+/// Re-parsing per cluster would be O(clusters × source); the island has
+/// thousands of clusters over a multi-megabyte source, so a single parse is
+/// required. Returns `None` if the source does not parse or nothing is movable.
+pub(crate) fn partition_island_into_clusters(
+    island_source: &str,
+    binding_to_cluster: &BTreeMap<BindingName, usize>,
+    written_bindings: &BTreeSet<BindingName>,
+) -> Option<IslandPartition> {
+    let facts =
+        collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript).ok()?;
+
+    // cluster_id -> (statement byte ranges, moved bindings)
+    type Accumulator = (Vec<(usize, usize)>, BTreeSet<BindingName>);
+    let mut groups: BTreeMap<usize, Accumulator> = BTreeMap::new();
+    let mut extracted_ranges: Vec<(usize, usize)> = Vec::new();
+    for fact in &facts {
+        // Only hoisted function declarations are eval-order-safe to relocate
+        // across the cyclic entry<->cluster import boundary; classes are not
+        // (see `extract_hoistable_cluster`).
+        if !matches!(fact.kind, TopLevelStatementKind::Function) || fact.bindings.is_empty() {
+            continue;
+        }
+        let names: Vec<BindingName> = fact
+            .bindings
+            .iter()
+            .map(|name| BindingName::new(name.as_str()))
+            .collect();
+        if names
+            .iter()
+            .any(|binding| written_bindings.contains(binding))
+        {
+            continue;
+        }
+        // Every binding must map to the SAME cluster; otherwise the statement
+        // straddles a boundary and stays whole in the island.
+        let mut cluster = None;
+        let mut same_cluster = true;
+        for binding in &names {
+            match binding_to_cluster.get(binding) {
+                Some(&id) => match cluster {
+                    None => cluster = Some(id),
+                    Some(existing) if existing != id => {
+                        same_cluster = false;
+                        break;
+                    }
+                    Some(_) => {}
+                },
+                None => {
+                    same_cluster = false;
+                    break;
+                }
+            }
+        }
+        let Some(cluster_id) = cluster.filter(|_| same_cluster) else {
+            continue;
+        };
+        let range = (fact.byte_start as usize, fact.byte_end as usize);
+        let entry = groups.entry(cluster_id).or_default();
+        entry.0.push(range);
+        entry.1.extend(names);
+        extracted_ranges.push(range);
+    }
+
+    if extracted_ranges.is_empty() {
+        return None;
+    }
+
+    let clusters = groups
+        .into_iter()
+        .map(|(cluster_id, (ranges, moved_bindings))| {
+            let cluster_source = ranges
+                .iter()
+                .map(|&(start, end)| island_source.get(start..end).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n");
+            ClusterGroup {
+                cluster_id,
+                moved_bindings,
+                cluster_source,
+            }
+        })
+        .collect();
+    let remaining_source = remove_ranges(island_source, &extracted_ranges);
+
+    Some(IslandPartition {
+        remaining_source,
+        clusters,
+    })
 }
 
 /// Assemble the source of an extracted cluster file: an import per source
@@ -159,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn moves_only_cluster_function_and_class_declarations() {
+    fn moves_only_cluster_function_declarations() {
         let island = "function f1() { return 1; }\n\
                       globalThis.__init = setup();\n\
                       class C1 { m() { return f1(); } }\n\
@@ -168,16 +301,42 @@ mod tests {
         let extraction =
             extract_hoistable_cluster(island, &bindings(&["f1", "C1"]), &BTreeSet::new()).unwrap();
 
-        assert_eq!(extraction.moved_bindings, bindings(&["f1", "C1"]));
+        // Only the function declaration moves; the class stays put.
+        assert_eq!(extraction.moved_bindings, bindings(&["f1"]));
         assert!(extraction.cluster_source.contains("function f1()"));
-        assert!(extraction.cluster_source.contains("class C1"));
-        // The side-effecting init, the order-dependent var, and the out-of-cluster
-        // function all stay put.
-        assert!(extraction.remaining_source.contains("globalThis.__init = setup();"));
+        assert!(!extraction.cluster_source.contains("class C1"));
+        // The class, side-effecting init, the order-dependent var, and the
+        // out-of-cluster function all stay put.
+        assert!(extraction.remaining_source.contains("class C1"));
+        assert!(
+            extraction
+                .remaining_source
+                .contains("globalThis.__init = setup();")
+        );
         assert!(extraction.remaining_source.contains("var keep = f1();"));
         assert!(extraction.remaining_source.contains("function other()"));
         assert!(!extraction.remaining_source.contains("function f1()"));
-        assert!(!extraction.remaining_source.contains("class C1"));
+    }
+
+    #[test]
+    fn never_moves_a_class_even_when_clustered() {
+        // A class whose `extends` base is an eager island binding must not move:
+        // esbuild evaluates an imported cluster before the entry, so a relocated
+        // `class B extends na {}` would run `extends na` before the entry defines
+        // `na` (`var na = require("node:events")`) — a `Class extends undefined`
+        // crash. Only the function in the cluster is eval-order-safe to lift.
+        let island = "var na = require(\"node:events\");\n\
+                      class B extends na { run() { return helper(); } }\n\
+                      function helper() { return na; }\n";
+        let extraction =
+            extract_hoistable_cluster(island, &bindings(&["B", "helper"]), &BTreeSet::new())
+                .unwrap();
+        assert_eq!(extraction.moved_bindings, bindings(&["helper"]));
+        assert!(extraction.cluster_source.contains("function helper()"));
+        assert!(!extraction.cluster_source.contains("class B"));
+        // The class and its eager `extends` base stay together in the island.
+        assert!(extraction.remaining_source.contains("var na = require"));
+        assert!(extraction.remaining_source.contains("class B extends na"));
     }
 
     #[test]
@@ -185,8 +344,7 @@ mod tests {
         // `f1` is a function but is reassigned later, so it cannot become a
         // read-only import — it must stay in the island.
         let island = "function f1() { return 1; }\nf1 = wrap(f1);\n";
-        let result =
-            extract_hoistable_cluster(island, &bindings(&["f1"]), &bindings(&["f1"]));
+        let result = extract_hoistable_cluster(island, &bindings(&["f1"]), &bindings(&["f1"]));
         assert!(result.is_none(), "reassigned binding must not be extracted");
     }
 
@@ -201,10 +359,7 @@ mod tests {
     #[test]
     fn assembles_a_cluster_file_with_imports_body_and_reexport() {
         let mut imports = BTreeMap::new();
-        imports.insert(
-            "../runtime/shared.js".to_string(),
-            bindings(&["helper"]),
-        );
+        imports.insert("../runtime/shared.js".to_string(), bindings(&["helper"]));
         let file = assemble_cluster_file(
             "function f1() { return helper(); }",
             &bindings(&["f1"]),
@@ -220,14 +375,57 @@ mod tests {
         assert!(import_at < decl_at && decl_at < export_at);
     }
 
+    fn binding_to_cluster(pairs: &[(&str, usize)]) -> BTreeMap<BindingName, usize> {
+        pairs
+            .iter()
+            .map(|(name, id)| (BindingName::new(*name), *id))
+            .collect()
+    }
+
+    #[test]
+    fn partitions_all_clusters_in_one_pass() {
+        let island = "function a1() { return a2(); }\n\
+                      function a2() { return 1; }\n\
+                      globalThis.__init = run();\n\
+                      function b1() { return 2; }\n\
+                      var keep = a1();\n";
+        let partition = partition_island_into_clusters(
+            island,
+            &binding_to_cluster(&[("a1", 0), ("a2", 0), ("b1", 1)]),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(partition.clusters.len(), 2);
+        let c0 = partition
+            .clusters
+            .iter()
+            .find(|g| g.cluster_id == 0)
+            .unwrap();
+        assert_eq!(c0.moved_bindings, bindings(&["a1", "a2"]));
+        assert!(c0.cluster_source.contains("function a1()"));
+        assert!(c0.cluster_source.contains("function a2()"));
+        let c1 = partition
+            .clusters
+            .iter()
+            .find(|g| g.cluster_id == 1)
+            .unwrap();
+        assert_eq!(c1.moved_bindings, bindings(&["b1"]));
+        // Side effect and order-dependent var stay; functions are gone.
+        assert!(
+            partition
+                .remaining_source
+                .contains("globalThis.__init = run();")
+        );
+        assert!(partition.remaining_source.contains("var keep = a1();"));
+        assert!(!partition.remaining_source.contains("function a1()"));
+        assert!(!partition.remaining_source.contains("function b1()"));
+    }
+
     #[test]
     fn entry_imports_the_moved_bindings_back() {
-        let statement =
-            entry_import_for_cluster(&bindings(&["f1", "C1"]), "./island/cluster-0.js");
-        assert_eq!(
-            statement,
-            "import { C1, f1 } from './island/cluster-0.js';"
-        );
+        let statement = entry_import_for_cluster(&bindings(&["f1", "C1"]), "./island/cluster-0.js");
+        assert_eq!(statement, "import { C1, f1 } from './island/cluster-0.js';");
     }
 
     #[test]

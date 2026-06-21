@@ -23,7 +23,7 @@ use crate::runtime_helper_source_closure::{
 };
 use crate::runtime_helper_writes::rewrite_runtime_helper_writes;
 use crate::runtime_source_scan::{
-    call_identifiers_in_source, runtime_import_identifiers_in_source,
+    call_identifiers_in_source, runtime_import_identifiers_in_source, value_identifiers_in_source,
 };
 use crate::runtime_var_migration::RuntimeVarMigrationPlan;
 use crate::statements::{
@@ -337,6 +337,177 @@ pub(crate) fn emit_entrypoint_island(
     emit_planned_entrypoint_island(program, plan, island)
 }
 
+/// Emit path of one island cluster file.
+fn island_cluster_path(cluster_id: usize) -> String {
+    format!("modules/island/cluster-{cluster_id}.ts")
+}
+
+/// Smallest cluster (in moved bindings) emitted as its own file. Tiny clusters
+/// stay inline in the entry: a separate module per two-function cluster is pure
+/// overhead and balloons the import graph for no readability gain.
+const MIN_ISLAND_CLUSTER_SIZE: usize = 24;
+
+/// Split the eager island's hoistable declarations into per-cluster files,
+/// pushing each cluster file onto `plan` and writing the rewritten entry body
+/// (cluster imports + the original eager statements in order + the re-exports
+/// clusters import back) onto `entry_file`. Behavior-preserving: only hoisted,
+/// side-effect-free function/class declarations move; every eager statement
+/// stays in `entry_file` in its original position; cross-file references route
+/// through the entry hub so a moved function still sees the same values. Returns
+/// `false` (caller emits the unsplit island) when there is nothing worth
+/// splitting.
+fn emit_island_clusters(
+    prelude: &reverts_graph::RuntimePrelude,
+    plan: &mut EmitPlan,
+    entry_file: &mut PlannedFile,
+    island_source: &str,
+    planned_bindings: &BTreeSet<BindingName>,
+    entrypoint_callee: &BindingName,
+) -> bool {
+    use std::collections::BTreeMap;
+
+    let clusters_by_binding = crate::island_clustering::cluster_island_prelude(prelude);
+    if clusters_by_binding.is_empty() {
+        return false;
+    }
+
+    // Keep only clusters large enough to be worth a file; bindings in smaller
+    // (or singleton) clusters drop out of the map and so stay in the entry.
+    let mut cluster_sizes: BTreeMap<usize, usize> = BTreeMap::new();
+    for &cluster in clusters_by_binding.values() {
+        *cluster_sizes.entry(cluster).or_default() += 1;
+    }
+    let binding_to_cluster: BTreeMap<BindingName, usize> = clusters_by_binding
+        .into_iter()
+        .filter(|(_, cluster)| cluster_sizes[cluster] >= MIN_ISLAND_CLUSTER_SIZE)
+        .collect();
+    if binding_to_cluster.is_empty() {
+        return false;
+    }
+
+    // Never move the entrypoint itself, any reassigned binding (an ES import is
+    // read-only), or any function that mutates shared module state — relocating
+    // the latter would fork the state it writes and silently diverge.
+    let mut pinned = implicit_global_writes_in_source(island_source);
+    pinned.insert(entrypoint_callee.clone());
+    if let Ok(writers) = reverts_js::top_level_functions_writing_module_state(
+        island_source,
+        None,
+        reverts_js::ParseGoal::TypeScript,
+    ) {
+        pinned.extend(
+            writers
+                .into_iter()
+                .map(|name| BindingName::new(name.as_str())),
+        );
+    }
+
+    let Some(partition) = crate::island_split::partition_island_into_clusters(
+        island_source,
+        &binding_to_cluster,
+        &pinned,
+    ) else {
+        return false;
+    };
+    if partition.clusters.is_empty() {
+        return false;
+    }
+
+    // Names reachable from the entry namespace: every island binding (moved ones
+    // are imported back) plus what the entry already imports.
+    let entry_available: BTreeSet<BindingName> = local_bindings_in_source(island_source)
+        .into_iter()
+        .map(BindingName::new)
+        .chain(planned_bindings.iter().cloned())
+        .collect();
+
+    let mut entry_imports = String::new();
+    let mut entry_reexports: BTreeSet<BindingName> = BTreeSet::new();
+    let mut moved_all: BTreeSet<BindingName> = BTreeSet::new();
+    for group in &partition.clusters {
+        let cluster_path = island_cluster_path(group.cluster_id);
+        let cluster_imports_from_entry =
+            relative_import_specifier(cluster_path.as_str(), ENTRYPOINT_ISLAND_PATH);
+        let entry_imports_from_cluster =
+            relative_import_specifier(ENTRYPOINT_ISLAND_PATH, cluster_path.as_str());
+
+        // What the cluster references that it does not declare itself and that
+        // the entry can provide — imported from the entry hub.
+        let cluster_local: BTreeSet<BindingName> = local_bindings_in_source(&group.cluster_source)
+            .into_iter()
+            .map(BindingName::new)
+            .collect();
+        let cluster_needs: BTreeSet<BindingName> =
+            value_identifiers_in_source(group.cluster_source.as_str())
+                .into_iter()
+                .map(BindingName::new)
+                .filter(|name| !cluster_local.contains(name) && entry_available.contains(name))
+                .collect();
+
+        let mut imports: BTreeMap<String, BTreeSet<BindingName>> = BTreeMap::new();
+        if !cluster_needs.is_empty() {
+            imports.insert(cluster_imports_from_entry, cluster_needs.clone());
+        }
+        let cluster_source = crate::island_split::assemble_cluster_file(
+            group.cluster_source.as_str(),
+            &group.moved_bindings,
+            &imports,
+        );
+
+        let mut cluster_file = PlannedFile::new(cluster_path);
+        cluster_file.unmodularized_recovered_code = true;
+        cluster_file.push_source(cluster_source);
+        for binding in &group.moved_bindings {
+            cluster_file.add_binding(PlannedBinding::new(
+                binding.clone(),
+                binding.clone(),
+                BindingShape::Unknown,
+                true,
+            ));
+            cluster_file.add_export_with_source_backed(binding.clone(), true);
+        }
+        crate::finalize_planned_file(&mut cluster_file);
+        plan.push_file(cluster_file);
+
+        entry_imports.push_str(
+            crate::island_split::entry_import_for_cluster(
+                &group.moved_bindings,
+                entry_imports_from_cluster.as_str(),
+            )
+            .as_str(),
+        );
+        entry_imports.push('\n');
+        entry_reexports.extend(cluster_needs);
+        moved_all.extend(group.moved_bindings.iter().cloned());
+    }
+
+    // Entry body: import the moved declarations back, then the original eager
+    // statements in their original order (preserving side effects).
+    entry_file.push_source(entry_imports);
+    entry_file.push_source(partition.remaining_source);
+    for binding in &moved_all {
+        entry_file.add_binding(PlannedBinding::new(
+            binding.clone(),
+            binding.clone(),
+            BindingShape::Unknown,
+            true,
+        ));
+    }
+    // Re-export what clusters import from the entry hub (the entrypoint export is
+    // emitted separately by the caller).
+    let reexports: BTreeSet<BindingName> = entry_reexports
+        .into_iter()
+        .filter(|binding| binding != entrypoint_callee)
+        .collect();
+    if !reexports.is_empty() {
+        entry_file.push_source(named_export_statement(reexports.iter()));
+        for binding in &reexports {
+            entry_file.add_export_with_source_backed(binding.clone(), true);
+        }
+    }
+    true
+}
+
 pub(crate) fn emit_planned_entrypoint_island(
     program: &EnrichedProgram,
     plan: &mut EmitPlan,
@@ -348,23 +519,6 @@ pub(crate) fn emit_planned_entrypoint_island(
     let Some((prelude, entrypoint)) = runtime_entrypoint(program) else {
         return false;
     };
-    // Recover the latent module structure of the flattened island: community
-    // detection over the eager bindings' reference graph partitions them into
-    // module-sized clusters. Reported now; a follow-up emits one file per
-    // cluster instead of the single aggregate below.
-    let island_clusters = crate::island_clustering::cluster_island_prelude(prelude);
-    if !island_clusters.is_empty() {
-        let cluster_count = island_clusters
-            .values()
-            .copied()
-            .max()
-            .map_or(0, |max| max + 1);
-        eprintln!(
-            "generate-project: entry island has {} eager binding(s) in {} reference cluster(s)",
-            island_clusters.len(),
-            cluster_count
-        );
-    }
     let mut file = PlannedFile::new(ENTRYPOINT_ISLAND_PATH);
     // The island aggregates recovered application code that no model module
     // owns; mark it so symbol indexing/naming include its declarations.
@@ -442,7 +596,18 @@ pub(crate) fn emit_planned_entrypoint_island(
     ) {
         file.push_source(prelude);
     }
-    file.push_source(island_source);
+    // Decompose the eager island into per-cluster files where worthwhile;
+    // otherwise emit the single aggregate island unchanged.
+    if !emit_island_clusters(
+        prelude,
+        plan,
+        &mut file,
+        island_source.as_str(),
+        &planned_bindings,
+        &entrypoint.callee,
+    ) {
+        file.push_source(island_source);
+    }
     file.push_source(named_export_statement([&entrypoint.callee].into_iter()));
     file.add_binding(PlannedBinding::new(
         entrypoint.callee.clone(),

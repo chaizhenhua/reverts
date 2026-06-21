@@ -118,7 +118,10 @@ pub(crate) fn louvain_communities(n: usize, adjacency: &[Vec<usize>]) -> Vec<usi
     if n == 0 {
         return Vec::new();
     }
-    let degree: Vec<f64> = adjacency.iter().map(|neighbors| neighbors.len() as f64).collect();
+    let degree: Vec<f64> = adjacency
+        .iter()
+        .map(|neighbors| neighbors.len() as f64)
+        .collect();
     let two_m: f64 = degree.iter().sum();
     if two_m == 0.0 {
         return (0..n).collect();
@@ -165,8 +168,7 @@ pub(crate) fn louvain_communities(n: usize, adjacency: &[Vec<usize>]) -> Vec<usi
                 let gain = ki_in - ki * sigma_tot[c] / two_m;
                 // Strictly better wins; an exact tie prefers the smaller id for
                 // determinism, but never displaces the current community on a tie.
-                if gain > best_gain + EPSILON
-                    || (gain > best_gain - EPSILON && c < best_community)
+                if gain > best_gain + EPSILON || (gain > best_gain - EPSILON && c < best_community)
                 {
                     best_gain = gain;
                     best_community = c;
@@ -229,15 +231,7 @@ mod tests {
         // Two triangles {0,1,2} and {3,4,5} joined only by edge 0-3 — the shape a
         // shared helper makes between two original modules. Modularity keeps them
         // apart where label propagation would collapse them.
-        let edges = [
-            (0, 1),
-            (0, 2),
-            (1, 2),
-            (3, 4),
-            (3, 5),
-            (4, 5),
-            (0, 3),
-        ];
+        let edges = [(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5), (0, 3)];
         let communities = louvain_communities(6, &adjacency(6, &edges));
         assert_eq!(community_count(&communities), 2, "{communities:?}");
         assert_eq!(communities[0], communities[1]);
@@ -331,10 +325,7 @@ mod tests {
         assert_ne!(a, b, "the two reference cliques must be distinct modules");
     }
 
-    fn source_backed_prelude(
-        cliques: &[&[&str]],
-        bridges: &[(&str, &str)],
-    ) -> RuntimePrelude {
+    fn source_backed_prelude(cliques: &[&[&str]], bridges: &[(&str, &str)]) -> RuntimePrelude {
         use reverts_graph::{RuntimePreludeSnippet, RuntimePreludeSubSnippet};
 
         let mut bindings = BTreeMap::new();
@@ -395,10 +386,8 @@ mod tests {
 
     #[test]
     fn island_prelude_partitions_eager_bindings_into_reference_modules() {
-        let prelude = source_backed_prelude(
-            &[&["a1", "a2", "a3"], &["b1", "b2", "b3"]],
-            &[("a1", "b1")],
-        );
+        let prelude =
+            source_backed_prelude(&[&["a1", "a2", "a3"], &["b1", "b2", "b3"]], &[("a1", "b1")]);
         let clusters = cluster_island_prelude(&prelude);
         assert_eq!(clusters.len(), 6);
         let a = clusters[&BindingName::new("a1")];
@@ -417,6 +406,9 @@ mod tests {
         let references = refs(&[("x", &["imported", "y"]), ("y", &["x"])]);
         let clusters = cluster_bindings_by_references(&references);
         assert_eq!(clusters.len(), 2, "only island bindings are nodes");
-        assert_eq!(clusters[&BindingName::new("x")], clusters[&BindingName::new("y")]);
+        assert_eq!(
+            clusters[&BindingName::new("x")],
+            clusters[&BindingName::new("y")]
+        );
     }
 }

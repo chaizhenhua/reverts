@@ -49,7 +49,7 @@ pub use facts::{
     collect_identifier_read_facts, collect_path_builder_calls, collect_static_module_specifiers,
     collect_static_resource_specifiers, collect_static_template_literals, collect_string_literals,
     collect_top_level_statement_facts, collect_void_zero_expression_statements,
-    lazy_value_sub_snippets,
+    lazy_value_sub_snippets, top_level_functions_writing_module_state,
 };
 pub use identifier::{
     is_ascii_identifier_continue, is_ascii_identifier_start, is_generated_placeholder_identifier,

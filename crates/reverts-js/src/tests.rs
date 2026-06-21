@@ -15,7 +15,7 @@ use super::{
     format_source_with_module_items_request, lazy_value_sub_snippets,
     normalize_source_for_pipeline, parse_error_message, parse_options_for, parse_source,
     sanitize_identifier, skip_block_comment, skip_line_comment,
-    verify_only_immediate_call_references,
+    top_level_functions_writing_module_state, verify_only_immediate_call_references,
 };
 use std::collections::BTreeSet;
 
@@ -2984,4 +2984,29 @@ fn format_source_transfers_function_param_names_through_full_emit_path() {
     // import passes — the point here is that the renamed param `request` rides
     // along into the call.)
     assert!(output.contains("read(request) + count"), "got: {output}");
+}
+
+#[test]
+fn flags_functions_that_mutate_module_state_not_pure_or_local_writers() {
+    let source = "\
+let queue = [];
+let count = 0;
+function enqueue(x) { queue.push(x); count = count + 1; }
+function drainLen() { const n = queue.length; queue = []; return n; }
+function pure(a) { let b = a; b = b + 1; return b; }
+function recurse(n) { if (n > 0) recurse(n - 1); }
+";
+    let pinned =
+        top_level_functions_writing_module_state(source, None, ParseGoal::TypeScript).unwrap();
+    // `enqueue` writes module-scope `count`; `drainLen` reassigns module-scope
+    // `queue`. Both mutate shared state and must be pinned.
+    assert!(pinned.contains("enqueue"), "enqueue writes module `count`");
+    assert!(
+        pinned.contains("drainLen"),
+        "drainLen reassigns module `queue`"
+    );
+    // `pure` only reassigns its own local `b` (and param `a` is untouched);
+    // `recurse` only calls itself. Neither mutates module state.
+    assert!(!pinned.contains("pure"), "pure writes only a local");
+    assert!(!pinned.contains("recurse"), "recurse mutates nothing");
 }
