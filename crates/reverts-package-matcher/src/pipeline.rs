@@ -123,6 +123,12 @@ pub fn match_packages_with_pipeline(
     run_package_match_pass(ImportablePass, &context, &mut state, &mut timing);
     run_package_match_pass(AnonymousImportablePass, &context, &mut state, &mut timing);
     run_package_match_pass(CjsWrapperEntryThunkPass, &context, &mut state, &mut timing);
+    run_package_match_pass(
+        PathNamedPackageCompletionPass,
+        &context,
+        &mut state,
+        &mut timing,
+    );
     run_package_match_pass(CacheAnchoredSurfacesPass, &context, &mut state, &mut timing);
     run_package_match_pass(AttributionPrecisionPass, &context, &mut state, &mut timing);
 
@@ -1729,6 +1735,21 @@ impl PackageMatchPass for CjsWrapperEntryThunkPass {
         ownership::cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
             context.rows,
             context.package_sources,
+            &mut state.package_report,
+        );
+    }
+}
+
+struct PathNamedPackageCompletionPass;
+
+impl PackageMatchPass for PathNamedPackageCompletionPass {
+    fn name(&self) -> &'static str {
+        "path_named_package_completion"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        ownership::force_externalize::complete_path_named_package_externalization(
+            context.rows,
             &mut state.package_report,
         );
     }

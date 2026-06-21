@@ -27,6 +27,101 @@ use crate::{
 };
 
 use super::promotion::{ExternalImportPromotion, apply_external_import_promotion};
+use crate::source::exported_members::exported_members_from_source;
+
+/// Complete externalization of a PATH-NAMED package boundary.
+///
+/// When a bundle preserves the original `…/node_modules/<pkg>/…` file layout (e.g.
+/// an Electron app's main bundle, unlike an esbuild-minified bundle whose modules
+/// are anonymous), some of a package's deep internal sub-modules cannot be
+/// source-fingerprint-matched to an import target (their minified bodies don't
+/// match the npm source), so they stay `application_source` while siblings
+/// externalize. The consumer then imports them by a relative path into the
+/// original node_modules layout, which is not emitted → `ERR_MODULE_NOT_FOUND` at
+/// runtime. But the module's OWN path unambiguously proves its package: every file
+/// under `node_modules/<pkg>/` belongs to `<pkg>`. For a package already proven
+/// externalizable (>=1 externalized module), route ALL its remaining path-named
+/// modules to the bare package — public-member exports become named imports from
+/// `<pkg>`, and internal-only modules drop out by reachability once their
+/// (also-externalized) sibling consumers' bodies are gone.
+///
+/// Safe by construction for esbuild-minified bundles: their modules are anonymous
+/// (no `node_modules/<pkg>/` path), so the path gate never fires there.
+pub(crate) fn complete_path_named_package_externalization(
+    rows: &InputRows,
+    report: &mut VersionedPackageMatchReport,
+) -> usize {
+    let mut version_by_package = BTreeMap::<String, String>::new();
+    for package_match in &report.matches {
+        if package_match.external_importable {
+            version_by_package
+                .entry(package_match.package_name.clone())
+                .or_insert_with(|| package_match.package_version.clone());
+        }
+    }
+    if version_by_package.is_empty() {
+        return 0;
+    }
+    let module_path_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module.original_name.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut promotions = Vec::new();
+    for (index, package_match) in report.matches.iter().enumerate() {
+        if package_match.external_importable {
+            continue;
+        }
+        let Some(version) = version_by_package.get(&package_match.package_name) else {
+            continue;
+        };
+        let needle = format!("node_modules/{}/", package_match.package_name);
+        let Some(path) = module_path_by_id.get(&package_match.module_id) else {
+            continue;
+        };
+        let Some(subpath_pos) = path.find(&needle) else {
+            continue;
+        };
+        let subpath = &path[subpath_pos + needle.len()..];
+        let module_source = rows
+            .module_source_slice(package_match.module_id)
+            .map(|slice| slice.source)
+            .unwrap_or_default();
+        let members = exported_members_from_source(path, module_source);
+        let source_path = format!("{}@{version}/{subpath}", package_match.package_name);
+        let resolved_file = if members.is_empty() {
+            // No exported members (side-effect / internal-only): drop via a
+            // namespace passthrough; nothing imports its members, so it prunes.
+            reverts_package::ExternalImportProofPath::semantic_path(source_path.as_str())
+        } else {
+            let members_joined = members.into_iter().collect::<Vec<_>>().join(",");
+            reverts_package::ExternalImportProofPath::export_members(
+                "barrel-reference",
+                members_joined.as_str(),
+                None,
+                source_path.as_str(),
+            )
+        };
+        promotions.push((
+            index,
+            ExternalImportPromotion {
+                module_id: package_match.module_id,
+                package_name: package_match.package_name.clone(),
+                package_version: version.clone(),
+                export_specifier: package_match.package_name.clone(),
+                resolved_file,
+                strategy: package_match.strategy,
+                function_signature_matches: package_match.function_signature_matches,
+                string_anchor_matches: package_match.string_anchor_matches,
+            },
+        ));
+    }
+    let count = promotions.len();
+    for (index, promotion) in promotions {
+        apply_external_import_promotion(report, Some(index), promotion);
+    }
+    count
+}
 
 pub(crate) fn promote_proven_external_import_targets(
     rows: &InputRows,
