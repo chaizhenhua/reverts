@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::ModuleInput;
 use reverts_ir::{BindingName, ModuleId};
+use reverts_js::is_js_keyword;
 use reverts_model::EnrichedProgram;
 
 use crate::binding_owner::BindingOwnerPlan;
@@ -1156,6 +1157,16 @@ fn emit_normal_module_exports(
     {
         if body_export_names.contains(&export) {
             file.add_export_with_source_backed(export, true);
+        } else if is_js_keyword(export.as_str()) {
+            // A graph export whose name is a reserved word (e.g. `default`, from a
+            // CommonJS `exports.default = …`) cannot be emitted as a bare named
+            // export — `export { default };` is a syntax error (only
+            // `export default …`, `x as default`, or `… from '…'` are legal). The
+            // recovered body keeps the original `exports.default = …` assignment,
+            // so skip synthesizing an invalid ESM re-export here (which would make
+            // the whole module unparseable and force the emitter to retain the raw,
+            // un-lowered body).
+            continue;
         } else {
             unbacked_graph_exports.insert(export);
         }
