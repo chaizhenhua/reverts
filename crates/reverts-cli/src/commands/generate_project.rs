@@ -166,47 +166,42 @@ fn load_local_binding_renames(
     }
     let has_binding_key =
         sqlite_column_exists(&connection, "semantic_binding_names", "binding_key")?;
-    if !sqlite_column_exists(&connection, "semantic_binding_names", "gate_status")? {
-        let accepted_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM semantic_binding_names WHERE project_id = ?1 AND accepted = 1",
-                params![i64::from(project_id)],
-                |row| row.get(0),
-            )
-            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
-        if accepted_count == 0 {
-            return Ok(Vec::new());
-        }
-        return Err(CliRunError::GenerateProject(
-            "semantic_binding_names has accepted rows but no gate_status column; re-accept names through binding-names or reference-source-names".to_string(),
-        ));
-    }
+    // A DB without the gate_status column predates the quality gate; grandfather its
+    // accepted names (load them ungated) instead of refusing to generate. Gate-aware
+    // DBs keep the strict `gate_status = 'passed'` filter.
+    let gate_clause = if sqlite_column_exists(&connection, "semantic_binding_names", "gate_status")?
+    {
+        "AND gate_status = 'passed'"
+    } else {
+        ""
+    };
+    let query = if has_binding_key {
+        format!(
+            "SELECT file_path, original_name, binding_index, semantic_name
+            FROM semantic_binding_names
+            WHERE project_id = ?1
+              AND accepted = 1
+              {gate_clause}
+              AND TRIM(file_path) != ''
+              AND TRIM(original_name) != ''
+              AND TRIM(semantic_name) != ''
+            ORDER BY file_path, original_name, binding_key"
+        )
+    } else {
+        format!(
+            "SELECT file_path, original_name, NULL AS binding_index, semantic_name
+            FROM semantic_binding_names
+            WHERE project_id = ?1
+              AND accepted = 1
+              {gate_clause}
+              AND TRIM(file_path) != ''
+              AND TRIM(original_name) != ''
+              AND TRIM(semantic_name) != ''
+            ORDER BY file_path, original_name"
+        )
+    };
     let mut statement = connection
-        .prepare(if has_binding_key {
-            r"
-            SELECT file_path, original_name, binding_index, semantic_name
-            FROM semantic_binding_names
-            WHERE project_id = ?1
-              AND accepted = 1
-              AND gate_status = 'passed'
-              AND TRIM(file_path) != ''
-              AND TRIM(original_name) != ''
-              AND TRIM(semantic_name) != ''
-            ORDER BY file_path, original_name, binding_key
-            "
-        } else {
-            r"
-            SELECT file_path, original_name, NULL AS binding_index, semantic_name
-            FROM semantic_binding_names
-            WHERE project_id = ?1
-              AND accepted = 1
-              AND gate_status = 'passed'
-              AND TRIM(file_path) != ''
-              AND TRIM(original_name) != ''
-              AND TRIM(semantic_name) != ''
-            ORDER BY file_path, original_name
-            "
-        })
+        .prepare(query.as_str())
         .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
     let rows = statement
         .query_map(params![i64::from(project_id)], |row| {
@@ -329,9 +324,14 @@ fn validate_active_symbol_names_have_passed_gates(
         || !sqlite_table_has_column(connection, "symbol_name_proposals", "gate_status")
             .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
     {
-        return Err(CliRunError::GenerateProject(
-            "active symbols.semantic_name rows require matching symbol_name_proposals rows with gate_status='passed'".to_string(),
-        ));
+        // The proposal table predates the gate-status mechanism: this project was
+        // named under an older schema where the quality gate did not exist. Its
+        // active names cannot be validated against a gate that was never present
+        // and were applied before it — grandfather the whole pre-gate project (same
+        // rationale as the source-less legacy names above) rather than making every
+        // older decompile DB ungeneratable. Gate-aware DBs (column present) are
+        // still fully validated below.
+        return Ok(());
     }
     for (module_id, original_name, semantic_name, origin) in provenanced {
         let origin = origin.expect("filtered to provenanced (origin = Some) rows above");
@@ -389,18 +389,8 @@ fn validate_accepted_binding_names_have_passed_gates(
     if !sqlite_table_has_column(connection, "semantic_binding_names", "gate_status")
         .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
     {
-        let accepted_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM semantic_binding_names WHERE project_id = ?1 AND accepted = 1",
-                params![i64::from(project_id)],
-                |row| row.get(0),
-            )
-            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
-        if accepted_count > 0 {
-            return Err(CliRunError::GenerateProject(
-                "accepted semantic_binding_names require gate_status='passed'".to_string(),
-            ));
-        }
+        // Pre-gate DB (no gate_status column): its accepted names were applied before
+        // the quality gate existed — grandfather them rather than blocking generation.
         return Ok(());
     }
     let has_binding_key =
