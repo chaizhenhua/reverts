@@ -62,6 +62,15 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     // `__esm` initializer `st`) used cross-source-file with no import — safe
     // because helpers are emitted as hoisted function declarations.
     crate::complete_runtime_helper_imports::complete_runtime_helper_imports(&mut state.plan);
+    // Add a NEW import for a referenced-but-unbound name that another, ALREADY
+    // coupled module top-level-defines as a function (e.g. execa's `aut` in the
+    // helpers file calling `sut`/`iut`/… defined in a sliced module that imports
+    // back). Load-safe: function values are used via deferred call sites, and the
+    // existing reverse edge proves the two modules are one scope/bundle. The
+    // missing `export` on the definer is added by the export completion below.
+    crate::complete_coupled_module_function_imports::complete_coupled_module_function_imports(
+        &mut state.plan,
+    );
     // Symmetric completion: every name a consumer imports from a sibling module
     // must actually be exported by it. Works from the final emitted imports, so
     // it closes export gaps the def-use graph missed (esbuild scope-hoisted
