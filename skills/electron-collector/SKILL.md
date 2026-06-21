@@ -9,7 +9,7 @@ Use this skill to turn an Electron app artifact into the standard ReverTS app
 artifact manifest, ingest it through the MCP server, and hand off to the
 standard decompile + post-export validation skills. Electron `.dmg` and `.img`
 disk images are first-class inputs when they contain a `.app` bundle. An
-already-extracted `Claude.app` directory is also a first-class input; pass the
+already-extracted `<App>.app` directory is also a first-class input; pass the
 `.app` directory, not nested `Contents/Resources/*.img` helper images, unless
 the task is binary disk-image reverse engineering rather than Electron source
 recovery.
@@ -101,9 +101,9 @@ python3 skills/electron-collector/bin/collect_electron_artifact \
   /path/to/ElectronApp.app \
   --output-manifest /tmp/electron-artifact-manifest.json \
   --stage-dir /tmp/electron-stage \
-  --ingest-include 'ion-dist/audio/voice/*.js' \
-  --ingest-include 'ion-dist/assets/v1/c*.js' \
-  --ingest-exclude 'ion-dist/assets/v1/index-*.js' \
+  --ingest-include '<renderer-dist>/feature/*.js' \
+  --ingest-include '<renderer-dist>/assets/c*.js' \
+  --ingest-exclude '<renderer-dist>/assets/index-*.js' \
   --json-report
 ```
 
