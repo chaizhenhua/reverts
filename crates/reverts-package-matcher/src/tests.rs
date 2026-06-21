@@ -321,6 +321,70 @@ fn cjs_wrapper_entry_thunk_stays_inlined_when_members_mismatch_package() {
     assert!(report.attributions.is_empty());
 }
 
+#[test]
+fn cjs_wrapper_entry_thunk_externalizes_module_exports_object_literal() {
+    // Bundle form (d): the thunk assigns its public surface via
+    // `<module>.exports = { member: local, … }` on the MODULE param (semver's
+    // index.js shape in cc-2.1.89: `nkq.exports = {parse:eg9, valid:qF9, …}`),
+    // not `<exports>.member =`. Detection must read the module-param object
+    // literal keys and externalize when they match the package's public API.
+    let module_source = "var entry=cjs((ex,mod)=>{var a1=r(),b1=s(),g1=t(),d1=u();mod.exports={alpha:a1,beta:b1,gamma:g1,delta:d1};});";
+    let (rows, mut report) = anonymous_bundle_report_with_match(
+        module_source,
+        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors,
+        128,
+        0,
+    );
+    let package_sources = package_sources_with_public_surface();
+
+    cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+        &rows,
+        &package_sources,
+        &mut report,
+    );
+
+    assert!(
+        report.matches[0].external_importable,
+        "module.exports object-literal entry thunk must externalize: {:?}",
+        report.matches[0]
+    );
+}
+
+#[test]
+fn cjs_wrapper_entry_thunk_externalizes_via_object_literal_public_surface() {
+    // Path (b): a package whose ROOT entry exposes its public surface as an
+    // object literal (`module.exports = { alpha, beta, gamma, delta }`, the
+    // semver-style aggregation) — the root source's own exported names are the
+    // public API. A thunk assigning those externalizes.
+    let module_source =
+        "var entry=cjs((ex)=>{ex.alpha=function(){};ex.beta=function(){};ex.gamma=1;ex.delta=2;});";
+    let (rows, mut report) = anonymous_bundle_report_with_match(
+        module_source,
+        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors,
+        128,
+        0,
+    );
+    let package_sources = [PackageSource::external(
+        "pkg",
+        "1.0.0",
+        "pkg",
+        "pkg@1.0.0/index.js",
+        "function alpha(){}\nfunction beta(){}\nfunction gamma(){}\nfunction delta(){}\nmodule.exports = { alpha, beta, gamma, delta };",
+    )];
+
+    cjs_wrapper_entry::promote_anonymous_cjs_wrapper_entry_thunks(
+        &rows,
+        &package_sources,
+        &mut report,
+    );
+
+    assert!(
+        report.matches[0].external_importable,
+        "object-literal-surface package entry thunk must externalize: {:?}",
+        report.matches[0]
+    );
+}
+
 /// A package whose bare specifier (`pkg`) resolves — through a re-export stub —
 /// to a public surface of `alpha`/`beta`/`gamma`/`delta`, modelling how a real
 /// npm package (e.g. react's `index.js` → `cjs/react.development.js`) exposes
