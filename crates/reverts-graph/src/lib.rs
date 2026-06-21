@@ -3028,6 +3028,40 @@ impl ImportExportGraph {
             .map(|imports| imports.iter().map(String::as_str).collect())
             .unwrap_or_default()
     }
+
+    /// Modules directly imported by `module_id`.
+    #[must_use]
+    pub fn module_imports_of(&self, module_id: ModuleId) -> Vec<ModuleId> {
+        self.module_imports
+            .get(&module_id)
+            .map(|targets| targets.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Transitive module-import closure: for every module that imports at least
+    /// one other module, the set of all modules reachable from it by following
+    /// module imports (forward, transitive). Modules with no outgoing imports are
+    /// omitted; a module inside an import cycle appears in its own reachable set.
+    #[must_use]
+    pub fn transitive_module_dependencies(&self) -> BTreeMap<ModuleId, BTreeSet<ModuleId>> {
+        let mut out = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
+        for (&owner, direct) in &self.module_imports {
+            let mut reachable = BTreeSet::<ModuleId>::new();
+            let mut stack: Vec<ModuleId> = direct.iter().copied().collect();
+            while let Some(next) = stack.pop() {
+                if !reachable.insert(next) {
+                    continue;
+                }
+                if let Some(next_targets) = self.module_imports.get(&next) {
+                    stack.extend(next_targets.iter().copied());
+                }
+            }
+            if !reachable.is_empty() {
+                out.insert(owner, reachable);
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]

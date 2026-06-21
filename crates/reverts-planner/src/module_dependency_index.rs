@@ -34,41 +34,15 @@ pub(crate) fn module_dependency_path_exists(
 pub(crate) fn module_dependency_modules_by_owner(
     program: &EnrichedProgram,
 ) -> BTreeMap<ModuleId, BTreeSet<ModuleId>> {
-    let mut direct_dependencies = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
-    let mut modules = BTreeSet::<ModuleId>::new();
-    for dependency in &program.model().input().dependencies {
-        let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
-            continue;
-        };
-        modules.insert(dependency.from_module_id);
-        modules.insert(target_module_id);
-        direct_dependencies
-            .entry(dependency.from_module_id)
-            .or_default()
-            .insert(target_module_id);
-    }
-    let mut transitive_dependencies = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
-    for module_id in modules {
-        let mut reachable = BTreeSet::<ModuleId>::new();
-        let mut stack = direct_dependencies
-            .get(&module_id)
-            .into_iter()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
-        while let Some(next) = stack.pop() {
-            if !reachable.insert(next) {
-                continue;
-            }
-            if let Some(next_modules) = direct_dependencies.get(&next) {
-                stack.extend(next_modules.iter().copied());
-            }
-        }
-        if !reachable.is_empty() {
-            transitive_dependencies.insert(module_id, reachable);
-        }
-    }
-    transitive_dependencies
+    // The module-import edges are already a first-class graph: `ImportExportGraph`
+    // is populated from the very same `input().dependencies` (Module targets), so
+    // the transitive closure is a query on it rather than a hand-rolled DFS over a
+    // re-derived adjacency map.
+    program
+        .model()
+        .graph()
+        .import_export()
+        .transitive_module_dependencies()
 }
 
 pub(crate) fn source_suppressed_package_dependency_closure(
