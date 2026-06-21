@@ -549,7 +549,7 @@ fn pipeline_promotes_short_anonymous_module_by_dependency_cluster() {
                 "pkg",
                 Some("1.0.0".to_string()),
             )
-            .with_source_file((id / 10) as u32),
+            .with_source_file(id / 10),
         );
     }
     rows.modules.push(

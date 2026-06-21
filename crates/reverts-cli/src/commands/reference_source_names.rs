@@ -5885,14 +5885,14 @@ fn match_function_lists_inner(
                 let f = &subject_fns[i];
                 let mut outs: BTreeSet<&str> = BTreeSet::new();
                 for callee in &f.callees {
-                    if let Some(target) = callee.strip_prefix("c:") {
-                        if subject_names.contains(target) {
-                            outs.insert(target);
-                            subject_in
-                                .entry(target)
-                                .or_default()
-                                .insert(f.name.as_str());
-                        }
+                    if let Some(target) = callee.strip_prefix("c:")
+                        && subject_names.contains(target)
+                    {
+                        outs.insert(target);
+                        subject_in
+                            .entry(target)
+                            .or_default()
+                            .insert(f.name.as_str());
                     }
                 }
                 subject_out.insert(f.name.as_str(), outs.len());
@@ -5919,14 +5919,14 @@ fn match_function_lists_inner(
                 let f = &reference_fns[i];
                 let mut outs: BTreeSet<&str> = BTreeSet::new();
                 for callee in &f.callees {
-                    if let Some(target) = callee.strip_prefix("c:") {
-                        if reference_names.contains(target) {
-                            outs.insert(target);
-                            reference_in
-                                .entry(target)
-                                .or_default()
-                                .insert(f.name.as_str());
-                        }
+                    if let Some(target) = callee.strip_prefix("c:")
+                        && reference_names.contains(target)
+                    {
+                        outs.insert(target);
+                        reference_in
+                            .entry(target)
+                            .or_default()
+                            .insert(f.name.as_str());
                     }
                 }
                 reference_out.insert(f.name.as_str(), outs.len());
@@ -7546,7 +7546,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         let subject_hub = fp(&["hubtoken"]);
         let hub_match = best_module_match(&subject_hub, &index);
         assert!(
-            hub_match.map_or(true, |m| m.tier == MatchTier::Low),
+            hub_match.is_none_or(|m| m.tier == MatchTier::Low),
             "hub-only overlap must not be promoted above Low"
         );
 
@@ -9023,7 +9023,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         );
         let qz = propagated.iter().find(|r| r.original_name == "qZ");
         assert!(qz.is_some(), "qZ should be propagated: {propagated:?}");
-        let qz = qz.unwrap();
+        let qz = qz.expect("qZ should be propagated");
         assert_eq!(qz.semantic_name, "loadConfig");
         assert!(qz.accepted, "2 consistent votes -> accepted");
         assert!(
@@ -9068,7 +9068,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         let references = reference_fn("util/inc.ts", "function increment(x) { return x + 1; }");
         let rows = match_function_lists(&subjects, &references, &corroborate(1, "util/inc.ts"));
         assert_eq!(rows.iter().filter(|r| r.accepted).count(), 1, "{rows:?}");
-        let accept = rows.iter().find(|r| r.accepted).unwrap();
+        let accept = rows.iter().find(|r| r.accepted).expect("an accepted row");
         assert_eq!(accept.original_name, "aB");
         assert_eq!(accept.semantic_name, "increment");
         assert_eq!(accept.reference_file, "util/inc.ts");
@@ -9310,7 +9310,10 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         let rows = match_function_lists(&subjects, &references, &corroborate(1, "util/a.ts"));
         let accept = rows.iter().find(|r| r.accepted);
         assert!(accept.is_some(), "corroboration should accept: {rows:?}");
-        assert_eq!(accept.unwrap().semantic_name, "alpha");
+        assert_eq!(
+            accept.expect("corroboration accepts").semantic_name,
+            "alpha"
+        );
     }
 
     #[test]

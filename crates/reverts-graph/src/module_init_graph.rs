@@ -573,14 +573,14 @@ mod tests {
         let read_cyclic: BTreeSet<&str> = g
             .cyclic_modules(InitEdgeFilter::ReadOnly)
             .into_iter()
-            .map(|n| g.path(n).unwrap())
+            .map(|n| g.path(n).expect("node has a path"))
             .collect();
         assert_eq!(read_cyclic, BTreeSet::from(["c.ts", "d.ts"]));
 
         let call_cyclic: BTreeSet<&str> = g
             .cyclic_modules(InitEdgeFilter::CallOnly)
             .into_iter()
-            .map(|n| g.path(n).unwrap())
+            .map(|n| g.path(n).expect("node has a path"))
             .collect();
         assert_eq!(call_cyclic, BTreeSet::from(["a.ts", "b.ts"]));
     }
@@ -598,8 +598,8 @@ mod tests {
         let mut g = ModuleInitGraph::default();
         g.insert_edge("a.ts", "b.ts", call());
         g.insert_edge("a.ts", "b.ts", read());
-        let a = g.index_of("a.ts").unwrap();
-        let b = g.index_of("b.ts").unwrap();
+        let a = g.index_of("a.ts").expect("a.ts is indexed");
+        let b = g.index_of("b.ts").expect("b.ts is indexed");
         let kinds = g.dependencies_of(a)[&b];
         assert!(kinds.call && kinds.read);
         assert_eq!(g.edge_count(InitEdgeFilter::All), 1);
@@ -624,15 +624,15 @@ mod tests {
             ("dep.ts", dep),
             ("late.ts", late),
         ]);
-        let e = graph.index_of("entry.ts").unwrap();
-        let d = graph.index_of("dep.ts").unwrap();
+        let e = graph.index_of("entry.ts").expect("entry.ts is indexed");
+        let d = graph.index_of("dep.ts").expect("dep.ts is indexed");
         let deps = graph.dependencies_of(e);
         // edge entry → dep carries BOTH call (f) and read (v)
         assert!(deps[&d].call, "f() is an init-time call edge");
         assert!(deps[&d].read, "v is an init-time read edge");
         // entry → late must NOT exist: `g` is referenced only in a deferred
         // function body, not at init time.
-        let late = graph.index_of("late.ts").unwrap();
+        let late = graph.index_of("late.ts").expect("late.ts is indexed");
         assert!(
             !deps.contains_key(&late),
             "deferred-only references are not init dependencies"
@@ -661,7 +661,7 @@ mod tests {
         let reachable: BTreeSet<&str> = graph
             .import_reachable_from(["cli.ts"])
             .into_iter()
-            .map(|n| graph.path(n).unwrap())
+            .map(|n| graph.path(n).expect("node has a path"))
             .collect();
         assert_eq!(
             reachable,
@@ -679,8 +679,8 @@ mod tests {
         let a = "import './b.js';\nexport var x = 1;\n";
         let b = "export { x } from './a.js';\n";
         let graph = ModuleInitGraph::from_emitted_modules([("a.ts", a), ("b.ts", b)]);
-        let ai = graph.index_of("a.ts").unwrap();
-        let bi = graph.index_of("b.ts").unwrap();
+        let ai = graph.index_of("a.ts").expect("a.ts is indexed");
+        let bi = graph.index_of("b.ts").expect("b.ts is indexed");
         assert_eq!(graph.import_cyclic_modules(), BTreeSet::from([ai, bi]));
         // No init-time binding references exist, so the refined init graph is acyclic.
         assert!(graph.cyclic_modules(InitEdgeFilter::All).is_empty());
@@ -703,8 +703,8 @@ mod tests {
         );
         let graph = ModuleInitGraph::from_emitted_modules([("a.ts", a), ("b.ts", b)]);
         // a → b edge exists (call), b → a does NOT (deferred use only).
-        let ai = graph.index_of("a.ts").unwrap();
-        let bi = graph.index_of("b.ts").unwrap();
+        let ai = graph.index_of("a.ts").expect("a.ts is indexed");
+        let bi = graph.index_of("b.ts").expect("b.ts is indexed");
         assert!(graph.dependencies_of(ai).contains_key(&bi));
         assert!(!graph.dependencies_of(bi).contains_key(&ai));
         // The IMPORT graph IS cyclic (a↔b mutually import)...

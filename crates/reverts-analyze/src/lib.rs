@@ -2081,7 +2081,9 @@ NativeModuleType();
         ));
         // The module owns only its handle declarator + body, leaving the `St`
         // helper definition outside as a prelude binding.
-        let module_span_start = bundle_source.find("var app=").unwrap() as u32;
+        let module_span_start = bundle_source
+            .find("var app=")
+            .expect("fixture contains `var app=`") as u32;
         let module_span_end = bundle_source.len() as u32;
         rows.modules.push(
             ModuleInput::application(ModuleId(10), "esbuild:app", "esbuild:app")

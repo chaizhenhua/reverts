@@ -1701,7 +1701,7 @@ const e = () => { a(); };
             std::collections::BTreeSet::from(["c".to_string()]),
         );
         // `c` calls nothing local.
-        assert!(edges.get("c").is_none());
+        assert!(!edges.contains_key("c"));
         // `d`'s call to `b` lives inside a NESTED function `inner` — it must be
         // attributed to the enclosing top-level `d`, and `inner` is not itself a
         // node (`helper` is free → dropped).
@@ -1709,7 +1709,7 @@ const e = () => { a(); };
             edges.get("d").cloned().unwrap_or_default(),
             std::collections::BTreeSet::from(["b".to_string()]),
         );
-        assert!(edges.get("inner").is_none());
+        assert!(!edges.contains_key("inner"));
         // A top-level arrow bound to a const is a node and resolves its callee.
         assert_eq!(
             edges.get("e").cloned().unwrap_or_default(),
