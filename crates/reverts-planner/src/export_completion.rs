@@ -31,6 +31,7 @@ use reverts_package::PackageResolution;
 use crate::EmitPlan;
 use crate::complete_referenced_imports::{module_exported_names, resolve_relative_specifier};
 use crate::local_bindings::local_bindings_in_source;
+use crate::named_specifiers::{local_named_export_specifiers, named_reexport_specifiers};
 use crate::plan::PlannedFile;
 use crate::statement_parsers::parse_generated_named_import_specifiers;
 
@@ -129,6 +130,116 @@ fn join_names(names: &BTreeSet<String>) -> String {
     names.iter().cloned().collect::<Vec<_>>().join(", ")
 }
 
+/// Remove redundant export NAMES across a file's body so each is exported at
+/// most once — `Duplicate export of 'X'` is invalid ESM. Late passes append
+/// `export { … }` statements into a single already-finalised body chunk, so the
+/// per-chunk coalescer can no longer merge them; this is a text-level sweep over
+/// the whole body. A declaration export (`export const/class/function X`,
+/// `export { … } from`, `export default`) reserves its name; a later plain
+/// `export { … }` keeps only names not yet exported, dropping the statement when
+/// nothing survives.
+pub(crate) fn dedupe_redundant_named_exports(plan: &mut EmitPlan) {
+    for file in &mut plan.files {
+        let body = file.body.join("\n");
+        let mut seen = BTreeSet::<String>::new();
+        // Pass 1: reserve names exported by non-plain forms. The parsers want a
+        // statement WITHOUT the trailing `;`.
+        for line in body.lines() {
+            let stmt = line.trim().trim_end_matches(';').trim();
+            if let Some(specifiers) = named_reexport_specifiers(stmt) {
+                for specifier in specifiers {
+                    seen.insert(specifier.exported);
+                }
+            } else if let Some(name) = declaration_export_name(line.trim()) {
+                seen.insert(name);
+            }
+        }
+        // Pass 2: trim plain `export { … };` to first occurrences only.
+        let mut changed = false;
+        let mut out = Vec::<String>::new();
+        for line in body.lines() {
+            let stmt = line.trim().trim_end_matches(';').trim();
+            if named_reexport_specifiers(stmt).is_some() {
+                out.push(line.to_string());
+                continue;
+            }
+            let Some(specifiers) = local_named_export_specifiers(stmt) else {
+                out.push(line.to_string());
+                continue;
+            };
+            let specifier_count = specifiers.len();
+            let mut kept = Vec::new();
+            for specifier in specifiers {
+                let exported = specifier.exported.clone();
+                let rendered = if specifier.is_aliased {
+                    // `local as exported` — recover the local from the raw text.
+                    raw_aliased_specifier(stmt, &exported).unwrap_or(exported.clone())
+                } else {
+                    exported.clone()
+                };
+                if seen.insert(exported) {
+                    kept.push(rendered);
+                }
+            }
+            if kept.len() == specifier_count {
+                out.push(line.to_string());
+            } else {
+                changed = true;
+                if !kept.is_empty() {
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    out.push(format!("{indent}export {{ {} }};", kept.join(", ")));
+                }
+            }
+        }
+        if changed {
+            file.body = vec![out.join("\n")];
+        }
+    }
+}
+
+/// Recover the raw `local as exported` text for an aliased specifier from the
+/// `export { … };` statement, so a trimmed list re-renders identically.
+fn raw_aliased_specifier(statement: &str, exported: &str) -> Option<String> {
+    let inner = statement
+        .trim()
+        .strip_prefix("export {")?
+        .split('}')
+        .next()?;
+    inner
+        .split(',')
+        .map(str::trim)
+        .find(|part| part.ends_with(&format!(" as {exported}")))
+        .map(str::to_string)
+}
+
+fn declaration_export_name(statement: &str) -> Option<String> {
+    let rest = statement.trim().strip_prefix("export ")?;
+    if rest.starts_with("default ") || rest == "default" {
+        return Some("default".to_string());
+    }
+    for keyword in [
+        "const ",
+        "let ",
+        "var ",
+        "function* ",
+        "function ",
+        "async function ",
+        "class ",
+    ] {
+        if let Some(after) = rest.strip_prefix(keyword) {
+            let name: String = after
+                .trim_start()
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '$')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
 /// The single bare package an externalized module stands in for, so any name it
 /// must export can be re-exported straight from that package. The namespace
 /// import is usually a structured `PlannedImport` (`import * as ns from 'pkg'`,
@@ -221,6 +332,42 @@ mod tests {
             plan.files[1].body.join("\n").contains("export { si };"),
             "{}",
             plan.files[1].body.join("\n")
+        );
+    }
+
+    #[test]
+    fn dedupe_drops_duplicate_named_export_within_one_body_chunk() {
+        let mut plan = EmitPlan::default();
+        let mut file = PlannedFile::new("modules/m.ts");
+        // One chunk holding two identical exports + a class-declared one.
+        file.push_source(
+            "class MessageEvent {}\nexport { MessageEvent };\nfunction other() {}\nexport { MessageEvent };\nexport { other };",
+        );
+        plan.push_file(file);
+
+        dedupe_redundant_named_exports(&mut plan);
+        let body = plan.files[0].body.join("\n");
+        assert_eq!(
+            body.matches("export { MessageEvent };").count(),
+            1,
+            "{body}"
+        );
+        assert!(body.contains("export { other };"), "{body}");
+    }
+
+    #[test]
+    fn dedupe_drops_plain_export_already_covered_by_declaration() {
+        let mut plan = EmitPlan::default();
+        let mut file = PlannedFile::new("modules/m.ts");
+        file.push_source("export const k = 1;\nexport { k };");
+        plan.push_file(file);
+
+        dedupe_redundant_named_exports(&mut plan);
+        let body = plan.files[0].body.join("\n");
+        assert!(body.contains("export const k = 1;"), "{body}");
+        assert!(
+            !body.contains("export { k };"),
+            "redundant plain export dropped: {body}"
         );
     }
 

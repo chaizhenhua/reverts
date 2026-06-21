@@ -2,6 +2,7 @@ mod binding_owner;
 mod byte_lexer;
 mod class_field_bindings;
 mod cli_entrypoint;
+mod commonjs_lowering;
 mod compiler_preservation;
 mod complete_referenced_imports;
 mod compute_modules;

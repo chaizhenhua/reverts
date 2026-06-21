@@ -36,6 +36,11 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     RegisterEntrypointIslandSettersPass.run(context, &mut state)?;
     EmitRuntimeHelpersPass.run(context, &mut state)?;
     EmitCliEntrypointPass.run(context, &mut state)?;
+    // Lower inlined CommonJS module bodies (`require('./x')`, `module.exports`)
+    // to ESM BEFORE reachability/prune, so a module reached only through a
+    // `require()` becomes a real `import` edge (else it is pruned) and its
+    // relative require resolves to the rerouted emitted path.
+    crate::commonjs_lowering::lower_commonjs_modules_to_esm(context.program(), &mut state.plan);
     PruneUnreachableFilesPass.run(context, &mut state)?;
     PruneDeadExportsPass.run(context, &mut state)?;
     PruneInvalidExportsPass.run(context, &mut state)?;
@@ -59,6 +64,11 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     // cross-module bindings) by re-exporting from the module's externalized
     // package or exporting a locally-defined binding.
     crate::export_completion::complete_cross_module_exports(&mut state.plan);
+    // Several late passes (CommonJS lowering, scope-hoisted export emission,
+    // cross-module reconciliation) append `export { … }` statements into an
+    // already-finalised single body chunk, which the per-chunk coalescer can no
+    // longer merge — sweep the whole body text to drop any duplicate export name.
+    crate::export_completion::dedupe_redundant_named_exports(&mut state.plan);
     Ok(state.plan)
 }
 
