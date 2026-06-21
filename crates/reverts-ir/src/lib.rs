@@ -694,6 +694,12 @@ pub struct ResolvedBinding {
     /// mutation tracking). A `const` is never reassigned; a `let`/`var` that
     /// is never reassigned can be re-emitted as `const`.
     pub reassigned: bool,
+    /// Number of scope-resolved references that read this exact binding. Unlike
+    /// a name-keyed read count, two same-named bindings in different scopes are
+    /// counted independently.
+    pub read_count: u32,
+    /// Number of scope-resolved references that write this exact binding.
+    pub write_count: u32,
 }
 
 impl ResolvedBinding {
@@ -707,6 +713,14 @@ impl ResolvedBinding {
     #[must_use]
     pub fn can_be_const(&self) -> bool {
         self.declaration.is_const_upgradeable() && !self.reassigned
+    }
+
+    /// `true` when no resolved reference ever reads this binding. A scope-correct
+    /// dead-binding signal: the name-keyed graph cannot distinguish an unread
+    /// local from a same-named binding that is read elsewhere.
+    #[must_use]
+    pub fn is_unread(&self) -> bool {
+        self.read_count == 0
     }
 }
 
@@ -802,6 +816,21 @@ impl ResolvedSymbolGraph {
                 bindings
                     .values()
                     .filter(|binding| binding.is_module_scope())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Bindings in `module_id` that no resolved reference ever reads, ordered by
+    /// symbol id. Scope-correct dead-binding candidates.
+    #[must_use]
+    pub fn unread_bindings(&self, module_id: ModuleId) -> Vec<&ResolvedBinding> {
+        self.bindings
+            .get(&module_id)
+            .map(|bindings| {
+                bindings
+                    .values()
+                    .filter(|binding| binding.is_unread())
                     .collect()
             })
             .unwrap_or_default()
@@ -1053,6 +1082,8 @@ mod tests {
             scope_depth,
             declaration: DeclarationKind::Let,
             reassigned: false,
+            read_count: 0,
+            write_count: 0,
         }
     }
 
@@ -1096,6 +1127,8 @@ mod tests {
                 scope_depth: 0,
                 declaration: DeclarationKind::Let,
                 reassigned: false,
+                read_count: 1,
+                write_count: 0,
             },
         );
         graph.record(
@@ -1106,6 +1139,8 @@ mod tests {
                 scope_depth: 0,
                 declaration: DeclarationKind::Var,
                 reassigned: true,
+                read_count: 0,
+                write_count: 1,
             },
         );
         graph.record(
@@ -1116,6 +1151,8 @@ mod tests {
                 scope_depth: 0,
                 declaration: DeclarationKind::Const,
                 reassigned: false,
+                read_count: 2,
+                write_count: 0,
             },
         );
 
@@ -1123,21 +1160,21 @@ mod tests {
         assert!(
             graph
                 .module_scope_binding(ModuleId(1), "immutable")
-                .unwrap()
+                .expect("immutable present")
                 .can_be_const()
         );
         // reassigned var → must stay mutable.
         assert!(
             !graph
                 .module_scope_binding(ModuleId(1), "counter")
-                .unwrap()
+                .expect("counter present")
                 .can_be_const()
         );
         // already const → not an "upgrade".
         assert!(
             !graph
                 .module_scope_binding(ModuleId(1), "frozen")
-                .unwrap()
+                .expect("frozen present")
                 .can_be_const()
         );
 
@@ -1148,6 +1185,55 @@ mod tests {
             Some(DeclarationKind::Var),
         );
         assert_eq!(graph.module_scope_binding(ModuleId(1), "absent"), None);
+    }
+
+    #[test]
+    fn resolved_reference_counts_are_scope_correct() {
+        // Two same-named bindings: one only read, one only written. A name-keyed
+        // graph would report `x` as both read and written; the resolved graph
+        // attributes each to its own symbol.
+        let mut graph = ResolvedSymbolGraph::default();
+        graph.record(
+            ModuleId(1),
+            ResolvedBinding {
+                symbol: ResolvedSymbolId(0),
+                name: BindingName::new("x"),
+                scope_depth: 1,
+                declaration: DeclarationKind::Const,
+                reassigned: false,
+                read_count: 3,
+                write_count: 0,
+            },
+        );
+        graph.record(
+            ModuleId(1),
+            ResolvedBinding {
+                symbol: ResolvedSymbolId(1),
+                name: BindingName::new("x"),
+                scope_depth: 1,
+                declaration: DeclarationKind::Let,
+                reassigned: true,
+                read_count: 0,
+                write_count: 2,
+            },
+        );
+
+        let read_only = graph
+            .binding(ModuleId(1), ResolvedSymbolId(0))
+            .expect("read-only symbol present");
+        let write_only = graph
+            .binding(ModuleId(1), ResolvedSymbolId(1))
+            .expect("write-only symbol present");
+        assert_eq!((read_only.read_count, read_only.write_count), (3, 0));
+        assert_eq!((write_only.read_count, write_only.write_count), (0, 2));
+
+        // The write-only binding is unread (dead-store candidate); the read-only
+        // one is not.
+        assert!(write_only.is_unread());
+        assert!(!read_only.is_unread());
+        let unread = graph.unread_bindings(ModuleId(1));
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].symbol, ResolvedSymbolId(1));
     }
 
     #[test]

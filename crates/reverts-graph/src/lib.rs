@@ -1577,6 +1577,15 @@ fn project_resolved_symbols(module_id: ModuleId, semantic: &Semantic<'_>) -> Res
             symbols.get_flags(symbol_id),
             is_parameter(semantic, symbol_id),
         );
+        let (read_count, write_count) = symbols.get_resolved_references(symbol_id).fold(
+            (0, 0),
+            |(reads, writes), reference| {
+                (
+                    reads + u32::from(reference.is_read()),
+                    writes + u32::from(reference.is_write()),
+                )
+            },
+        );
         graph.record(
             module_id,
             ResolvedBinding {
@@ -1585,6 +1594,8 @@ fn project_resolved_symbols(module_id: ModuleId, semantic: &Semantic<'_>) -> Res
                 scope_depth,
                 declaration,
                 reassigned: symbols.symbol_is_mutated(symbol_id),
+                read_count,
+                write_count,
             },
         );
     }
@@ -3049,36 +3060,16 @@ class Cls {}
         assert_eq!(kind("dep"), Some(DeclarationKind::Import));
 
         // Reassignment / const-upgrade signal.
-        assert!(
-            !resolved
-                .module_scope_binding(ModuleId(1), "keep")
-                .unwrap()
-                .reassigned
-        );
-        assert!(
+        let module_scope = |name: &str| {
             resolved
-                .module_scope_binding(ModuleId(1), "mutated")
-                .unwrap()
-                .reassigned
-        );
-        assert!(
-            !resolved
-                .module_scope_binding(ModuleId(1), "mutated")
-                .unwrap()
-                .can_be_const()
-        );
-        assert!(
-            resolved
-                .module_scope_binding(ModuleId(1), "stable")
-                .unwrap()
-                .can_be_const()
-        );
-        assert!(
-            resolved
-                .module_scope_binding(ModuleId(1), "legacy")
-                .unwrap()
-                .can_be_const()
-        );
+                .module_scope_binding(ModuleId(1), name)
+                .expect("module-scope binding present")
+        };
+        assert!(!module_scope("keep").reassigned);
+        assert!(module_scope("mutated").reassigned);
+        assert!(!module_scope("mutated").can_be_const());
+        assert!(module_scope("stable").can_be_const());
+        assert!(module_scope("legacy").can_be_const());
 
         // Function parameters are nested and classified distinctly from `var`.
         for param in ["a", "b"] {
@@ -3087,6 +3078,52 @@ class Cls {}
             assert_eq!(bindings[0].declaration, DeclarationKind::Parameter);
             assert!(!bindings[0].is_module_scope());
         }
+    }
+
+    #[test]
+    fn from_input_tracks_scope_correct_reference_counts() {
+        // `v` is declared in two functions: read-only in one, write-only (dead
+        // store) in the other. The name-keyed def-use graph cannot tell them
+        // apart (and does not track nested bindings at all); the resolved graph
+        // attributes reads and writes to the correct symbol.
+        let source = "\
+function reader() { const v = compute(); return v + v; }
+function writer() { let v = 0; v = 1; }
+";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let resolved = graph.resolved_symbols();
+
+        let vs = resolved.symbols_named(ModuleId(1), "v");
+        assert_eq!(vs.len(), 2, "two distinct `v` bindings: {vs:?}");
+        let read_only = vs.iter().find(|b| b.read_count > 0).expect("a read `v`");
+        let write_only = vs
+            .iter()
+            .find(|b| b.write_count > 0)
+            .expect("a written `v`");
+
+        assert_eq!((read_only.read_count, read_only.write_count), (2, 0));
+        assert_eq!((write_only.read_count, write_only.write_count), (0, 1));
+        assert!(!read_only.is_module_scope());
+
+        // The write-only `v` is an unread dead-store candidate; the read one is not.
+        assert!(write_only.is_unread());
+        assert!(!read_only.is_unread());
+        assert!(
+            resolved
+                .unread_bindings(ModuleId(1))
+                .iter()
+                .any(|binding| binding.symbol == write_only.symbol),
+        );
     }
 
     #[test]
