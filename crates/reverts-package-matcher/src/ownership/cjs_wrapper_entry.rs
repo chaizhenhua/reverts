@@ -353,6 +353,18 @@ impl<'a> Visit<'a> for StringLiteralAnchorVisitor<'_> {
             self.found = true;
         }
     }
+
+    // Template-literal static text is just as much a preserved string anchor as a
+    // plain literal — minified SDK code logs its package name in template strings
+    // (e.g. `@smithy/node-http-handler - the request …`). Scan the quasis too.
+    fn visit_template_literal(&mut self, literal: &oxc_ast::ast::TemplateLiteral<'a>) {
+        for quasi in &literal.quasis {
+            if quasi.value.raw.as_str().contains(self.needle) {
+                self.found = true;
+            }
+        }
+        oxc_ast::visit::walk::walk_template_literal(self, literal);
+    }
 }
 
 struct ExportAssignmentVisitor<'s> {
