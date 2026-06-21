@@ -282,6 +282,12 @@ pub(crate) fn classify_emitted_entry(
     if !universe.first_party.contains(&entry.module_id.0) {
         return None;
     }
+    // Dead module-scope bindings (esbuild vestigial hoists / unused unexported
+    // constants — never read, written, or exported) carry no semantic role, so
+    // they are excluded from both the naming worklist and the denominator.
+    if entry.dead {
+        return None;
+    }
     // Named means the emitted binding came from an explicit accepted
     // `symbols.semantic_name` row. Meaningful-looking preserved source names
     // are still unnamed until accepted by the semantic naming mechanism.
@@ -736,7 +742,23 @@ mod tests {
             semantic_named,
             file_path: format!("modules/{module_id}.ts"),
             function_like,
+            dead: false,
         }
+    }
+
+    #[test]
+    fn classify_excludes_dead_binding_from_worklist() {
+        let universe = universe(&[1], &[]);
+        let mut dead_entry = entry(1, "A", "A", false, false);
+        dead_entry.dead = true;
+        assert!(
+            classify_emitted_entry(&dead_entry, &universe).is_none(),
+            "dead esbuild hoist must be excluded from the naming worklist",
+        );
+        // A live (non-dead) binding in the same module is still classified.
+        assert!(
+            classify_emitted_entry(&entry(1, "live", "live", false, false), &universe).is_some()
+        );
     }
 
     #[test]

@@ -68,18 +68,21 @@ fn symbol_index_entry_from_json(
             )
         })
     })?;
-    let function_like = row
-        .get("function_like")
-        .map(|value| {
-            value.as_bool().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("symbol index row {index} field `function_like` must be a boolean"),
-                )
+    let bool_field = |name: &str| {
+        row.get(name)
+            .map(|value| {
+                value.as_bool().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("symbol index row {index} field `{name}` must be a boolean"),
+                    )
+                })
             })
-        })
-        .transpose()?
-        .unwrap_or(false);
+            .transpose()
+            .map(|value| value.unwrap_or(false))
+    };
+    let function_like = bool_field("function_like")?;
+    let dead = bool_field("dead")?;
     Ok(SymbolIndexEntry {
         module_id: ModuleId(module_id),
         original_name: string_field("original_name")?,
@@ -87,5 +90,6 @@ fn symbol_index_entry_from_json(
         semantic_named,
         file_path: string_field("file_path")?,
         function_like,
+        dead,
     })
 }

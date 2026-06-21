@@ -8,7 +8,7 @@ use oxc_ast::{
         Argument, ArrowFunctionExpression, BindingPatternKind, BlockStatement, CallExpression,
         Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
         Expression, FunctionBody, IdentifierReference, ImportDeclaration, ImportExpression,
-        NewExpression, Program, Statement, StringLiteral,
+        ModuleExportName, NewExpression, Program, Statement, StringLiteral,
     },
     visit::walk::{
         walk_block_statement, walk_call_expression, walk_export_all_declaration,
@@ -18,8 +18,10 @@ use oxc_ast::{
     },
 };
 use oxc_parser::Parser;
+use oxc_semantic::SemanticBuilder;
 use oxc_span::GetSpan;
 use oxc_syntax::operator::{LogicalOperator, UnaryOperator};
+use oxc_syntax::symbol::SymbolFlags;
 
 use crate::errors::{JsError, ParseError, ParseGoal, Result};
 use crate::parse::{parse_options_for, source_type_candidates};
@@ -314,6 +316,118 @@ pub fn collect_top_level_statement_facts(
     }
 
     Err(JsError::ParseFailed(errors))
+}
+
+/// Module-scope binding names that are dead in the emitted module: declared but
+/// never read or written, and not exported. These are esbuild's vestigial
+/// hoists (`var A, i, n, o, s;` shadowed by function-local `let`s) and unused
+/// unexported constants — they carry no semantic role and should not enter the
+/// naming worklist.
+///
+/// Implemented via oxc's resolved references (the same read/write signal as
+/// `ResolvedSymbolGraph::unread_bindings`): a root-scope symbol with zero
+/// resolved references and no export is dead. Exported bindings are kept (they
+/// are API surface even when unused inside the module); imports are skipped.
+pub fn collect_dead_top_level_bindings(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<BTreeSet<String>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let exported = collect_exported_local_names(&parsed.program);
+        let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+        let symbols = semantic.symbols();
+        let scopes = semantic.scopes();
+        let mut dead = BTreeSet::new();
+        for symbol_id in symbols.symbol_ids() {
+            // Module (root) scope only — a root scope has no parent.
+            if scopes
+                .get_parent_id(symbols.get_scope_id(symbol_id))
+                .is_some()
+            {
+                continue;
+            }
+            // Imports are not naming targets; never treat them as dead bindings.
+            if symbols
+                .get_flags(symbol_id)
+                .intersects(SymbolFlags::Import | SymbolFlags::TypeImport)
+            {
+                continue;
+            }
+            let name = symbols.get_name(symbol_id);
+            if exported.contains(name) {
+                continue;
+            }
+            // Zero resolved references == never read or written anywhere.
+            if symbols.get_resolved_references(symbol_id).next().is_none() {
+                dead.insert(name.to_string());
+            }
+        }
+        return Ok(dead);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+/// Local binding names that the module exports (declaration form
+/// `export var/function/class X`, named specifiers `export { local }` without a
+/// `from` source, and named default declarations). Re-exports
+/// (`export { x } from './m'`) bind no local symbol and are excluded.
+fn collect_exported_local_names(program: &Program<'_>) -> BTreeSet<String> {
+    let mut exported = BTreeSet::new();
+    for statement in &program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(declaration) = &export.declaration {
+                    exported.extend(export_declaration_binding_names(declaration));
+                }
+                if export.source.is_none() {
+                    for specifier in &export.specifiers {
+                        if let Some(local) = module_export_local_name(&specifier.local) {
+                            exported.insert(local.to_string());
+                        }
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                    if let Some(id) = &function.id {
+                        exported.insert(id.name.as_str().to_string());
+                    }
+                }
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                    if let Some(id) = &class.id {
+                        exported.insert(id.name.as_str().to_string());
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    exported
+}
+
+fn module_export_local_name<'a>(name: &'a ModuleExportName<'a>) -> Option<&'a str> {
+    match name {
+        ModuleExportName::IdentifierName(identifier) => Some(identifier.name.as_str()),
+        ModuleExportName::IdentifierReference(identifier) => Some(identifier.name.as_str()),
+        ModuleExportName::StringLiteral(_) => None,
+    }
 }
 
 pub fn collect_static_resource_specifiers(

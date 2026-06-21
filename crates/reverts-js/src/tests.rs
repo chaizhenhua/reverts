@@ -4,12 +4,13 @@ use super::{
     CompilerLowering, FormatSourceRequest, FunctionParamRename, GeneratedExport, GeneratedImport,
     GeneratedRename, ImportUsageScope, JsError, LazyBodyClassification, ParseGoal,
     TopLevelStatementKind, classify_import_usage_scope, classify_lazy_module_body,
-    collect_file_url_source_location_rewrites, collect_identifier_inventory,
-    collect_identifier_read_facts, collect_path_builder_calls, collect_static_resource_specifiers,
-    collect_static_template_literals, collect_string_literals, collect_top_level_statement_facts,
-    collect_type_coverage_stats, collect_void_zero_expression_statements,
-    extract_lazy_module_eager_value, format_source_minified, format_source_pretty,
-    format_source_with_module_items, format_source_with_module_items_and_renames,
+    collect_dead_top_level_bindings, collect_file_url_source_location_rewrites,
+    collect_identifier_inventory, collect_identifier_read_facts, collect_path_builder_calls,
+    collect_static_resource_specifiers, collect_static_template_literals, collect_string_literals,
+    collect_top_level_statement_facts, collect_type_coverage_stats,
+    collect_void_zero_expression_statements, extract_lazy_module_eager_value,
+    format_source_minified, format_source_pretty, format_source_with_module_items,
+    format_source_with_module_items_and_renames,
     format_source_with_module_items_and_renames_with_report,
     format_source_with_module_items_request, lazy_value_sub_snippets,
     normalize_source_for_pipeline, parse_error_message, parse_options_for, parse_source,
@@ -38,6 +39,43 @@ fn parses_typescript_without_external_tooling() {
     let source = "const answer: number = 42;";
 
     assert!(parse_source(source, Some(Path::new("fixture.ts")), ParseGoal::TypeScript).is_ok());
+}
+
+#[test]
+fn dead_top_level_bindings_are_unreferenced_unexported_module_scope() {
+    // `vestige` and `bytes` are declared but never read/written and not exported
+    // (esbuild hoist + unused const). `shadowed` is a module var shadowed by a
+    // function-local of the same name — the module binding is dead. Everything
+    // exported or actually used must NOT be flagged.
+    let source = "\
+var vestige;
+var bytes = 1048576;
+var shadowed;
+var used = 2;
+globalThis.sink = used;
+function f() { let shadowed = 1; return shadowed; }
+globalThis.fn = f;
+const exportedConst = 3;
+var exportedSpecifier = 4;
+export { exportedConst, exportedSpecifier };
+";
+    let dead = collect_dead_top_level_bindings(
+        source,
+        Some(Path::new("fixture.ts")),
+        ParseGoal::TypeScript,
+    )
+    .expect("parse");
+
+    assert!(dead.contains("vestige"), "{dead:?}");
+    assert!(dead.contains("bytes"), "{dead:?}");
+    assert!(
+        dead.contains("shadowed"),
+        "module `shadowed` is dead: {dead:?}"
+    );
+    assert!(!dead.contains("used"), "used is read: {dead:?}");
+    assert!(!dead.contains("f"), "f is referenced: {dead:?}");
+    assert!(!dead.contains("exportedConst"), "exported: {dead:?}");
+    assert!(!dead.contains("exportedSpecifier"), "exported: {dead:?}");
 }
 
 #[test]

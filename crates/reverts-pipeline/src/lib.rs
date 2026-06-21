@@ -74,6 +74,11 @@ pub struct SymbolIndexEntry {
     pub file_path: String,
     /// Whether the emitted declaration is a function or class (vs a value/const).
     pub function_like: bool,
+    /// Whether the binding is dead in its emitted module: an unexported
+    /// module-scope binding that is never read or written (an esbuild vestigial
+    /// hoist or unused constant). Dead bindings carry no semantic role and are
+    /// excluded from the naming worklist/denominator.
+    pub dead: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -118,7 +123,10 @@ fn build_symbol_index(
 ) -> Vec<SymbolIndexEntry> {
     use std::path::Path;
 
-    use reverts_js::{ParseGoal, TopLevelStatementKind, collect_top_level_statement_facts};
+    use reverts_js::{
+        ParseGoal, TopLevelStatementKind, collect_dead_top_level_bindings,
+        collect_top_level_statement_facts,
+    };
 
     // Emitted file path -> owning module. Merged modules collapse to the last
     // writer, which is acceptable for binding attribution.
@@ -162,6 +170,15 @@ fn build_symbol_index(
         ) else {
             continue;
         };
+        // Dead (unexported, unreferenced) module-scope bindings — esbuild
+        // vestigial hoists and unused constants — carry no semantic role and are
+        // excluded from the naming worklist downstream.
+        let dead_bindings = collect_dead_top_level_bindings(
+            &file.source,
+            Some(Path::new(&file.path)),
+            ParseGoal::TypeScript,
+        )
+        .unwrap_or_default();
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for fact in facts {
             if !matches!(
@@ -195,6 +212,7 @@ fn build_symbol_index(
                 } else {
                     (emitted_name.clone(), false)
                 };
+                let dead = dead_bindings.contains(&emitted_name);
                 entries.push(SymbolIndexEntry {
                     module_id,
                     original_name,
@@ -202,6 +220,7 @@ fn build_symbol_index(
                     semantic_named,
                     file_path: file.path.clone(),
                     function_like,
+                    dead,
                 });
             }
         }

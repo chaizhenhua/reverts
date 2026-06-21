@@ -44,8 +44,9 @@ pub use errors::{JsError, ParseError, ParseGoal, Result, parse_error_message};
 pub use facts::{
     IdentifierReadFact, LazyValueSubSnippet, PathBuilderCallFact, SourceLocationRewriteFact,
     StatementSpanFact, StaticModuleSpecifierFact, StaticTemplateLiteralFact, StringLiteralFact,
-    TopLevelStatementFact, TopLevelStatementKind, collect_file_url_source_location_rewrites,
-    collect_identifier_read_facts, collect_path_builder_calls, collect_static_module_specifiers,
+    TopLevelStatementFact, TopLevelStatementKind, collect_dead_top_level_bindings,
+    collect_file_url_source_location_rewrites, collect_identifier_read_facts,
+    collect_path_builder_calls, collect_static_module_specifiers,
     collect_static_resource_specifiers, collect_static_template_literals, collect_string_literals,
     collect_top_level_statement_facts, collect_void_zero_expression_statements,
     lazy_value_sub_snippets,
