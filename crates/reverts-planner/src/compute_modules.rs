@@ -14,6 +14,9 @@ use reverts_model::EnrichedProgram;
 use crate::binding_owner::BindingOwnerPlan;
 use crate::compiler_preservation::CompilerPreservationDecision;
 use crate::local_bindings::local_bindings_in_source;
+use crate::named_specifiers::{
+    local_named_export_specifiers, named_reexport_specifiers, source_statements,
+};
 use crate::node_builtin_require::NodeBuiltinRequireRewrite;
 use crate::package_runtime::{
     PackageRuntimeHelperKey, PackageRuntimeHelperUsage, package_runtime_owner_for_module,
@@ -1106,6 +1109,27 @@ fn is_plain_js_identifier(name: &str) -> bool {
     name.len() >= 2 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
+/// Export NAMES the recovered body already emits — the alias target of a local
+/// export (`export { F as f }` → `f`), a bare local export (`export { st }` →
+/// `st`), and re-export names (`export { x } from "…"` → `x`). Used to decide
+/// which graph-declared exports the body does NOT carry and must be emitted
+/// explicitly.
+pub(crate) fn body_emitted_export_names(file: &PlannedFile) -> BTreeSet<BindingName> {
+    let mut names = BTreeSet::new();
+    for statement in file
+        .body
+        .iter()
+        .flat_map(|chunk| source_statements(chunk.as_str()))
+    {
+        let specifiers = local_named_export_specifiers(statement)
+            .or_else(|| named_reexport_specifiers(statement));
+        for specifier in specifiers.into_iter().flatten() {
+            names.insert(BindingName::new(specifier.exported));
+        }
+    }
+    names
+}
+
 fn emit_normal_module_exports(
     program: &EnrichedProgram,
     module_id: ModuleId,
@@ -1114,13 +1138,33 @@ fn emit_normal_module_exports(
     migrated_local_bindings: &BTreeSet<BindingName>,
     file: &mut PlannedFile,
 ) {
+    // A graph-declared export is only "source-backed" if the recovered body
+    // actually carries an `export` statement for that name. esbuild exposes
+    // some cross-module bindings purely through scope hoisting (a sibling
+    // module reads the hoisted internal name directly), never through the
+    // module's own `__export` map — so the def-use extractor records the export
+    // while the recovered body has no statement for it. Marking those
+    // source-backed silently drops the export and dangles every consumer
+    // import. Emit an explicit `export { … }` for the names the body omits.
+    let body_export_names = body_emitted_export_names(file);
+    let mut unbacked_graph_exports = BTreeSet::<BindingName>::new();
     for export in program
         .model()
         .graph()
         .import_export()
         .exports_for(module_id)
     {
-        file.add_export_with_source_backed(export, true);
+        if body_export_names.contains(&export) {
+            file.add_export_with_source_backed(export, true);
+        } else {
+            unbacked_graph_exports.insert(export);
+        }
+    }
+    if !unbacked_graph_exports.is_empty() {
+        file.push_source(named_export_statement(unbacked_graph_exports.iter()));
+        for export in unbacked_graph_exports {
+            file.add_export_with_source_backed(export, true);
+        }
     }
     // Phase 10b: bindings this module now owns must be exported so
     // direct-routed consumers resolve through the live binding. Skip

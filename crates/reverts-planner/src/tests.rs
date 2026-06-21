@@ -2451,6 +2451,31 @@ fn emit_plan_drops_generated_export_colliding_with_an_alias_export_name() {
 }
 
 #[test]
+fn body_emitted_export_names_reads_alias_bare_and_reexport_names() {
+    // The body-export-name reader underpins export-completion: a graph-declared
+    // export absent from these names must be emitted explicitly so esbuild
+    // scope-hoisted cross-module bindings are not silently dropped.
+    let mut file = PlannedFile::new("modules/asset.ts");
+    file.push_source("const F = 1; const st = 2;");
+    file.push_source("export { F as f, Q as g };");
+    file.push_source("export { st };");
+    file.push_source("export { gamma } from './gamma.js';");
+
+    let names = super::compute_modules::body_emitted_export_names(&file);
+
+    // Export NAMES (alias targets, bare, re-export), NOT the internal bindings.
+    assert!(names.contains(&BindingName::new("f")), "{names:?}");
+    assert!(names.contains(&BindingName::new("g")), "{names:?}");
+    assert!(names.contains(&BindingName::new("st")), "{names:?}");
+    assert!(names.contains(&BindingName::new("gamma")), "{names:?}");
+    // The internal binding `F` is exported only under the name `f`.
+    assert!(!names.contains(&BindingName::new("F")), "{names:?}");
+    // A binding the body never exports (`si`) is absent — emit-completion will
+    // add it explicitly when the graph declares it.
+    assert!(!names.contains(&BindingName::new("si")), "{names:?}");
+}
+
+#[test]
 fn emit_plan_coalesces_only_consecutive_plain_var_declarations() {
     let mut file = PlannedFile::new("modules/runtime/source-1-helpers.ts");
     file.push_source(concat!(
