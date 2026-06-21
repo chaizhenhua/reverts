@@ -694,6 +694,7 @@ function ownedB() { return 1; }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -762,6 +763,7 @@ function runtimeReader() { return ownedA(); }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -832,6 +834,7 @@ function runtimeReader() { return ownedA(); }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -912,6 +915,7 @@ function runtimeReader() { return ownedA(); }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -992,6 +996,7 @@ function runtimeDep() { return 1; }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -1067,6 +1072,7 @@ function noop() {}\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -1127,6 +1133,7 @@ function leaf() { return 1; }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -1214,6 +1221,7 @@ function localDep() { return 1; }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -1319,6 +1327,7 @@ function ownedB() { return 1; }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -1390,6 +1399,7 @@ function ownedB() { return ownedA(); }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -1453,6 +1463,7 @@ function ownedSmall() { return 1; }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -1531,6 +1542,7 @@ fn global_owner_rebuild_infers_namespace_target_owner_from_namespace_object() {
                     source: "var ns = {};".to_string(),
                     byte_start: 0,
                     sub_snippets: Vec::new(),
+                    augmentations: Vec::new(),
                 },
             ),
             (
@@ -1539,6 +1551,7 @@ fn global_owner_rebuild_infers_namespace_target_owner_from_namespace_object() {
                     source: "function exportedOnly() { return 1; }".to_string(),
                     byte_start: 13,
                     sub_snippets: Vec::new(),
+                    augmentations: Vec::new(),
                 },
             ),
         ]),
@@ -1596,6 +1609,7 @@ function after() { return missing(); }\n"
                     source: "function before() { return 1; }".to_string(),
                     byte_start: 0,
                     sub_snippets: Vec::new(),
+                    augmentations: Vec::new(),
                 },
             ),
             (
@@ -1604,6 +1618,7 @@ function after() { return missing(); }\n"
                     source: "function missing() { return before(); }".to_string(),
                     byte_start: 32,
                     sub_snippets: Vec::new(),
+                    augmentations: Vec::new(),
                 },
             ),
             (
@@ -1612,6 +1627,7 @@ function after() { return missing(); }\n"
                     source: "function after() { return missing(); }".to_string(),
                     byte_start: 75,
                     sub_snippets: Vec::new(),
+                    augmentations: Vec::new(),
                 },
             ),
         ]),
@@ -1661,6 +1677,7 @@ function ownedA() { return 1; }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -1729,6 +1746,7 @@ class Owned {}\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -1800,6 +1818,7 @@ class Owned {}\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -1871,6 +1890,7 @@ fn global_owner_rebuild_allows_folded_lazy_reader_to_import_owner() {
                 source: "function ownedA() { return 1; }".to_string(),
                 byte_start: 0,
                 sub_snippets: Vec::new(),
+                augmentations: Vec::new(),
             },
         )]),
         namespace_exports: Vec::new(),
@@ -1923,6 +1943,7 @@ fn global_owner_rebuild_allows_lazy_contained_owner_runtime_writes() {
                 source: "function ownedA() { return 1; }".to_string(),
                 byte_start: 0,
                 sub_snippets: Vec::new(),
+                augmentations: Vec::new(),
             },
         )]),
         namespace_exports: Vec::new(),
@@ -1978,6 +1999,7 @@ fn global_owner_rebuild_rejects_eager_owner_runtime_writes() {
                 source: "function ownedA() { return 1; }".to_string(),
                 byte_start: 0,
                 sub_snippets: Vec::new(),
+                augmentations: Vec::new(),
             },
         )]),
         namespace_exports: Vec::new(),
@@ -2030,6 +2052,7 @@ fn global_owner_rebuild_rejects_top_level_owner_lazy_write_call() {
                 source: "function ownedA() { return 1; }".to_string(),
                 byte_start: 0,
                 sub_snippets: Vec::new(),
+                augmentations: Vec::new(),
             },
         )]),
         namespace_exports: Vec::new(),
@@ -2086,6 +2109,7 @@ fn global_owner_rebuild_rejects_eager_folded_reader_import_owner_edge() {
                 source: "function ownedA() { return 1; }".to_string(),
                 byte_start: 0,
                 sub_snippets: Vec::new(),
+                augmentations: Vec::new(),
             },
         )]),
         namespace_exports: Vec::new(),
@@ -2147,6 +2171,7 @@ function target() { return 1; }\n";
                     source: "var ns = {};".to_string(),
                     byte_start: 0,
                     sub_snippets: Vec::new(),
+                    augmentations: Vec::new(),
                 },
             ),
             (
@@ -2155,6 +2180,7 @@ function target() { return 1; }\n";
                     source: "function target() { return 1; }".to_string(),
                     byte_start: "var ns = {};\n".len() as u32,
                     sub_snippets: Vec::new(),
+                    augmentations: Vec::new(),
                 },
             ),
         ]),
@@ -2302,6 +2328,7 @@ fn runtime_helper_closure_excludes_module_owned_transitive_bindings() {
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -5500,6 +5527,58 @@ fn entrypoint_island_inlines_enum_augmentation_iife_with_its_binding() {
 }
 
 #[test]
+fn entrypoint_island_inlines_static_member_augmentation_with_its_binding() {
+    // zod attaches each class's factory via a top-level static member
+    // assignment `ZodBoolean.create = (e) => new ZodBoolean(e);` that follows
+    // the `class ZodBoolean {}` declaration. The entrypoint island must inline
+    // that assignment alongside the class, otherwise `ZodBoolean.create` is
+    // `undefined` and a captured `const et = ZodBoolean.create` (then `et()`)
+    // throws `et is not a function` at runtime.
+    let planner = ImportExportPlanner;
+    let prelude = "class ZodBoolean { parse(e) { return e; } }\nZodBoolean.create = (e) => new ZodBoolean(e);\nfunction main() { return ZodBoolean.create(!0); }\n";
+    let body = "var cliEntry = () => 'ok';\n";
+    let tail = "main();\n";
+    let source = format!("{prelude}{body}{tail}");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                prelude.len() as u32,
+                (prelude.len() + body.len()) as u32,
+            )),
+    );
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let enriched = reverts_model::EnrichedProgram::new(
+        model,
+        reverts_model::SemanticNameMap::default(),
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
+    let compact: String = entrypoint_source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+
+    assert!(
+        compact.contains("classZodBoolean"),
+        "island keeps the class declaration:\n{entrypoint_source}"
+    );
+    assert!(
+        compact.contains("ZodBoolean.create=(e)=>newZodBoolean(e)"),
+        "island must inline the static member augmentation, not just the class:\n{entrypoint_source}"
+    );
+}
+
+#[test]
 fn entrypoint_runtime_and_module_setters_share_single_helper_state() {
     let planner = ImportExportPlanner;
     let prelude = "var yA;\nfunction main() { initModule(); return yA(); }\n";
@@ -5864,6 +5943,7 @@ fn strip_runtime_snippet_sources_preserves_template_blank_lines() {
                 source: drop.to_string(),
                 byte_start: (keep.len() + 1) as u32,
                 sub_snippets: Vec::new(),
+                augmentations: Vec::new(),
             },
         )]),
         namespace_exports: Vec::new(),
@@ -8098,6 +8178,7 @@ function migratedDep() { return 1; }\n";
             source: text.to_string(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     };
     let prelude = RuntimePrelude {
@@ -12808,6 +12889,7 @@ fn reader_migration_merge_combines_same_owner_overlapping_components() {
                     source: "function readA() { return a + b; }".to_string(),
                     byte_start: 10,
                     sub_snippets: Vec::new(),
+                    augmentations: Vec::new(),
                 },
             ),
             (
@@ -12816,6 +12898,7 @@ fn reader_migration_merge_combines_same_owner_overlapping_components() {
                     source: "function readC() { return b + c; }".to_string(),
                     byte_start: 20,
                     sub_snippets: Vec::new(),
+                    augmentations: Vec::new(),
                 },
             ),
             (
@@ -12824,6 +12907,7 @@ fn reader_migration_merge_combines_same_owner_overlapping_components() {
                     source: "function readD() { return b + d; }".to_string(),
                     byte_start: 30,
                     sub_snippets: Vec::new(),
+                    augmentations: Vec::new(),
                 },
             ),
         ]),

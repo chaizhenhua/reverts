@@ -178,6 +178,14 @@ pub(crate) fn runtime_helper_source(
         snippets
             .entry(snippet.byte_start)
             .or_insert_with(|| snippet.source.clone());
+        // Re-emit each binding-augmenting statement at its ORIGINAL byte offset
+        // (a member assignment may eagerly read a binding declared after the
+        // augmented one; emitting in source order avoids a TDZ access).
+        for augmentation in &snippet.augmentations {
+            snippets
+                .entry(augmentation.byte_start)
+                .or_insert_with(|| augmentation.source.clone());
+        }
     }
     let mut chunks = snippets
         .into_iter()

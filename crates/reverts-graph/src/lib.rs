@@ -111,6 +111,11 @@ impl RuntimePrelude {
             snippets
                 .entry(snippet.byte_start)
                 .or_insert_with(|| snippet.source.clone());
+            for augmentation in &snippet.augmentations {
+                snippets
+                    .entry(augmentation.byte_start)
+                    .or_insert_with(|| augmentation.source.clone());
+            }
         }
 
         snippets.into_values().collect::<Vec<_>>().join("\n")
@@ -132,10 +137,19 @@ impl RuntimePrelude {
             let Some(snippet) = self.snippets.get(&binding) else {
                 continue;
             };
-            for identifier in runtime_snippet_dependency_identifiers(snippet.source.as_str()) {
-                let candidate = BindingName::new(identifier);
-                if self.bindings.contains_key(&candidate) && needed.insert(candidate.clone()) {
-                    pending.push_back(candidate);
+            let mut snippet_sources = vec![snippet.source.as_str()];
+            snippet_sources.extend(
+                snippet
+                    .augmentations
+                    .iter()
+                    .map(|augmentation| augmentation.source.as_str()),
+            );
+            for snippet_source in snippet_sources {
+                for identifier in runtime_snippet_dependency_identifiers(snippet_source) {
+                    let candidate = BindingName::new(identifier);
+                    if self.bindings.contains_key(&candidate) && needed.insert(candidate.clone()) {
+                        pending.push_back(candidate);
+                    }
                 }
             }
             for namespace_export in &self.namespace_exports {
@@ -164,6 +178,24 @@ pub struct RuntimePreludeSnippet {
     /// the whole snippet. When empty, callers fall back to the whole
     /// `source` as a single unit — preserving the pre-split semantics.
     pub sub_snippets: Vec<RuntimePreludeSubSnippet>,
+    /// Top-level statements that *augment* this binding without declaring it —
+    /// e.g. the esbuild enum/namespace initializer IIFE
+    /// `(function(e){…})(X||(X={}))` or a static member assignment
+    /// `X.create = (e) => new X(e)`. They have no declaration of their own, so
+    /// without attaching them here the prelude collector would drop them and
+    /// leave `X` only half-built. Each keeps its ORIGINAL `byte_start` so it is
+    /// re-emitted in source order (a member assignment may eagerly read a
+    /// later-declared binding; collapsing it to `X`'s declaration site would
+    /// create a temporal-dead-zone access).
+    pub augmentations: Vec<RuntimePreludeAugmentation>,
+}
+
+/// A top-level statement that augments an already-declared prelude binding.
+/// See [`RuntimePreludeSnippet::augmentations`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePreludeAugmentation {
+    pub source: String,
+    pub byte_start: u32,
 }
 
 /// A single top-level statement-level slice of a `RuntimePreludeSnippet`.
@@ -191,6 +223,7 @@ impl RuntimePreludeSnippet {
             source: source.into(),
             byte_start,
             sub_snippets: Vec::new(),
+            augmentations: Vec::new(),
         }
     }
 }
@@ -946,6 +979,7 @@ fn collect_runtime_helper_declarations(
                         source: snippet.clone(),
                         byte_start: declarator.span.start,
                         sub_snippets: Vec::new(),
+                        augmentations: Vec::new(),
                     },
                 );
             }
@@ -1000,21 +1034,26 @@ fn collect_runtime_prelude_declarations(
         }
         let declarations = runtime_prelude_declarations_from_statement(statement, source);
         if declarations.is_empty() {
-            // esbuild lowers a TypeScript `enum`/`namespace` to two top-level
-            // statements: a bare `var X;` declaration followed by an initializer
-            // IIFE `(function(e){ e[e.A=1]="A"; })(X || (X = {}));` that populates
-            // `X`. The `var X;` becomes `X`'s prelude snippet, but the IIFE is a
-            // standalone expression statement with no declared binding — so it
-            // would be dropped here, leaving `X` an uninitialized `var` wherever
-            // it is later inlined (e.g. into the entrypoint island). Attach the
-            // initializer IIFE to `X`'s snippet so it always travels with the
-            // binding it populates.
-            if let Some(binding) = namespace_augmentation_iife_binding(statement)
+            // Some top-level statements augment an already-declared binding
+            // without declaring anything themselves — and so would be dropped
+            // here, leaving the binding only half-built wherever it is later
+            // inlined (e.g. into the entrypoint island). Two shapes:
+            //   * a TypeScript `enum`/`namespace` initializer IIFE
+            //     `(function(e){ e[e.A=1]="A"; })(X || (X = {}));`, paired with a
+            //     bare `var X;` declaration; and
+            //   * a static member assignment `X.create = (e) => new X(e);`
+            //     (e.g. zod attaches every class's `.create` factory this way),
+            //     paired with a `class X {}` declaration.
+            // Attach the statement to `X`'s snippet so the augmentation always
+            // travels with the binding it completes.
+            if let Some(binding) = prelude_binding_augmentation_target(statement)
                 && let Some(snippet) = snippets_by_binding.get_mut(&binding)
             {
                 let statement_source = statement_snippet(statement, source);
-                snippet.source.push('\n');
-                snippet.source.push_str(statement_source.as_str());
+                snippet.augmentations.push(RuntimePreludeAugmentation {
+                    source: statement_source.clone(),
+                    byte_start: span.start,
+                });
                 snippets.push(statement_source);
                 continue;
             }
@@ -1054,6 +1093,7 @@ fn collect_runtime_prelude_declarations(
                     source: declaration.source.clone(),
                     byte_start: declaration.byte_start,
                     sub_snippets,
+                    augmentations: Vec::new(),
                 },
             );
             snippets.push(declaration.source);
@@ -2769,6 +2809,49 @@ fn statement_is_enum_reverse_mapping(statement: &Statement<'_>, binding: &str) -
         _ => return false,
     };
     expression_identifier(inner_object) == Some(binding)
+}
+
+/// Return the binding a top-level statement *augments* (rather than declares),
+/// if any — so the prelude collector can keep the statement attached to that
+/// binding's snippet instead of dropping it as an unowned expression statement.
+/// Covers the esbuild enum/namespace initializer IIFE and static member
+/// assignments onto an already-declared binding.
+fn prelude_binding_augmentation_target(statement: &Statement<'_>) -> Option<BindingName> {
+    namespace_augmentation_iife_binding(statement)
+        .or_else(|| member_augmentation_binding(statement))
+}
+
+/// Recognize a top-level static member assignment that augments an existing
+/// binding, e.g. `X.create = (e) => new X(e);` or `X.prototype.foo = …;`, and
+/// return the root binding `X`. The assignment target must be a member access
+/// (`X.prop` / `X[i]`), never a bare identifier — reassigning the whole binding
+/// is a distinct statement class that must not be silently relocated to the
+/// declaration site.
+fn member_augmentation_binding(statement: &Statement<'_>) -> Option<BindingName> {
+    let Statement::ExpressionStatement(statement) = statement else {
+        return None;
+    };
+    member_assignment_root_binding(&statement.expression).map(BindingName::new)
+}
+
+fn member_assignment_root_binding<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::AssignmentExpression(assignment)
+            if assignment.operator == AssignmentOperator::Assign =>
+        {
+            match &assignment.left {
+                AssignmentTarget::StaticMemberExpression(_)
+                | AssignmentTarget::ComputedMemberExpression(_) => {
+                    assignment_target_identifier(&assignment.left)
+                }
+                _ => None,
+            }
+        }
+        Expression::ParenthesizedExpression(parenthesized) => {
+            member_assignment_root_binding(&parenthesized.expression)
+        }
+        _ => None,
+    }
 }
 
 /// Recognize an esbuild TypeScript `enum`/`namespace` initializer IIFE
