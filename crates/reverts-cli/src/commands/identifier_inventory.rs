@@ -40,6 +40,7 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
     let semantic_name_index = load_explicit_semantic_name_index(args.output_root.as_path())?;
     let semantic_binding_decisions =
         load_semantic_binding_decision_index(args.output_root.as_path())?;
+    let first_party_files = load_first_party_file_set(args.first_party_files.as_deref())?;
 
     let mut totals = IdentifierInventoryStats::default();
     let mut semantic_total = 0_usize;
@@ -63,6 +64,7 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
                     &stats,
                     semantic_name_index.get(relative_path.as_str()),
                     semantic_binding_decisions.get(relative_path.as_str()),
+                    first_party_files.as_ref(),
                 );
                 semantic_total += semantic.total;
                 semantic_named += semantic.named;
@@ -190,6 +192,7 @@ fn semantic_binding_file_coverage(
     stats: &IdentifierInventoryStats,
     explicit_names: Option<&BTreeMap<String, usize>>,
     binding_decisions: Option<&BTreeMap<String, Vec<SemanticBindingDecision>>>,
+    first_party_files: Option<&std::collections::BTreeSet<String>>,
 ) -> SemanticBindingCoverage {
     if !is_semantic_binding_target_path(relative_path) {
         return SemanticBindingCoverage {
@@ -199,6 +202,22 @@ fn semantic_binding_file_coverage(
             excluded: stats.binding_identifiers,
             pending: 0,
             reason: "generated_scaffold_not_decompiled_target",
+            pending_bindings: Vec::new(),
+        };
+    }
+    // When a first-party allow-list is supplied, bindings in non-first-party
+    // files (bundled third-party / classified-out modules) are not naming work:
+    // count them as excluded so they never gate coverage completion.
+    if let Some(first_party) = first_party_files
+        && !first_party.contains(relative_path)
+    {
+        return SemanticBindingCoverage {
+            total: 0,
+            named: 0,
+            preserved: 0,
+            excluded: stats.binding_identifiers,
+            pending: 0,
+            reason: "not_first_party_module",
             pending_bindings: Vec::new(),
         };
     }
@@ -382,6 +401,29 @@ fn is_semantic_binding_target_path(relative_path: &str) -> bool {
     !relative_path.is_empty()
 }
 
+/// Load the optional first-party allow-list (newline-separated output-relative
+/// paths). `None` means "no filter — every file counts" (current behavior).
+fn load_first_party_file_set(
+    path: Option<&Path>,
+) -> Result<Option<std::collections::BTreeSet<String>>, CliRunError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let text = fs::read_to_string(path).map_err(|source| {
+        CliRunError::IdentifierInventory(format!(
+            "failed to read first-party file list {}: {source}",
+            path.display()
+        ))
+    })?;
+    let set = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    Ok(Some(set))
+}
+
 fn load_explicit_semantic_name_index(
     output_root: &Path,
 ) -> Result<BTreeMap<String, BTreeMap<String, usize>>, CliRunError> {
@@ -537,6 +579,7 @@ mod tests {
         let report = identifier_inventory_report(&IdentifierInventoryArgs {
             output_root: root.to_path_buf(),
             json: None,
+            first_party_files: None,
         })
         .expect("inventory should run");
 
@@ -591,6 +634,7 @@ mod tests {
         let report = identifier_inventory_report(&IdentifierInventoryArgs {
             output_root: root.to_path_buf(),
             json: None,
+            first_party_files: None,
         })
         .expect("inventory should run");
 
@@ -624,6 +668,7 @@ mod tests {
         let report = identifier_inventory_report(&IdentifierInventoryArgs {
             output_root: root.to_path_buf(),
             json: None,
+            first_party_files: None,
         })
         .expect("inventory should run");
 
@@ -681,6 +726,7 @@ mod tests {
         let report = identifier_inventory_report(&IdentifierInventoryArgs {
             output_root: root.to_path_buf(),
             json: None,
+            first_party_files: None,
         })
         .expect("inventory should run");
 
@@ -724,6 +770,7 @@ mod tests {
         let report = identifier_inventory_report(&IdentifierInventoryArgs {
             output_root: root.to_path_buf(),
             json: None,
+            first_party_files: None,
         })
         .expect("inventory should run");
 
@@ -785,6 +832,7 @@ mod tests {
         let report = identifier_inventory_report(&IdentifierInventoryArgs {
             output_root: root.to_path_buf(),
             json: None,
+            first_party_files: None,
         })
         .expect("inventory should run");
 
@@ -801,5 +849,42 @@ mod tests {
             report["semantic_bindings"]["complete"].as_bool(),
             Some(true)
         );
+    }
+
+    #[test]
+    fn first_party_files_filter_excludes_non_first_party_bindings_from_coverage() {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path();
+        fs::create_dir(root.join("modules")).expect("mkdir modules");
+        // app.ts is first-party (3 bindings); vendor.ts is bundled third-party.
+        fs::write(
+            root.join("modules/app.ts"),
+            "const a = 1; const b = 2; const c = 3;",
+        )
+        .expect("write app");
+        fs::write(root.join("modules/vendor.ts"), "const x = 1; const y = 2;")
+            .expect("write vendor");
+        let list = root.join("first-party.txt");
+        fs::write(&list, "modules/app.ts\n").expect("write list");
+
+        let report = identifier_inventory_report(&IdentifierInventoryArgs {
+            output_root: root.to_path_buf(),
+            json: None,
+            first_party_files: Some(list.clone()),
+        })
+        .expect("inventory should run");
+
+        // Only app.ts (3) is pending; vendor.ts (2) is excluded, not pending.
+        assert_eq!(report["semantic_bindings"]["pending"].as_u64(), Some(3));
+        assert_eq!(report["semantic_bindings"]["excluded"].as_u64(), Some(2));
+
+        // Without the filter, all 5 are pending.
+        let unfiltered = identifier_inventory_report(&IdentifierInventoryArgs {
+            output_root: root.to_path_buf(),
+            json: None,
+            first_party_files: None,
+        })
+        .expect("inventory should run");
+        assert_eq!(unfiltered["semantic_bindings"]["pending"].as_u64(), Some(5));
     }
 }

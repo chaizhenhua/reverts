@@ -379,6 +379,12 @@ pub struct IdentifierInventoryArgs {
     pub output_root: PathBuf,
     #[arg(long)]
     pub json: Option<PathBuf>,
+    /// Newline-separated list of first-party output-relative file paths. When
+    /// given, bindings in any other file (bundled third-party / non-first-party
+    /// modules) are counted as excluded rather than pending, so the
+    /// semantic-binding coverage denominator tracks only first-party code.
+    #[arg(long = "first-party-files")]
+    pub first_party_files: Option<PathBuf>,
 }
 
 impl IdentifierInventoryArgs {
