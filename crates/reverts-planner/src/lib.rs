@@ -8,6 +8,7 @@ mod compute_modules;
 mod dead_export_prune;
 mod destructure_writes;
 mod eager_safe_analysis;
+mod export_completion;
 mod external_package_adapter_emit;
 mod identifiers;
 mod import_coalesce;

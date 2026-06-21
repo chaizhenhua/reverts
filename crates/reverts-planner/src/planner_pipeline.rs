@@ -53,6 +53,12 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     // from the module that exports them — cycle-safe (augments an existing edge,
     // adds none) — so the emitted ESM has no dangling reference.
     crate::complete_referenced_imports::complete_referenced_module_imports(&mut state.plan);
+    // Symmetric completion: every name a consumer imports from a sibling module
+    // must actually be exported by it. Works from the final emitted imports, so
+    // it closes export gaps the def-use graph missed (esbuild scope-hoisted
+    // cross-module bindings) by re-exporting from the module's externalized
+    // package or exporting a locally-defined binding.
+    crate::export_completion::complete_cross_module_exports(&mut state.plan);
     Ok(state.plan)
 }
 

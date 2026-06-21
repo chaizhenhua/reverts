@@ -109,7 +109,7 @@ pub(crate) fn complete_referenced_module_imports(plan: &mut EmitPlan) -> usize {
 
 /// Every name a module makes importable: structured planned exports plus any
 /// `export { … }` / `export <decl> NAME` in its body (external names, post-`as`).
-fn module_exported_names(file: &PlannedFile) -> BTreeSet<String> {
+pub(crate) fn module_exported_names(file: &PlannedFile) -> BTreeSet<String> {
     let mut out: BTreeSet<String> = file
         .exports
         .iter()
@@ -171,7 +171,7 @@ fn add_names_to_import_line(line: &str, names: &BTreeSet<String>) -> Option<Stri
     Some(format!("import {{ {joined} }} from '{specifier}';"))
 }
 
-fn resolve_relative_specifier(from_file: &str, specifier: &str) -> Option<String> {
+pub(crate) fn resolve_relative_specifier(from_file: &str, specifier: &str) -> Option<String> {
     if !(specifier.starts_with("./") || specifier.starts_with("../")) {
         return None;
     }
