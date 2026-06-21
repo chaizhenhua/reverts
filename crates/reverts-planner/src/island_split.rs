@@ -14,10 +14,12 @@
 //! remainder and the extracted file is layered on separately. Nothing here is
 //! wired into emission yet, so the verified single-island output is unchanged.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_ir::BindingName;
 use reverts_js::{ParseGoal, TopLevelStatementKind, collect_top_level_statement_facts};
+
+use crate::statements::{named_export_statement, named_import_statement};
 
 /// The result of lifting a cluster's hoistable declarations out of the island.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +113,43 @@ fn remove_ranges(source: &str, ranges: &[(usize, usize)]) -> String {
     remaining
 }
 
+/// Assemble the source of an extracted cluster file: an import per source
+/// specifier for the external bindings the moved declarations reference, then
+/// the declarations, then a single re-export of every moved binding.
+///
+/// `imports` maps an emit-relative module specifier to the bindings to import
+/// from it — every name the cluster references that is not declared in the
+/// cluster itself (resolved by the caller from binding ownership). Imports are
+/// emitted in specifier order for determinism.
+pub(crate) fn assemble_cluster_file(
+    cluster_source: &str,
+    moved_bindings: &BTreeSet<BindingName>,
+    imports: &BTreeMap<String, BTreeSet<BindingName>>,
+) -> String {
+    let mut out = String::new();
+    for (specifier, names) in imports {
+        if names.is_empty() {
+            continue;
+        }
+        out.push_str(named_import_statement(names.iter(), specifier).as_str());
+        out.push('\n');
+    }
+    out.push_str(cluster_source);
+    out.push('\n');
+    out.push_str(named_export_statement(moved_bindings.iter()).as_str());
+    out.push('\n');
+    out
+}
+
+/// The statement the island entry uses to import a cluster's moved bindings back
+/// from the cluster file at `specifier`.
+pub(crate) fn entry_import_for_cluster(
+    moved_bindings: &BTreeSet<BindingName>,
+    specifier: &str,
+) -> String {
+    named_import_statement(moved_bindings.iter(), specifier)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +196,38 @@ mod tests {
         // island unchanged.
         let island = "globalThis.__init = setup();\nvar x = compute();\n";
         assert!(extract_hoistable_cluster(island, &bindings(&["x"]), &BTreeSet::new()).is_none());
+    }
+
+    #[test]
+    fn assembles_a_cluster_file_with_imports_body_and_reexport() {
+        let mut imports = BTreeMap::new();
+        imports.insert(
+            "../runtime/shared.js".to_string(),
+            bindings(&["helper"]),
+        );
+        let file = assemble_cluster_file(
+            "function f1() { return helper(); }",
+            &bindings(&["f1"]),
+            &imports,
+        );
+        assert!(file.contains("import { helper } from '../runtime/shared.js';"));
+        assert!(file.contains("function f1()"));
+        assert!(file.contains("export { f1 };"));
+        // Import precedes the declaration which precedes the export.
+        let import_at = file.find("import { helper }").unwrap();
+        let decl_at = file.find("function f1").unwrap();
+        let export_at = file.find("export { f1 }").unwrap();
+        assert!(import_at < decl_at && decl_at < export_at);
+    }
+
+    #[test]
+    fn entry_imports_the_moved_bindings_back() {
+        let statement =
+            entry_import_for_cluster(&bindings(&["f1", "C1"]), "./island/cluster-0.js");
+        assert_eq!(
+            statement,
+            "import { C1, f1 } from './island/cluster-0.js';"
+        );
     }
 
     #[test]
