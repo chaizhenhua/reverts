@@ -58,6 +58,10 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     // from the module that exports them — cycle-safe (augments an existing edge,
     // adds none) — so the emitted ESM has no dangling reference.
     crate::complete_referenced_imports::complete_referenced_module_imports(&mut state.plan);
+    // Add a NEW import for a referenced runtime helper (e.g. esbuild's shared
+    // `__esm` initializer `st`) used cross-source-file with no import — safe
+    // because helpers are emitted as hoisted function declarations.
+    crate::complete_runtime_helper_imports::complete_runtime_helper_imports(&mut state.plan);
     // Symmetric completion: every name a consumer imports from a sibling module
     // must actually be exported by it. Works from the final emitted imports, so
     // it closes export gaps the def-use graph missed (esbuild scope-hoisted

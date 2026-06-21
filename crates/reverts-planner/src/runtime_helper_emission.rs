@@ -312,6 +312,13 @@ pub(crate) fn emit_runtime_helper_files(
         );
         helper_closure.source =
             coalesce_top_level_import_declarations(helper_closure.source.as_str());
+        // Hoist pure arrow/function-expression helper `var`s (e.g. the esbuild
+        // `__esm` lazy initializer `st`) to `function` declarations so an
+        // importing module that calls them eagerly under a circular import sees
+        // them initialised at instantiation rather than in their TDZ.
+        helper_closure.source = crate::helper_hoisting::hoist_arrow_helpers_to_declarations(
+            helper_closure.source.as_str(),
+        );
         let runtime_setter_bindings = used_runtime_helper_setters
             .get(source_file_id)
             .cloned()
