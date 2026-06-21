@@ -25,11 +25,12 @@ use crate::runtime_source_scan::value_identifiers_in_source;
 /// Cluster a runtime prelude's eager (`SourceBacked`) island bindings into
 /// modules by community detection over their reference graph.
 ///
-/// Each eager binding is a node; an edge joins two eager bindings when one
-/// reads the other. Reference sets come from the precomputed per-statement
-/// `reads` on each snippet's sub-snippets (no re-parsing); a binding whose
-/// snippet was never split into statements falls back to scanning its source.
-/// Returns `binding -> module-cluster id`.
+/// Each eager binding is a node; an edge joins two eager bindings when one's
+/// snippet references the other. References are every identifier read anywhere
+/// in the binding's snippet source — crucially reaching INTO function bodies, so
+/// a function that calls helpers links to them. (Per-statement `reads` would
+/// only see top-level reads and leave most call targets as singletons, badly
+/// over-fragmenting the partition.) Returns `binding -> module-cluster id`.
 #[must_use]
 pub(crate) fn cluster_island_prelude(prelude: &RuntimePrelude) -> BTreeMap<BindingName, usize> {
     let island_bindings: BTreeSet<BindingName> = prelude
@@ -43,20 +44,10 @@ pub(crate) fn cluster_island_prelude(prelude: &RuntimePrelude) -> BTreeMap<Bindi
     for binding in &island_bindings {
         let mut refs = BTreeSet::new();
         if let Some(snippet) = prelude.snippets.get(binding) {
-            if snippet.sub_snippets.is_empty() {
-                for identifier in value_identifiers_in_source(snippet.source.as_str()) {
-                    let read = BindingName::new(identifier);
-                    if island_bindings.contains(&read) {
-                        refs.insert(read);
-                    }
-                }
-            } else {
-                for sub in &snippet.sub_snippets {
-                    for read in &sub.reads {
-                        if island_bindings.contains(read) {
-                            refs.insert(read.clone());
-                        }
-                    }
+            for identifier in value_identifiers_in_source(snippet.source.as_str()) {
+                let read = BindingName::new(identifier);
+                if island_bindings.contains(&read) {
+                    refs.insert(read);
                 }
             }
         }
@@ -354,29 +345,36 @@ mod tests {
                     BindingName::new(name),
                     RuntimePreludeBindingKind::SourceBacked,
                 );
-                // Reads = the rest of the clique (a dense intra-module reference
-                // set) plus any bridge targets from this node.
-                let mut reads: BTreeSet<BindingName> = clique
+                // The binding's body calls the rest of its clique (a dense
+                // intra-module reference set) plus any bridge targets — exactly
+                // the reads the source scan must recover from inside the body.
+                let mut targets: Vec<String> = clique
                     .iter()
                     .filter(|&&other| other != name)
-                    .map(|&other| BindingName::new(other))
+                    .map(|&other| format!("{other}()"))
                     .collect();
                 for &(from, to) in bridges {
                     if from == name {
-                        reads.insert(BindingName::new(to));
+                        targets.push(format!("{to}()"));
                     }
                 }
+                let body = if targets.is_empty() {
+                    "0".to_string()
+                } else {
+                    targets.join(" + ")
+                };
+                let source = format!("var {name} = () => {body};");
                 snippets.insert(
                     BindingName::new(name),
                     RuntimePreludeSnippet {
-                        source: format!("var {name} = 1;"),
+                        source: source.clone(),
                         byte_start: 0,
                         sub_snippets: vec![RuntimePreludeSubSnippet {
-                            source: format!("var {name} = 1;"),
+                            source,
                             byte_start: 0,
                             byte_end: 0,
                             defines: BTreeSet::from([BindingName::new(name)]),
-                            reads,
+                            reads: BTreeSet::new(),
                             writes: BTreeSet::new(),
                         }],
                         augmentations: Vec::new(),
