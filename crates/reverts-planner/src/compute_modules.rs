@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::ModuleInput;
-use reverts_ir::{BindingName, ModuleId, ModuleKind};
+use reverts_ir::{BindingName, ModuleId};
 use reverts_model::EnrichedProgram;
 
 use crate::binding_owner::BindingOwnerPlan;
@@ -145,7 +145,7 @@ pub(crate) fn plan_one_module(
         exported_lazy_value,
         used_package_runtime_helper_files,
     } = accumulators;
-    if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
+    if externalized_packages.contains(&module.id) {
         return Ok(());
     }
 

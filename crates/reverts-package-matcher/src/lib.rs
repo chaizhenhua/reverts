@@ -64,6 +64,7 @@ pub(crate) use proof::dependency_graph::{
     dependency_edge_path_external_import_target,
     dependency_graph_source_fingerprint_external_import_target,
 };
+pub(crate) use proof::export_member::public_export_member_external_package_source;
 #[cfg(test)]
 pub(crate) use proof::import_target::resolve_external_import_target;
 pub(crate) use proof::import_target::{

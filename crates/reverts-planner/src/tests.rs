@@ -6003,6 +6003,90 @@ fn adapter_required_commonjs_package_module_uses_external_adapter() {
 }
 
 #[test]
+fn anonymous_bundle_external_attribution_uses_external_adapter() {
+    // An esbuild-inlined ANONYMOUS module (kind = Application, no package_name)
+    // that the matcher's anonymous-externalize pass attributed to a package must
+    // flow through the same drop + external-package-adapter path as a path-named
+    // package module: its source is dropped and replaced with a bare import.
+    let planner = ImportExportPlanner;
+    let app_source = "var value = packageThing().answer;\nexport { value };\n";
+    let package_source = r#"
+        var packageThing = (() => {
+            let _$cached;
+            return () => {
+                if (_$cached) return _$cached.exports;
+                var _$module = _$cached = { exports: {} };
+                ((exports) => { exports.answer = 42; })(_$module.exports, _$module);
+                return _$module.exports;
+            };
+        })();
+        export { packageThing };
+    "#;
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "app.js",
+        Some(app_source.to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "anon.js",
+        Some(package_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::application(ModuleId(2), "anon-pkg", "modules/anon-pkg.ts")
+            .with_source_file(2),
+    );
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package",
+        )
+        .with_resolved_file(
+            "forced-external:export-members:source-equivalent:packageThing:fixture-package@1.0.0/index.js",
+        ),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(1),
+        target: ModuleDependencyTarget::Module(ModuleId(2)),
+    });
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let enriched = reverts_model::EnrichedProgram::new(
+        model,
+        reverts_model::SemanticNameMap::default(),
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+    let package_file = plan
+        .files
+        .iter()
+        .find(|file| file.path == "modules/anon-pkg.ts")
+        .expect("adapter file should be emitted for the anonymous external module");
+    let source = package_file.body.join("\n");
+
+    assert_eq!(package_file.imports.len(), 1);
+    assert_eq!(
+        package_file.imports[0].resolution.specifier(),
+        Some("fixture-package")
+    );
+    assert!(source.contains("export { packageThing };"), "{source}");
+    assert!(
+        !source.contains("_$cached"),
+        "original inlined source must be dropped: {source}"
+    );
+}
+
+#[test]
 fn commonjs_external_adapter_exports_only_original_require_binding() {
     let package_source = r#"
         function helper() { return 42; }

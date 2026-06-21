@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::{ModuleDependencyTarget, PackageAttributionInput};
-use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
+use reverts_ir::{BindingName, BindingShape, ModuleId};
 use reverts_js::{
     is_ascii_identifier_continue as is_identifier_continue,
     is_ascii_identifier_start as is_identifier_start, read_quoted_string_at as read_quoted_string,
@@ -1360,8 +1360,7 @@ pub(crate) fn adapter_required_package_modules(
             {
                 continue;
             }
-            if from_module.kind == ModuleKind::Package
-                && externalized_packages.contains(&from_module.id)
+            if externalized_packages.contains(&from_module.id)
                 && !required.contains(&from_module.id)
             {
                 continue;
@@ -1388,8 +1387,7 @@ pub(crate) fn adapter_required_package_modules(
             {
                 continue;
             }
-            if from_module.kind == ModuleKind::Package
-                && externalized_packages.contains(&from_module.id)
+            if externalized_packages.contains(&from_module.id)
                 && !required.contains(&from_module.id)
             {
                 continue;

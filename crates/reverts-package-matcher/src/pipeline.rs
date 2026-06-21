@@ -121,6 +121,7 @@ pub fn match_packages_with_pipeline(
         &mut timing,
     );
     run_package_match_pass(ImportablePass, &context, &mut state, &mut timing);
+    run_package_match_pass(AnonymousImportablePass, &context, &mut state, &mut timing);
     run_package_match_pass(CacheAnchoredSurfacesPass, &context, &mut state, &mut timing);
 
     PackageMatchingPipelineReport {
@@ -1699,6 +1700,22 @@ impl PackageMatchPass for ImportablePass {
     }
 }
 
+struct AnonymousImportablePass;
+
+impl PackageMatchPass for AnonymousImportablePass {
+    fn name(&self) -> &'static str {
+        "anonymous_importable_promote"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        ownership::importable::promote_anonymous_bundle_external_imports(
+            context.rows,
+            context.package_sources,
+            &mut state.package_report,
+        );
+    }
+}
+
 struct ProvenExternalImportTargetsPass;
 
 impl PackageMatchPass for ProvenExternalImportTargetsPass {
@@ -1814,7 +1831,7 @@ fn module_package_hint(module: &reverts_input::ModuleInput) -> Option<(&str, Opt
     Some((package_name, package_version))
 }
 
-fn is_anonymous_bundle_package_candidate(
+pub(crate) fn is_anonymous_bundle_package_candidate(
     rows: &InputRows,
     module: &reverts_input::ModuleInput,
 ) -> bool {

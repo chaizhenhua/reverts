@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use reverts_input::ModuleInput;
-use reverts_ir::{ModuleId, ModuleKind};
+use reverts_ir::ModuleId;
 use reverts_model::EnrichedProgram;
 use reverts_package::accepted_external_attribution_for_module;
 
@@ -29,9 +29,6 @@ pub(crate) fn try_emit_external_package_adapter(
     file: PlannedFile,
     plan: &mut EmitPlan,
 ) -> bool {
-    if module.kind != ModuleKind::Package {
-        return false;
-    }
     let Some(adapter_plan) = external_package_adapters.get(&module.id) else {
         return false;
     };

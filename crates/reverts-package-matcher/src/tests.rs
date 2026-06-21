@@ -6,7 +6,7 @@ use crate::{
     PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch, PackageModuleSourceQuality, PackageSource,
     VersionedPackageMatchReport, VersionedPackageMatcher, match_packages_with_pipeline,
     match_structural_bags, match_structural_bags_with_excluded_modules,
-    ownership::{cascade, exact_hint},
+    ownership::{cascade, exact_hint, importable},
     package_import_names_from_sources, package_module_source_quality,
     package_source_normalized_hash, package_source_normalized_hashes,
     package_source_public_export_proofs, resolve_external_import_target,
@@ -147,6 +147,109 @@ fn pipeline_recognizes_anonymous_bundle_package_by_function_axes() {
     );
     assert!(!package_match.external_importable);
     assert!(report.package_report.attributions.is_empty());
+}
+
+fn anonymous_bundle_report_with_match(
+    module_source: &str,
+    strategy: ModuleMatchStrategy,
+    function_signature_matches: usize,
+    string_anchor_matches: usize,
+) -> (InputRows, VersionedPackageMatchReport) {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "bundle.js",
+        Some(module_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(
+            ModuleId(20),
+            "20-esbuild-anon",
+            "modules/20-esbuild-anon.ts",
+        )
+        .with_source_file(1),
+    );
+    let report = VersionedPackageMatchReport {
+        attributions: Vec::new(),
+        surfaces: Vec::new(),
+        matches: vec![PackageMatch {
+            module_id: ModuleId(20),
+            package_name: "pkg".to_string(),
+            package_version: "1.0.0".to_string(),
+            export_specifier: "pkg".to_string(),
+            source_path: "cascade:pkg".to_string(),
+            normalized_source_hash: String::new(),
+            strategy,
+            function_signature_matches,
+            string_anchor_matches,
+            external_importable: false,
+        }],
+        version_matches: Vec::new(),
+        audit: reverts_observe::AuditReport::default(),
+    };
+    (rows, report)
+}
+
+#[test]
+fn anonymous_bundle_externalizes_when_public_surface_is_subset() {
+    // An anonymous esbuild-inlined module whose own exported member is a member
+    // of the recognized package's public surface is safely externalizable.
+    let module_source =
+        r#"export function validateThing(x){return ["anchor-alpha","anchor-beta",x].join(":");}"#;
+    let (rows, mut report) = anonymous_bundle_report_with_match(
+        module_source,
+        ModuleMatchStrategy::FunctionSignatureAndStringAnchors,
+        1,
+        2,
+    );
+    let package_sources = [PackageSource::external(
+        "pkg",
+        "1.0.0",
+        "pkg",
+        "index.js",
+        r#"export function validateThing(x){return ["anchor-alpha","anchor-beta",x].join(":");}"#,
+    )];
+
+    importable::promote_anonymous_bundle_external_imports(&rows, &package_sources, &mut report);
+
+    assert!(
+        report.matches[0].external_importable,
+        "anonymous module with fully-public surface must externalize: {:?}",
+        report.matches[0]
+    );
+    assert_eq!(report.attributions.len(), 1);
+    assert_eq!(report.attributions[0].module_id, ModuleId(20));
+    assert_eq!(report.attributions[0].package_name, "pkg");
+}
+
+#[test]
+fn anonymous_bundle_stays_inlined_when_export_is_package_internal() {
+    // The module exports `internalHelper`, which is NOT a public export of the
+    // package — externalizing would break consumers that read it, so the module
+    // must remain inlined (source-preserved).
+    let module_source =
+        r#"export function internalHelper(x){return ["anchor-alpha","anchor-beta",x].join(":");}"#;
+    let (rows, mut report) = anonymous_bundle_report_with_match(
+        module_source,
+        ModuleMatchStrategy::FunctionSignatureAndStringAnchors,
+        1,
+        2,
+    );
+    let package_sources = [PackageSource::external(
+        "pkg",
+        "1.0.0",
+        "pkg",
+        "index.js",
+        r#"export function validateThing(x){return ["anchor-alpha","anchor-beta",x].join(":");}"#,
+    )];
+
+    importable::promote_anonymous_bundle_external_imports(&rows, &package_sources, &mut report);
+
+    assert!(
+        !report.matches[0].external_importable,
+        "module exporting a package-internal binding must not externalize"
+    );
+    assert!(report.attributions.is_empty());
 }
 
 #[test]

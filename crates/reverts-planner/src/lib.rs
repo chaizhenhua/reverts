@@ -3303,9 +3303,10 @@ pub(crate) fn runtime_owner_candidate_can_emit(
     owner_available_bindings: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
     folded_modules: &BTreeSet<ModuleId>,
 ) -> bool {
-    if modules_by_id.get(&owner_module).is_some_and(|module| {
-        module.kind == ModuleKind::Package && externalized_packages.contains(&owner_module)
-    }) {
+    if modules_by_id
+        .get(&owner_module)
+        .is_some_and(|_module| externalized_packages.contains(&owner_module))
+    {
         return false;
     }
     if owner_local_definitions
@@ -3438,9 +3439,7 @@ pub(crate) fn runtime_snippet_source_span_owner<'a>(
     let candidate_spans = modules
         .into_iter()
         .filter(|module| module.source_file_id == Some(source_file_id))
-        .filter(|module| {
-            !(module.kind == ModuleKind::Package && externalized_packages.contains(&module.id))
-        })
+        .filter(|module| !externalized_packages.contains(&module.id))
         .filter_map(|module| {
             let span = module.source_span?;
             (span.byte_start < byte_end && byte_start < span.byte_end).then_some((module.id, span))
@@ -4169,9 +4168,10 @@ pub(crate) fn runtime_setter_migration_blocker_report(
                 excluded_folded.entry(key).or_default().insert(*module_id);
                 continue;
             }
-            if modules_by_id.get(module_id).is_some_and(|module| {
-                module.kind == ModuleKind::Package && externalized_packages.contains(module_id)
-            }) {
+            if modules_by_id
+                .get(module_id)
+                .is_some_and(|_module| externalized_packages.contains(module_id))
+            {
                 excluded_externalized
                     .entry(key)
                     .or_default()
@@ -6841,7 +6841,7 @@ pub(crate) fn lowered_runtime_sources(
 ) -> BTreeMap<ModuleId, LoweredRuntimeModuleSource> {
     let mut sources = BTreeMap::new();
     for module in program.model().modules() {
-        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
+        if externalized_packages.contains(&module.id) {
             continue;
         }
         let runtime_imports = program.model().graph().runtime_imports_for(module.id);
@@ -7148,9 +7148,10 @@ pub(crate) fn runtime_writer_modules_by_binding(
         .collect::<BTreeMap<_, _>>();
     let mut writers = BTreeMap::<BindingName, BTreeSet<ModuleId>>::new();
     for (module_id, source) in lowered_runtime_sources {
-        if modules_by_id.get(module_id).is_some_and(|module| {
-            module.kind == ModuleKind::Package && externalized_packages.contains(module_id)
-        }) {
+        if modules_by_id
+            .get(module_id)
+            .is_some_and(|_module| externalized_packages.contains(module_id))
+        {
             continue;
         }
         for binding in &source.written_helpers {
@@ -7632,10 +7633,8 @@ pub(crate) fn source_module_wiring(
         let Some(target_module) = modules_by_id.get(&target_module_id) else {
             continue;
         };
-        if (from_module.kind == ModuleKind::Package
-            && externalized_packages.contains(&from_module.id))
-            || (target_module.kind == ModuleKind::Package
-                && externalized_packages.contains(&target_module.id))
+        if externalized_packages.contains(&from_module.id)
+            || externalized_packages.contains(&target_module.id)
         {
             continue;
         }
@@ -7899,7 +7898,7 @@ pub(crate) fn unique_source_definition_modules_from_bindings(
 ) -> BTreeMap<BindingName, Option<ModuleId>> {
     let mut definitions = BTreeMap::<BindingName, Option<ModuleId>>::new();
     for module in program.model().modules() {
-        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
+        if externalized_packages.contains(&module.id) {
             continue;
         }
         let Some(source_definitions) = definition_bindings_by_module.get(&module.id) else {
@@ -7922,7 +7921,7 @@ pub(crate) fn unique_source_definition_modules_by_source_from_bindings(
 ) -> BTreeMap<u32, BTreeMap<BindingName, Option<ModuleId>>> {
     let mut definitions = BTreeMap::<u32, BTreeMap<BindingName, Option<ModuleId>>>::new();
     for module in program.model().modules() {
-        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
+        if externalized_packages.contains(&module.id) {
             continue;
         }
         let Some(source_file_id) = module.source_file_id else {

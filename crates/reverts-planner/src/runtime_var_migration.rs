@@ -32,7 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_ir::{BindingName, ModuleId, ModuleKind};
+use reverts_ir::{BindingName, ModuleId};
 use reverts_model::EnrichedProgram;
 
 use crate::runtime_helper_strip::migratable_runtime_var_initializer;
@@ -749,15 +749,7 @@ pub(crate) fn compute_runtime_var_migration_plan(
         if folded_modules.contains(module_id) {
             continue;
         }
-        let Some(module) = program
-            .model()
-            .modules()
-            .iter()
-            .find(|module| module.id == *module_id)
-        else {
-            continue;
-        };
-        if module.kind == ModuleKind::Package && externalized_packages.contains(module_id) {
+        if externalized_packages.contains(module_id) {
             continue;
         }
         for binding in &source.written_helpers {

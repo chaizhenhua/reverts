@@ -161,7 +161,7 @@ pub(crate) fn package_runtime_island_plan(
     let mut blocked_bindings = BTreeSet::<(u32, BindingName)>::new();
 
     for module in program.model().modules() {
-        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
+        if externalized_packages.contains(&module.id) {
             continue;
         }
         let owner = module_owners.get(&module.id).and_then(Option::as_ref);

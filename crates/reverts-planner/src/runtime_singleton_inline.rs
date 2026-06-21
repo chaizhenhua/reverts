@@ -30,7 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::RuntimePrelude;
-use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
+use reverts_ir::{BindingName, BindingShape, ModuleId};
 use reverts_model::EnrichedProgram;
 
 use crate::identifiers::is_planner_synthetic_binding;
@@ -77,12 +77,6 @@ pub(crate) fn runtime_singleton_inline_plan(
     direct_prelude_imports: &BTreeMap<u32, BTreeMap<BindingName, RuntimePreludeDirectImport>>,
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> RuntimeSingletonInlinePlan {
-    let modules_by_id = program
-        .model()
-        .modules()
-        .iter()
-        .map(|module| (module.id, module))
-        .collect::<BTreeMap<_, _>>();
     let source_definition_modules =
         runtime_owner_definition_modules(program, externalized_packages);
     let source_exported_bindings_by_module =
@@ -92,7 +86,7 @@ pub(crate) fn runtime_singleton_inline_plan(
     let mut blocked_bindings = BTreeSet::<(u32, BindingName)>::new();
 
     for module in program.model().modules() {
-        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
+        if externalized_packages.contains(&module.id) {
             continue;
         }
         let mut used_by_source = BTreeMap::<u32, BTreeSet<BindingName>>::new();
@@ -140,11 +134,7 @@ pub(crate) fn runtime_singleton_inline_plan(
             .iter()
             .next()
             .expect("singleton consumer set must contain one module");
-        let Some(consumer) = modules_by_id.get(&consumer_module).copied() else {
-            continue;
-        };
-        if consumer.kind == ModuleKind::Package && externalized_packages.contains(&consumer_module)
-        {
+        if externalized_packages.contains(&consumer_module) {
             continue;
         }
         if runtime_singleton_inline_consumer_has_name_conflict(
