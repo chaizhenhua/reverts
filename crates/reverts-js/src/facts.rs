@@ -1343,16 +1343,46 @@ fn export_declaration_binding_names(declaration: &Declaration<'_>) -> Vec<String
 }
 
 fn declaration_binding_names(declaration: &oxc_ast::ast::VariableDeclaration<'_>) -> Vec<String> {
-    declaration
-        .declarations
-        .iter()
-        .filter_map(|declarator| match &declarator.id.kind {
-            BindingPatternKind::BindingIdentifier(binding) => {
-                Some(binding.name.as_str().to_string())
+    let mut names = Vec::new();
+    for declarator in &declaration.declarations {
+        collect_binding_pattern_names(&declarator.id, &mut names);
+    }
+    names
+}
+
+/// Collect every identifier a binding pattern introduces, recursing through
+/// object/array destructuring, defaults, and rest elements. A simple
+/// `BindingIdentifier`-only scan silently drops names bound by destructuring
+/// (e.g. `var { isArray: rH } = Array` binds `rH`), which then look undefined to
+/// any consumer that imports them across a module boundary.
+fn collect_binding_pattern_names(
+    pattern: &oxc_ast::ast::BindingPattern<'_>,
+    names: &mut Vec<String>,
+) {
+    match &pattern.kind {
+        BindingPatternKind::BindingIdentifier(identifier) => {
+            names.push(identifier.name.as_str().to_string());
+        }
+        BindingPatternKind::AssignmentPattern(pattern) => {
+            collect_binding_pattern_names(&pattern.left, names);
+        }
+        BindingPatternKind::ObjectPattern(pattern) => {
+            for property in &pattern.properties {
+                collect_binding_pattern_names(&property.value, names);
             }
-            _ => None,
-        })
-        .collect()
+            if let Some(rest) = &pattern.rest {
+                collect_binding_pattern_names(&rest.argument, names);
+            }
+        }
+        BindingPatternKind::ArrayPattern(pattern) => {
+            for element in pattern.elements.iter().flatten() {
+                collect_binding_pattern_names(element, names);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_binding_pattern_names(&rest.argument, names);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1642,7 +1672,10 @@ fn is_file_url_source_location(value: &str) -> bool {
 
 #[cfg(test)]
 mod void_zero_collector_tests {
-    use super::{collect_static_module_specifiers, collect_void_zero_expression_statements};
+    use super::{
+        collect_static_module_specifiers, collect_top_level_statement_facts,
+        collect_void_zero_expression_statements,
+    };
     use crate::errors::ParseGoal;
 
     fn spans(source: &str) -> Vec<(u32, u32)> {
@@ -1677,6 +1710,25 @@ mod void_zero_collector_tests {
         // leaves a valid `() => {}`.
         let source = "const f = () => { void 0; };";
         assert_eq!(spans(source).len(), 1);
+    }
+
+    #[test]
+    fn top_level_statement_facts_capture_destructuring_bindings() {
+        // `var { isArray: rH } = Array` binds `rH`; array and rest/default
+        // patterns bind their names too. A scan that only handled
+        // `BindingIdentifier` dropped these, so a chunk owning such a binding
+        // never exported it and cross-module importers dangled.
+        let source =
+            "var { isArray: rH, from: gA } = Array;\nconst [a, , b] = xs;\nlet { p = 1, ...rest } = o;";
+        let facts =
+            collect_top_level_statement_facts(source, None, ParseGoal::TypeScript).unwrap();
+        let bindings: std::collections::BTreeSet<&str> = facts
+            .iter()
+            .flat_map(|fact| fact.bindings.iter().map(String::as_str))
+            .collect();
+        for expected in ["rH", "gA", "a", "b", "p", "rest"] {
+            assert!(bindings.contains(expected), "missing {expected}: {bindings:?}");
+        }
     }
 
     #[test]
