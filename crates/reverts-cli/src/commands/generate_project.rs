@@ -83,8 +83,7 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
     mark_timing!("load_param_renames");
     let package_anchored_island_bindings =
         load_package_anchored_island_bindings(&args.input, args.project_id)?;
-    let island_unit_attributions =
-        load_island_unit_attributions(&args.input, args.project_id)?;
+    let island_unit_attributions = load_island_unit_attributions(&args.input, args.project_id)?;
     mark_timing!("load_island_anchors");
 
     // Recover inlined packages from the island and attach them to the program so
@@ -343,8 +342,22 @@ fn island_package_externalizations(
     for prelude in program.model().graph().runtime_preludes().values() {
         for plan in aggregate_island_packages(prelude, attributions) {
             if !plan.externalizable {
+                eprintln!(
+                    "island-package skip: {} ({} member binding(s)){}",
+                    plan.import_specifier,
+                    plan.member_bindings.len(),
+                    plan.skip_reason
+                        .as_deref()
+                        .map(|reason| format!(": {reason}"))
+                        .unwrap_or_default()
+                );
                 continue;
             }
+            eprintln!(
+                "island-package externalize: {} ({} member binding(s))",
+                plan.import_specifier,
+                plan.member_bindings.len()
+            );
             externalizations.push(IslandPackageExternalization {
                 import_specifier: plan.import_specifier,
                 version: plan.version,
