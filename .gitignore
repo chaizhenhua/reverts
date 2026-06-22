@@ -5,3 +5,5 @@
 *.log
 /docs/superpowers/
 /node_modules
+/.playwright-mcp/
+__pycache__/

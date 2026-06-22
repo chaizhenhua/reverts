@@ -1,0 +1,4 @@
+interface:
+  display_name: "Website Frontend Decompile Collector"
+  short_description: "Capture a website frontend and start ReverTS web-app decompilation"
+  default_prompt: "Use $website-collector to capture a website frontend (live URL, HAR, or downloaded directory); ingest it with discovery; then hand off to decompile and web-app runtime validation so the minified SPA bundle is recovered as a runnable TypeScript project."

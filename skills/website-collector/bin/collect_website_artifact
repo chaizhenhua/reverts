@@ -1,0 +1,725 @@
+#!/usr/bin/env python3
+"""Collect a website frontend into a ReverTS artifact manifest.
+
+Three input modes (first that matches the input shape wins, or force with a flag):
+
+  1. Directory  — a local directory of already-downloaded site assets
+                  (entry .html plus its js/css/map files). Inventoried in place.
+  2. HAR file   — `--from-har capture.har`. Every JS/CSS/HTML/WASM/source-map
+                  response body is materialised to the stage dir keyed by its
+                  URL path. This is the COMPLETE-SPA path: a HAR recorded by a
+                  real browser captures dynamically-imported chunks that a static
+                  HTML crawl cannot see.
+  3. URL        — `https://app.example.com/`. Fetches the entry HTML, follows
+                  <script src>, <link rel=stylesheet>, <link rel=modulepreload>,
+                  and each `sourceMappingURL`. Add `--url-list FILE` (one URL per
+                  line, e.g. exported from a browser's network panel) to include
+                  dynamically-loaded chunks the static crawl misses.
+
+Output schema is identical to electron-collector / browser-extension-collector;
+only `profile` ("web-app") and the role namespace differ. JS/TS-family source
+units are the only ingest-eligible ones.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import fnmatch
+import hashlib
+import html.parser
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+JS_EXTS = {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"}
+SOURCE_MAP_SUFFIXES = (".js.map", ".mjs.map", ".cjs.map", ".css.map", ".map")
+NATIVE_EXTS = {".wasm"}
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 ReverTS-website-collector"
+)
+# Content sniffed when the URL has no useful extension (e.g. /assets/chunk?v=2).
+MIME_LANGUAGE = {
+    "text/html": "html",
+    "application/xhtml+xml": "html",
+    "text/css": "css",
+    "application/javascript": "javascript",
+    "text/javascript": "javascript",
+    "application/x-javascript": "javascript",
+    "module": "javascript",
+    "application/json": "json",
+    "application/manifest+json": "json",
+    "application/wasm": "native",
+}
+MIME_EXT = {
+    "html": ".html",
+    "css": ".css",
+    "javascript": ".js",
+    "json": ".json",
+    "native": ".wasm",
+}
+
+
+class CollectorError(RuntimeError):
+    """Raised when an artifact cannot be collected safely."""
+
+
+@dataclass
+class Fetched:
+    """A materialised response: logical path + on-disk physical path."""
+
+    logical: str
+    physical: Path
+    language: str
+    is_entry: bool = False
+    url: str | None = None  # absolute URL this came from (URL/HAR modes; None for directory)
+
+
+@dataclass
+class Capture:
+    """Result of resolving an input into staged files."""
+
+    artifact_root: Path
+    files: list[Fetched] = field(default_factory=list)
+    entry_url: str | None = None
+    origin: str | None = None
+    mode: str = ""
+    notes: list[str] = field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Path / language / role classification (shared shape with electron-collector) #
+# --------------------------------------------------------------------------- #
+
+
+def posix_path(path: Path | str) -> str:
+    return str(path).replace(os.sep, "/")
+
+
+def stable_id(logical_path: str) -> str:
+    digest = hashlib.sha1(logical_path.encode("utf-8")).hexdigest()[:10]
+    stem = "".join(ch if ch.isalnum() else "_" for ch in logical_path.lower()).strip("_")
+    stem = stem[:72] or "source"
+    return f"{stem}_{digest}"
+
+
+def language_for_path(path: str) -> str:
+    lower = path.lower()
+    if lower.endswith(SOURCE_MAP_SUFFIXES):
+        return "source_map"
+    if lower.endswith((".js", ".mjs", ".cjs")):
+        return "javascript"
+    if lower.endswith((".ts", ".mts", ".cts")):
+        return "typescript"
+    if lower.endswith(".jsx"):
+        return "jsx"
+    if lower.endswith(".tsx"):
+        return "tsx"
+    if lower.endswith((".html", ".htm")):
+        return "html"
+    if lower.endswith(".css"):
+        return "css"
+    if lower.endswith((".json", ".webmanifest", ".map.json")):
+        return "json"
+    if lower.endswith(".wasm"):
+        return "native"
+    return "asset"
+
+
+def role_for_path(path: str) -> str:
+    lower = path.lower()
+    name = Path(lower).name
+    if lower.endswith(SOURCE_MAP_SUFFIXES):
+        return "source_map"
+    if lower.endswith(".wasm"):
+        return "wasm_module"
+    if lower.endswith((".html", ".htm")):
+        return "html_entry"
+    if name in {"sw.js", "service-worker.js", "serviceworker.js"} or "service-worker" in lower or "serviceworker" in lower:
+        return "service_worker"
+    if "worklet" in lower or "worker" in name:
+        return "worker"
+    if lower.endswith(".css"):
+        return "stylesheet"
+    if name in {"manifest.json", "manifest.webmanifest"} or lower.endswith(".webmanifest"):
+        return "web_manifest"
+    if lower.endswith(".json"):
+        return "data_json"
+    if Path(lower).suffix in JS_EXTS:
+        # Webpack/Vite/esbuild chunk-naming heuristics.
+        if re.search(r"(^|[/_-])runtime([._-]|$)", name) or name.startswith("webpack"):
+            return "runtime_chunk"
+        if re.search(r"(vendor|chunk-vendors|framework|polyfill|commons?)", lower) or "/node_modules/" in lower:
+            return "vendor_chunk"
+        if re.match(r"(main|index|app|entry|bundle)([._-]|\.)", name):
+            return "entry_chunk"
+        return "js_chunk"
+    return "asset"
+
+
+def is_javascript_family(language: str) -> bool:
+    return language in {"javascript", "typescript", "jsx", "tsx"}
+
+
+def should_ingest(logical_path: str, language: str, include: list[str], exclude: list[str]) -> bool:
+    if not is_javascript_family(language):
+        return False
+    if include and not any(fnmatch.fnmatch(logical_path, pattern) for pattern in include):
+        return False
+    if exclude and any(fnmatch.fnmatch(logical_path, pattern) for pattern in exclude):
+        return False
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# URL -> logical-path mapping                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def sanitize_segment(segment: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", segment)
+    return cleaned or "_"
+
+
+def url_to_logical(url: str, entry_origin: str | None, language: str) -> str:
+    """Map an absolute URL to a stable logical path.
+
+    Same-origin assets keep their URL path. Cross-origin assets are namespaced
+    under `_cross/<host>/...` so CDN chunks never collide with first-party paths.
+    A query string is folded into the filename so `chunk.js?v=1` and
+    `chunk.js?v=2` stay distinct. Extensionless responses get an extension from
+    the sniffed language so downstream tooling classifies them correctly.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.netloc
+    raw_path = parsed.path or "/"
+    if raw_path.endswith("/"):
+        raw_path += "index.html"
+    segments = [sanitize_segment(seg) for seg in raw_path.split("/") if seg]
+    if not segments:
+        segments = ["index.html"]
+    if parsed.query:
+        qhash = hashlib.sha1(parsed.query.encode("utf-8")).hexdigest()[:8]
+        stem, dot, ext = segments[-1].partition(".")
+        segments[-1] = f"{stem}_q{qhash}{dot}{ext}" if dot else f"{segments[-1]}_q{qhash}"
+    logical = "/".join(segments)
+    # Give extensionless responses an extension matching their sniffed language.
+    if Path(logical).suffix.lower() not in _known_suffixes() and language in MIME_EXT:
+        logical += MIME_EXT[language]
+    same_origin = entry_origin is not None and host == urllib.parse.urlsplit(entry_origin).netloc
+    if not same_origin and host:
+        logical = f"_cross/{sanitize_segment(host)}/{logical}"
+    return logical
+
+
+def _known_suffixes() -> set[str]:
+    return JS_EXTS | {".html", ".htm", ".css", ".json", ".webmanifest", ".wasm", ".map", ".png", ".svg", ".woff", ".woff2"}
+
+
+# --------------------------------------------------------------------------- #
+# HTML parsing                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+class HtmlReferenceParser(html.parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scripts: list[str] = []
+        self.module_scripts: list[str] = []
+        self.stylesheets: list[str] = []
+        self.preloads: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): (value or "") for key, value in attrs}
+        tag = tag.lower()
+        if tag == "script" and values.get("src"):
+            if values.get("type", "").lower() == "module":
+                self.module_scripts.append(values["src"])
+            else:
+                self.scripts.append(values["src"])
+        elif tag == "link" and values.get("href"):
+            rel = values.get("rel", "").lower()
+            if "stylesheet" in rel:
+                self.stylesheets.append(values["href"])
+            elif "modulepreload" in rel or (rel == "preload" and values.get("as") == "script"):
+                self.preloads.append(values["href"])
+
+
+# --------------------------------------------------------------------------- #
+# Network                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def http_fetch(url: str, timeout: float) -> tuple[bytes, str]:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read()
+            content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            return body, content_type
+    except urllib.error.HTTPError as exc:
+        raise CollectorError(f"HTTP {exc.code} fetching {url}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise CollectorError(f"Network error fetching {url}: {exc}") from exc
+
+
+def language_from(url: str, content_type: str) -> str:
+    by_path = language_for_path(urllib.parse.urlsplit(url).path)
+    if by_path != "asset":
+        return by_path
+    return MIME_LANGUAGE.get(content_type, "asset")
+
+
+# --------------------------------------------------------------------------- #
+# Capture: directory mode                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def capture_directory(root: Path, include_assets: bool) -> Capture:
+    capture = Capture(artifact_root=root.resolve(), mode="directory")
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = posix_path(path.relative_to(root))
+        language = language_for_path(rel)
+        if not include_assets and language == "asset":
+            continue
+        is_entry = language == "html" and Path(rel).name.lower() in {"index.html", "index.htm", "main.html"}
+        capture.files.append(Fetched(rel, path.resolve(), language, is_entry))
+    if not any(f.is_entry for f in capture.files):
+        # No conventional index; mark the shallowest HTML file as entry.
+        htmls = sorted((f for f in capture.files if f.language == "html"), key=lambda f: f.logical.count("/"))
+        if htmls:
+            htmls[0].is_entry = True
+    return capture
+
+
+# --------------------------------------------------------------------------- #
+# Capture: HAR mode                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def har_entry_body(entry: dict[str, Any]) -> bytes | None:
+    content = entry.get("response", {}).get("content", {})
+    text = content.get("text")
+    if text is None:
+        return None
+    if content.get("encoding") == "base64":
+        try:
+            return base64.b64decode(text)
+        except (ValueError, TypeError):
+            return None
+    return text.encode("utf-8", errors="replace")
+
+
+def capture_har(har_path: Path, stage_dir: Path, include_assets: bool, timeout: float, refetch_missing: bool) -> Capture:
+    try:
+        har = json.loads(har_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise CollectorError(f"Failed to read HAR file {har_path}: {exc}") from exc
+    entries = har.get("log", {}).get("entries", [])
+    if not entries:
+        raise CollectorError(f"HAR file has no log.entries: {har_path}")
+
+    pages = har.get("log", {}).get("pages", [])
+    entry_url = pages[0].get("title") if pages and isinstance(pages[0].get("title"), str) else None
+    if entry_url and not entry_url.startswith(("http://", "https://")):
+        entry_url = None
+    if entry_url is None:
+        for entry in entries:
+            url = entry.get("request", {}).get("url", "")
+            ctype = entry.get("response", {}).get("content", {}).get("mimeType", "").split(";")[0].lower()
+            if language_from(url, ctype) == "html":
+                entry_url = url
+                break
+
+    origin = None
+    if entry_url:
+        parts = urllib.parse.urlsplit(entry_url)
+        origin = f"{parts.scheme}://{parts.netloc}"
+
+    out_root = stage_dir / "har"
+    capture = Capture(artifact_root=out_root.resolve(), entry_url=entry_url, origin=origin, mode="har")
+    seen: set[str] = set()
+    refetched = 0
+    for entry in entries:
+        url = entry.get("request", {}).get("url", "")
+        if not url or url.startswith(("data:", "blob:")):
+            continue
+        status = entry.get("response", {}).get("status", 0)
+        if status and not (200 <= status < 300):
+            continue
+        ctype = entry.get("response", {}).get("content", {}).get("mimeType", "").split(";")[0].lower()
+        language = language_from(url, ctype)
+        if not include_assets and language == "asset":
+            continue
+        if language == "asset" and ctype not in MIME_LANGUAGE:
+            continue  # Only code-like assets from HAR; skip images/fonts unless --include-assets.
+        logical = url_to_logical(url, origin, language)
+        if logical in seen:
+            continue
+        body = har_entry_body(entry)
+        if body is None and refetch_missing and url.startswith(("http://", "https://")):
+            try:
+                body, _ = http_fetch(url, timeout)
+                refetched += 1
+            except CollectorError:
+                body = None
+        if body is None:
+            capture.notes.append(f"no response body for {url} (HAR omitted content)")
+            continue
+        physical = out_root / logical
+        physical.parent.mkdir(parents=True, exist_ok=True)
+        physical.write_bytes(body)
+        seen.add(logical)
+        capture.files.append(Fetched(logical, physical.resolve(), language, url == entry_url, url=url))
+    if refetched:
+        capture.notes.append(f"refetched {refetched} response bodies missing from HAR")
+    if not any(f.is_entry for f in capture.files):
+        htmls = sorted((f for f in capture.files if f.language == "html"), key=lambda f: f.logical.count("/"))
+        if htmls:
+            htmls[0].is_entry = True
+    return capture
+
+
+# --------------------------------------------------------------------------- #
+# Capture: URL mode                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def capture_url(entry_url: str, stage_dir: Path, url_list: list[str], include_assets: bool,
+                timeout: float, follow_maps: bool) -> Capture:
+    parts = urllib.parse.urlsplit(entry_url)
+    if parts.scheme not in {"http", "https"}:
+        raise CollectorError(f"URL mode requires http(s); got {entry_url}")
+    origin = f"{parts.scheme}://{parts.netloc}"
+    out_root = stage_dir / "url"
+    capture = Capture(artifact_root=out_root.resolve(), entry_url=entry_url, origin=origin, mode="url")
+    seen: set[str] = set()
+
+    def materialise(url: str, language_hint: str | None = None) -> Fetched | None:
+        canon = urllib.parse.urldefrag(url)[0]
+        if not canon or canon.startswith(("data:", "blob:", "javascript:")):
+            return None
+        body, ctype = http_fetch(canon, timeout)
+        language = language_hint or language_from(canon, ctype)
+        if not include_assets and language == "asset":
+            return None
+        logical = url_to_logical(canon, origin, language)
+        if logical in seen:
+            return next((f for f in capture.files if f.logical == logical), None)
+        physical = out_root / logical
+        physical.parent.mkdir(parents=True, exist_ok=True)
+        physical.write_bytes(body)
+        seen.add(logical)
+        fetched = Fetched(logical, physical.resolve(), language, canon == urllib.parse.urldefrag(entry_url)[0], url=canon)
+        capture.files.append(fetched)
+        return fetched
+
+    entry = materialise(entry_url, "html")
+    if entry is None or entry.language != "html":
+        raise CollectorError(f"Entry URL did not return HTML: {entry_url}")
+
+    parser = HtmlReferenceParser()
+    parser.feed(entry.physical.read_text(encoding="utf-8", errors="ignore"))
+    refs = [
+        *((ref, "javascript") for ref in parser.scripts + parser.module_scripts + parser.preloads),
+        *((ref, "css") for ref in parser.stylesheets),
+    ]
+    for ref, hint in refs:
+        absolute = urllib.parse.urljoin(entry_url, ref)
+        try:
+            materialise(absolute, hint)
+        except CollectorError as exc:
+            capture.notes.append(str(exc))
+
+    for raw in url_list:
+        absolute = urllib.parse.urljoin(entry_url, raw.strip())
+        if not absolute:
+            continue
+        try:
+            materialise(absolute)
+        except CollectorError as exc:
+            capture.notes.append(str(exc))
+
+    if follow_maps:
+        follow_source_maps(capture, origin, out_root, timeout, seen)
+    return capture
+
+
+def follow_source_maps(capture: Capture, origin: str | None, out_root: Path, timeout: float, seen: set[str]) -> None:
+    marker = "sourceMappingURL="
+    for fetched in list(capture.files):
+        if fetched.language not in {"javascript", "css"}:
+            continue
+        try:
+            tail = fetched.physical.read_text(encoding="utf-8", errors="ignore")[-4096:]
+        except OSError:
+            continue
+        if marker not in tail:
+            continue
+        ref = tail.rsplit(marker, 1)[1].splitlines()[0].strip().strip("*/ ")
+        if not ref or ref.startswith("data:"):
+            continue
+        base = capture.entry_url and urllib.parse.urljoin(capture.entry_url, fetched.logical)
+        absolute = urllib.parse.urljoin(base or (origin or "") + "/" + fetched.logical, ref)
+        try:
+            body, _ = http_fetch(absolute, timeout)
+        except CollectorError as exc:
+            capture.notes.append(f"source map {ref}: {exc}")
+            continue
+        logical = url_to_logical(absolute, origin, "source_map")
+        if logical in seen:
+            continue
+        physical = out_root / logical
+        physical.parent.mkdir(parents=True, exist_ok=True)
+        physical.write_bytes(body)
+        seen.add(logical)
+        capture.files.append(Fetched(logical, physical.resolve(), "source_map", url=absolute))
+
+
+# --------------------------------------------------------------------------- #
+# Manifest assembly                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def source_unit(fetched: Fetched, include: list[str], exclude: list[str]) -> dict[str, Any]:
+    role = role_for_path(fetched.logical)
+    ingest = should_ingest(fetched.logical, fetched.language, include, exclude)
+    metadata: dict[str, Any] = {}
+    if fetched.physical.is_file():
+        metadata["file_size"] = fetched.physical.stat().st_size
+    if fetched.url:
+        metadata["source_url"] = fetched.url
+    return {
+        "id": stable_id(fetched.logical),
+        "logical_path": fetched.logical,
+        "physical_path": str(fetched.physical),
+        "role": role,
+        "language": fetched.language,
+        "ingest": ingest,
+        "entry": fetched.is_entry,
+        "container": None,
+        "metadata": metadata,
+    }
+
+
+def build_edges(sources: list[dict[str, Any]], origin: str | None) -> list[dict[str, Any]]:
+    lookup = {s["logical_path"]: s["id"] for s in sources}
+    by_id = {s["id"]: s for s in sources}
+    by_url = {s["metadata"]["source_url"]: s["id"] for s in sources if s.get("metadata", {}).get("source_url")}
+    edges: list[dict[str, Any]] = []
+
+    def resolve(source: dict[str, Any], ref: str) -> str | None:
+        clean = (ref or "").split("#", 1)[0]
+        if not clean or clean.startswith(("data:", "blob:", "javascript:")):
+            return None
+        base_url = source.get("metadata", {}).get("source_url")
+        if base_url:
+            # URL/HAR capture: resolve against the file's own URL, then map the
+            # absolute URL back to the logical path the same way capture did.
+            absolute = urllib.parse.urljoin(base_url, clean)
+            if absolute in by_url:
+                return by_id[by_url[absolute]]["logical_path"]
+            return url_to_logical(absolute, origin, language_for_path(absolute))
+        # Directory capture: root-relative refs (`/assets/x.js`) resolve against
+        # the artifact root; everything else relative to the referring file.
+        if clean.startswith(("http://", "https://", "//")):
+            return None
+        clean = clean.split("?", 1)[0]
+        if clean.startswith("/"):
+            return posix_path(clean.lstrip("/"))
+        return posix_path((Path(source["logical_path"]).parent / clean).as_posix())
+
+    for source in sources:
+        physical = Path(source["physical_path"]) if source.get("physical_path") else None
+        if not physical or not physical.is_file():
+            continue
+        logical = source["logical_path"]
+        if source["language"] == "html":
+            parser = HtmlReferenceParser()
+            try:
+                parser.feed(physical.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+            for ref in parser.scripts + parser.module_scripts + parser.preloads:
+                target = resolve(source, ref)
+                if target in lookup:
+                    edges.append({"from": source["id"], "to": lookup[target], "kind": "script", "metadata": {"ref": ref}})
+            for ref in parser.stylesheets:
+                target = resolve(source, ref)
+                if target in lookup:
+                    edges.append({"from": source["id"], "to": lookup[target], "kind": "stylesheet", "metadata": {"ref": ref}})
+        elif source["language"] in {"javascript", "typescript", "jsx", "tsx", "css"}:
+            try:
+                tail = physical.read_text(encoding="utf-8", errors="ignore")[-4096:]
+            except OSError:
+                continue
+            marker = "sourceMappingURL="
+            if marker in tail:
+                ref = tail.rsplit(marker, 1)[1].splitlines()[0].strip().strip("*/ ")
+                target = resolve(source, ref)
+                if target in lookup:
+                    by_id[source["id"]]["source_map_id"] = lookup[target]
+                    edges.append({"from": source["id"], "to": lookup[target], "kind": "source_map", "metadata": {"ref": ref}})
+    return edges
+
+
+def validate_manifest(manifest: dict[str, Any]) -> None:
+    sources = manifest.get("sources", [])
+    if not sources:
+        raise CollectorError("Manifest contains no source units")
+    ids = [s["id"] for s in sources]
+    logical_paths = [s["logical_path"] for s in sources]
+    duplicate_ids = [item for item, count in Counter(ids).items() if count > 1]
+    duplicate_paths = [item for item, count in Counter(logical_paths).items() if count > 1]
+    if duplicate_ids:
+        raise CollectorError(f"Duplicate source ids: {duplicate_ids[:5]}")
+    if duplicate_paths:
+        raise CollectorError(f"Duplicate logical paths: {duplicate_paths[:5]}")
+    ingestable = [s for s in sources if s.get("ingest")]
+    if not ingestable:
+        raise CollectorError("Manifest has no ingest-enabled JavaScript/TypeScript source units")
+    missing = [
+        s["logical_path"]
+        for s in ingestable
+        if not s.get("physical_path") or not Path(s["physical_path"]).is_file()
+    ]
+    if missing:
+        raise CollectorError(f"Ingest-enabled source units have missing physical paths: {missing[:5]}")
+
+
+def resolve_capture(args: argparse.Namespace, stage_dir: Path) -> Capture:
+    if args.from_har:
+        har = Path(args.from_har).resolve()
+        if not har.is_file():
+            raise CollectorError(f"HAR file does not exist: {har}")
+        return capture_har(har, stage_dir, not args.no_assets, args.timeout, not args.no_refetch_missing)
+
+    candidate = args.input
+    if candidate.startswith(("http://", "https://")):
+        url_list: list[str] = []
+        if args.url_list:
+            url_list = [line for line in Path(args.url_list).read_text(encoding="utf-8").splitlines() if line.strip()]
+        return capture_url(candidate, stage_dir, url_list, not args.no_assets, args.timeout, not args.no_follow_maps)
+
+    path = Path(candidate)
+    if path.is_dir():
+        return capture_directory(path, not args.no_assets)
+    raise CollectorError(
+        f"Input is neither an http(s) URL nor an existing directory: {candidate}. "
+        "Pass a URL, a downloaded-assets directory, or use --from-har."
+    )
+
+
+def collect(args: argparse.Namespace) -> tuple[dict[str, Any], Capture]:
+    output_manifest = Path(args.output_manifest).resolve()
+    stage_dir = Path(args.stage_dir).resolve() if args.stage_dir else output_manifest.parent / "website-collector-stage"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+
+    capture = resolve_capture(args, stage_dir)
+    sources = [source_unit(f, args.ingest_include, args.ingest_exclude) for f in capture.files]
+    edges = build_edges(sources, capture.origin)
+
+    metadata = {
+        "collector": "website-collector",
+        "collector_version": 1,
+        "input_path": args.from_har or args.input,
+        "capture_mode": capture.mode,
+        "entry_url": capture.entry_url,
+        "origin": capture.origin,
+        "artifact_root": str(capture.artifact_root),
+        "notes": capture.notes,
+        "platform_support": {
+            "directory": "local directory of downloaded site assets",
+            "har": "HTTP Archive capture (recommended for SPAs; captures dynamic chunks)",
+            "url": "static HTML crawl of <script>/<link>/modulepreload + sourceMappingURL",
+        },
+        # Backstop for schema_v1: preserve the full collector-emitted role string
+        # per logical path so it survives even when SourceRole::from_str() collapses
+        # unknown values to Unknown server-side.
+        "collector_roles": {s["logical_path"]: s["role"] for s in sources},
+    }
+    manifest = {
+        "schema_version": 1,
+        "profile": "web-app",
+        "artifact_root": str(capture.artifact_root),
+        "sources": sources,
+        "edges": edges,
+        "metadata": metadata,
+    }
+    validate_manifest(manifest)
+    output_manifest.parent.mkdir(parents=True, exist_ok=True)
+    output_manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return manifest, capture
+
+
+def report(manifest: dict[str, Any], capture: Capture, output_manifest: Path) -> dict[str, Any]:
+    sources = manifest["sources"]
+    by_role = Counter(s["role"] for s in sources)
+    by_language = Counter(s["language"] for s in sources)
+    return {
+        "status": "ok",
+        "manifest_path": str(Path(output_manifest).resolve()),
+        "profile": manifest["profile"],
+        "capture_mode": capture.mode,
+        "entry_url": capture.entry_url,
+        "artifact_root": manifest["artifact_root"],
+        "source_units": len(sources),
+        "ingest_enabled": sum(1 for s in sources if s.get("ingest")),
+        "edges": len(manifest["edges"]),
+        "by_role": dict(sorted(by_role.items())),
+        "by_language": dict(sorted(by_language.items())),
+        "notes": capture.notes,
+    }
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("input", nargs="?", default="", help="Website URL (http/https) or a downloaded-assets directory")
+    parser.add_argument("--from-har", help="Collect from a HAR capture file instead of a URL/directory")
+    parser.add_argument("--url-list", help="File of extra absolute/relative asset URLs (one per line) to fetch in URL mode")
+    parser.add_argument("--output-manifest", required=True, help="Path to write artifact-manifest.json")
+    parser.add_argument("--stage-dir", help="Persistent directory for fetched/extracted files")
+    parser.add_argument("--no-assets", action="store_true", help="Skip non-code assets (images/fonts); keep code, maps, json, wasm")
+    parser.add_argument("--no-follow-maps", action="store_true", help="URL mode: do not follow sourceMappingURL references")
+    parser.add_argument("--no-refetch-missing", action="store_true", help="HAR mode: do not refetch bodies the HAR omitted")
+    parser.add_argument("--timeout", type=float, default=30.0, help="Per-request network timeout in seconds (default 30)")
+    parser.add_argument("--ingest-include", action="append", default=[], help="Glob for JS/TS logical paths to enable ingest; repeatable")
+    parser.add_argument("--ingest-exclude", action="append", default=[], help="Glob for JS/TS logical paths to disable ingest; repeatable")
+    parser.add_argument("--json-report", action="store_true", help="Print machine-readable summary JSON")
+    args = parser.parse_args(argv)
+    if not args.input and not args.from_har:
+        parser.error("provide an input URL/directory or --from-har")
+    return args
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    try:
+        manifest, capture = collect(args)
+        summary = report(manifest, capture, args.output_manifest)
+        if args.json_report:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        else:
+            print(f"Wrote {summary['manifest_path']}")
+            print(f"mode={summary['capture_mode']} source_units={summary['source_units']} "
+                  f"ingest_enabled={summary['ingest_enabled']} edges={summary['edges']}")
+        return 0
+    except CollectorError as exc:
+        print(f"website-collector: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -16,6 +16,7 @@ skills/
 ├── decompile/                # webpack/esbuild bundle decompilation pipeline
 ├── browser-extension-collector/ # browser-extension artifact collection + manifest ingestion
 ├── electron-collector/       # Electron artifact collection + decompile handoff
+├── website-collector/        # website frontend (URL/HAR/dir) capture + web-app decompile handoff
 ├── reverts-decompile/        # post-export install / tsc / startup validation
 └── install                   # local-dev installer script (symlinks into ~/.claude/skills)
 ```
@@ -44,7 +45,8 @@ claude mcp add reverts -- npx -y reverts
 
 The MCP server announces the bundled skills under the `reverts:` namespace:
 `reverts:decompile`, `reverts:browser-extension-collector`,
-`reverts:electron-collector`, and `reverts:reverts-decompile`.
+`reverts:electron-collector`, `reverts:website-collector`, and
+`reverts:reverts-decompile`.
 
 ### Local development (this worktree)
 
