@@ -39,7 +39,10 @@ Playwright-backed UI interaction checks for browser or extension outputs.
   blocker fires (see [Hard Blockers](#hard-blockers) below). Do not loop past
   a blocker; surface it and stop.
 - Do not ask for confirmation on routine progress questions. Only ask the
-  user when an input is missing or when a hard blocker is hit.
+  user when an input is missing, when a hard blocker is hit, or to choose the
+  **naming target tier** beyond the mandatory `public-surface` gate (see
+  [Naming to target](#naming-to-target-mechanism-first-coverage)) — that scope
+  is a cost decision the user owns.
 - The main agent is an orchestrator: status → dispatch → re-check status.
 - Default to `cat:"app"`. Use `cat:"pkg"` only with exact npm package identity,
   npm-installable version (e.g. `"4.28.1"`, a concrete semver that
@@ -47,11 +50,15 @@ Playwright-backed UI interaction checks for browser or extension outputs.
   A package classification is not complete until `update_modules` records
   `emit`, `subpath`/`specifier`, and evidence, then `verify_package_attributions`
   accepts it against the installed `node_modules` tree.
-- **All public-surface symbols must have semantic names before output.** Public
-  surface = exported symbols + owned globals. The `public_surface` ratio in
-  `decompile_status` must reach 100%.
-- Prioritize public surface first: exported symbols, owned globals,
-  constructor/state fields, internal helpers, locals last.
+- **All public-surface names must be semantic before output.** Public surface =
+  exported symbols + owned globals **+ module file paths + module names**. The
+  emitted file path and the module name are read by every importer and by anyone
+  browsing the tree, so they are public surface too — rename them as part of the
+  public-surface pass, not as an afterthought (`module-names --accept
+  <MODULE_ID=path>` for paths; `reference-source-names` sets both automatically
+  when an upstream tree exists). The `public_surface` ratio must reach 100%.
+- Prioritize public surface first: module paths/names, exported symbols, owned
+  globals, constructor/state fields, internal helpers, locals last.
 - Do not rename bundler/runtime helpers into fake business terms just to
   remove warnings.
 
@@ -88,6 +95,15 @@ Resolve `$ARGUMENTS` into `project_id` and optional `output_dir`.
 ### Output directory
 
 If `$ARGUMENTS` contains `-o <path>` or `--output <path>`, resolve it to `output_dir`. Otherwise the MCP server default is `{project_root_path}/out`.
+
+**The output directory must be persistent — never under `/tmp` or any
+scratch/temp location.** A decompiled app is a long-term project: its generated
+source, its SQLite project DB, and its `e2e/` validation harness must survive
+reboots and tmp cleanup, and regeneration (`generate-project-v2 --output <dir>`
+preserves a pre-existing `e2e/` subtree). Prefer a stable project root such as
+`~/<workspace>/<app>-decompiled/` holding the project DB beside the generated
+app, e.g. `…/app/` (generated source) + `…/project.sqlite`. If the resolved
+output is a temp path, relocate it and tell the user where it lives.
 
 ### Source argument
 
@@ -152,6 +168,18 @@ highest-confidence mechanism first and falling back to agent naming only for the
 residue. Run these in order every time; do not jump straight to per-module agent
 naming.
 
+> **Ask the user for the target tier before spending agent-naming budget.**
+> `public-surface` is the mandatory gate ([Phase 4](#phase-4-completion-gate));
+> `declarations` and `full` are optional and can be **5–7× larger** (real bundles
+> run to tens of thousands of bindings, dominated by low-value local names). After
+> step 1 (denominator) and step 2 (deterministic auto-name), run `naming-progress`
+> per tier and **present the remaining counts to the user, then ask which tier to
+> drive to 100%** — do not silently grind to `full`. This is an explicit exception
+> to "don't ask routine questions": naming scope is a cost decision the user owns.
+> Default to `public-surface` only if the user does not answer. Deterministic
+> mechanisms (steps 1–2) and the package/externalization pass always run
+> regardless of the chosen tier; the question only bounds *agent* naming.
+
 1. **Refine the denominator before measuring.** Classify modules so the ratio
    targets the true first-party surface, not package or runtime-glue code
    (`module-classify --auto --apply`; MCP: `update_modules` category edits). An
@@ -213,6 +241,113 @@ This ordering is what makes the [Phase 4](#phase-4-completion-gate) coverage gat
 *achievable* rather than aspirational: deterministic mechanisms cover the bulk,
 agent naming closes the precise remainder, and both naming channels keep the
 entry island in scope.
+
+### Naming-channel routing and id-spaces (do not mix them)
+
+A binding is named through exactly one channel, decided by where it lives:
+
+| Where the binding lives | Channel / CLI | Key |
+|---|---|---|
+| First-party **module** symbol (has a `modules` row) | `symbol-names --batch` | DB `modules.id` |
+| **Module-less** island binding (`entrypoint.ts`, `island/cluster-*.ts`) | `binding-names --batch` | `file_path` |
+| Module **file path** | `module-names --accept <id=path>` | DB `modules.id` |
+
+Two id-spaces exist and are easy to confuse: `symbol-names`/`module-names`
+validate against **DB `modules.id`** (`module_belongs_to_project`), while
+`naming-plan` and emitted file prefixes use the **output module id** (the
+`NNN-` prefix in `modules/NNN-….ts`). For vendored `node_modules` modules the
+two coincide (emitted prefix `== modules.id`), so `symbol-names --accept
+22:Orig=Sem` works directly. For main-bundle-extracted modules they may diverge;
+resolve the DB id via the `modules` table before accepting, or route island-level
+work through `binding-names`. A `module N does not belong to project` error means
+you handed an output id where a DB id was required.
+
+Renaming a module export's **wire** name (the all-or-nothing collapse of
+`export { Sem as Orig }` → `export { Sem }`) propagates to *every* importer,
+including the entry island's own direct and packed source-module imports. If a
+named build ever fails to bundle with `No matching export … for import 'Orig'`,
+that is a propagation bug in the pipeline (an importer kept the stale wire name),
+not something to hand-fix in the output — file it and fix the mechanism.
+
+## Package matching & externalization (third-party)
+
+Externalization replaces a recovered copy of a third-party library with a bare
+`import 'pkg'` / `require('pkg')`, shrinking the first-party surface that has to
+be named and verified. There are two distinct shapes; run both.
+
+### A. Vendored packages (their own `node_modules` modules)
+
+Libraries shipped as real files (`node_modules/ws/…`, `node_modules/node-pty/…`,
+private `@scope/*`) own `modules` rows and are matched deterministically.
+
+1. **Classify** — `module-classify --auto --apply` marks vendored
+   `node_modules` paths as third-party (deterministic; also refines the naming
+   denominator). For ambiguous modules, an agent supplies verdicts via
+   `module-classify --batch <MODULE_ID<TAB>classification<TAB>evidence>`.
+2. **Match against local sources** — `match-packages --package-source-root
+   <appRoot> --apply`. `<appRoot>` is the extracted app root whose
+   `node_modules` holds the real package sources (and the merged
+   `app.asar.unpacked` natives). The matcher fingerprints each module's surface
+   against the package source and, only when the module's function surface is a
+   subset of the package's, accepts an `external_importable` attribution. Private
+   `@scope/*` packages with no public registry 404 and are skipped — expected.
+3. Output then emits bare `import`/`require` for accepted packages; the `.node`
+   natives are carried as assets.
+
+### B. Inlined libraries (bundled into the island, no module)
+
+A scope-hoisted bundle inlines libraries (zod, lodash, mermaid, d3, …) into the
+eager island with **no module boundary** and all names minified — the vendored
+matcher (module-keyed) can never see them. Recover them with the
+**agent-proposes → deterministic-confirms** anchoring flow (the user contract:
+"third-party packages are proposed by the model/Agent, then confirmed by
+deterministic matching"):
+
+1. **Agent proposes candidate package names** from string anchors / API shapes
+   visible in the island (`z.object`, `ZodError`; `cloneDeep`, lodash internals;
+   mermaid/d3 globals): `island-package-candidates --accept <pkg> [--version <v>]
+   --evidence "<anchors>" --apply`. A wrong guess is harmless — it just fails to
+   match and anchors nothing.
+2. **Deterministic confirm** — `match-packages --reference-source-root <appRoot>
+   --materialize-package-sources --apply`. This reads accepted candidates (and
+   reference `package.json` devDependencies — bundled libs live there, not in
+   shipped deps), downloads only concrete compatible versions into the package
+   cache, and fingerprints island bindings against them, writing
+   `package_island_anchors` (keyed by `(project, source_file, binding)`, no
+   `module_id`). `generate-project-v2` then drops anchored island bindings from
+   the naming denominator.
+   - Anchoring uses minification-robust axes (structural/feature/string anchors).
+     Per-function structural hashing alone is too weak across esbuild
+     scope-hoist+minify vs npm source; this is why module-level **clustering of
+     the island happens first** — cluster, then match at module granularity.
+   - The step-A command already runs island anchoring opportunistically: when
+     `<appRoot>` ships the inlined libs' sources (under its `node_modules` or as
+     reference `devDependencies`), `match-packages --package-source-root <appRoot>`
+     builds an "island corpus" and anchors in the same pass — no separate
+     candidate step needed. Use the explicit `island-package-candidates` +
+     `--materialize-package-sources` flow only for libs whose sources are NOT
+     on disk and must be fetched from the registry.
+
+### Report quirk: verify the *output*, not just the metric
+
+`match-packages` can log `0 package source eliminated (0.00%)` while still
+writing valid attributions/surfaces and producing bare imports — the elimination
+% is a source-byte metric that lags single-pass runs. Do NOT conclude
+externalization failed from that line. Confirm against the regenerated output:
+grep for the expected `import 'pkg'` / `require('pkg')`, check the naming
+denominator shrank (anchored + externalized bindings leave `symbol-index.json`),
+and that `tsc`/trace still pass. `AmbiguousPackageSurfaceVersion` for a package's
+uninstalled *optional* native deps (e.g. `bufferutil`, `utf-8-validate`,
+`cpu-features` for `ws`) is expected and harmless — those stay inlined.
+
+### Verify (both shapes)
+
+`match-packages-report --all-projects` (or per-project) shows match,
+externalization, and source-elimination rates. After regenerating, confirm bare
+imports are present, `tsc -p tsconfig.runtime.json --noEmit` still exits 0, and
+the equivalence trace is unchanged (externalized package calls become stubbed
+interactions but must keep the same multiset). Never demote a real match to
+`app` to silence a verification miss — fix the identity/version/subpath instead.
 
 ## Phase 1: Setup
 
@@ -292,6 +427,12 @@ If `incomplete_decompilation > 0` after Phase 2:
 
 ### 3.3 Package fixup
 
+> CLI pipeline: the deterministic externalization flow (classify → match local
+> sources → anchor inlined island libraries) lives in
+> [Package matching & externalization](#package-matching--externalization-third-party).
+> The MCP steps below are the server-tool equivalents.
+
+
 - Fetch `decompile_status(..., issue_type="package_attribution_unverified")`
 - For `missing_attribution` or `proposed`, read source evidence and resubmit
   `update_modules` with `pkg/ver/emit/specifier/subpath/evidence`
@@ -345,9 +486,12 @@ This typically resolves 80-95% of init-shim half-residue cleanly. The remaining 
 Use severity tiers instead of demanding cosmetic perfection.
 **All public-surface symbols MUST have semantic names before output generation.**
 
-Public surface = exported symbols + owned globals + module semantic names.
-Check with `decompile_status`: the `public_surface` field tracks public-surface naming progress
-(e.g. `public_surface=2395/5609 (42.7%)`). This ratio must reach **100%** before proceeding to output.
+Public surface = exported symbols + owned globals + module names + module file
+paths. Check with `decompile_status`: the `public_surface` field tracks
+public-surface naming progress (e.g. `public_surface=2395/5609 (42.7%)`). This
+ratio must reach **100%** before proceeding to output, and module paths/names
+must be semantic — a tree of `modules/247-esbuild-rbr.ts` is not a named public
+surface even if every symbol inside is named.
 
 Reaching it is the job of the [Naming to target](#naming-to-target-mechanism-first-coverage)
 loop — drive the metric with deterministic auto-naming first, then agent naming
@@ -367,23 +511,33 @@ for the residue. The gate below only *checks* the result; it does not produce it
 The completion ratio is only meaningful if its denominator covers **all**
 recovered first-party code. A scope-hoisting bundler (esbuild/rollup) leaves a
 large block of eager top-level code that belongs to no module — the pipeline
-emits it as a single **unmodularized recovered-code file** (an "entry island")
-owned by no `module_id`. That file can hold the *majority* of the application's
-declarations. If the naming progress reports a small denominator next to a large
-generated entry-island file, the denominator is excluding it and a "100%" is
-fake.
+emits it as one or more **unmodularized recovered-code files** (the "entry
+island") owned by no `module_id`. That code can hold the *majority* of the
+application's declarations. If the naming progress reports a small denominator
+next to large generated island file(s), the denominator is excluding them and a
+"100%" is fake.
+
+The island may be emitted as a **single** `modules/entrypoint.ts` OR
+**decomposed into per-cluster files** (`modules/island/cluster-*.ts`) when the
+planner splits it. Both forms carry `unmodularized_recovered_code` and name
+through the **same `binding-names` channel** (file-path keyed). Every one of
+those files is its own naming-plan/progress group with a null `module_id`. Count
+them all — a split island that lists 52 cluster groups plus the residual
+`entrypoint.ts` group must contribute the union of their bindings to the
+denominator, not just `entrypoint.ts`.
 
 Before accepting the gate:
 
 1. Confirm the naming universe includes module-less code. The naming progress
    report lists a per-file group with a null `module_id`
-   (`rename_channel: "binding-names"`) for every unmodularized recovered-code
-   file. Its symbol count must be non-zero whenever such a file was generated,
+   (`rename_channel: "binding-names"`) for **every** unmodularized recovered-code
+   file — the residual `entrypoint.ts` and each `modules/island/cluster-*.ts`.
+   Each group's symbol count must be non-zero whenever that file was generated,
    and those symbols MUST be in the `full`-tier denominator.
-2. If a generated entry-island file exists but contributes **zero** symbols to
-   the denominator, that is a pipeline defect (symbol indexing not registering
-   the island), not a naming-complete state. File it and fix the mechanism — do
-   not proceed to output.
+2. If a generated island file (entry or any cluster) exists but contributes
+   **zero** symbols to the denominator, that is a pipeline defect (symbol
+   indexing not registering the island), not a naming-complete state. File it
+   and fix the mechanism — do not proceed to output.
 3. Never declare naming complete from `reached_level` alone. A `complete: true`
    over an under-counted universe is a false pass.
 
@@ -451,6 +605,54 @@ If `tsc` or runtime smoke exposes a decompile-stage bug, add a pipeline issue
 and regression test, fix ReverTS, regenerate, and rerun validation. A clean
 `tsc` is not done; profile-specific smoke must pass with zero browser/runtime
 errors. Never hand-patch generated output to make it run.
+
+### Emit a directly-runnable e2e harness beside the generated source
+
+The decompiled project must ship its own end-to-end validation so anyone can
+prove the recovered code still behaves like the original. Create it under
+**`<output>/e2e/reverts/`** (the generator preserves a pre-existing `e2e/`
+across regeneration) — directly runnable via `npm test`, no ReverTS install
+required.
+
+1. **Detect how the app launches from its own source — do not assume.** Read the
+   generated `package.json` and entry:
+
+   | Source signal | Profile | e2e validation |
+   |---|---|---|
+   | `electron` dep, or `main`+`preload`, or an Electron start script | electron main process | main-process equivalence trace (below); optional GUI drop-in |
+   | `bin`/shebang, `main` → node entry, no electron | node CLI/service | run entry under stubbed I/O; assert exit + interaction trace |
+   | `manifest.json` / service worker | browser-extension | Playwright/CDP load + console-error/UI checks |
+   | renderer `index.html` + bundle | web | headless browser load + console-error checks |
+
+2. **For a main-process / Node entry, generate the equivalence-trace harness.**
+   A full GUI launch is usually infeasible headless (display, sign-in, helper
+   processes), so the runnable gate is the **original-vs-recovered interaction
+   trace**: run the recovered main AND the original bundle under one identical
+   instrumented `Module._load` stub (electron main model — `ipcRenderer`
+   undefined, string-returning `app.getPath`/`getName`, `whenReady` resolves,
+   `process.versions.electron` defined; native `.node` and externalized packages
+   stubbed) and compare the **interaction multiset** + error set. The runner
+   (`run.mjs`) must: (a) `tsc -p tsconfig.runtime.json --noEmit`; (b)
+   esbuild-bundle the recovered entry to CJS (wrap the top-level `await`, restore
+   `import.meta.url` via banner, externalize every native/3rd-party dep);
+   (c) trace both programs; (d) assert **recovered ⊇ reference** — no original
+   interaction is dropped or under-run, the recovered main loads without error,
+   and the only extras are benign idempotent builtin `require`s introduced by
+   modular re-emission (split clusters + ESM entry add a few `require('url')`/
+   `require('module')` for the `import.meta` shim). Exit non-zero on any dropped
+   interaction, any non-`require` extra, or a recovered load error. Keep the
+   original main bundle at `e2e/reverts/reference/main-bundle.cjs` (it must use
+   `.cjs`; the harness package is `type: module`).
+
+3. **Run it and gate on it.** `cd <output>/e2e/reverts && npm install && npm
+   test`. A failing trace diff is a decompile-stage bug — file it, fix ReverTS,
+   regenerate, re-run. Do not relax the harness to make it pass.
+
+The GUI drop-in (repack `app.asar`, fix asar-integrity header, re-sign, launch
+with macOS `open <App>` so LaunchServices spawns the renderer tree) is the deeper
+UI proof and is documented in
+[reverts-decompile](../reverts-decompile/references/runtime-validation-profiles.md);
+it is app-specific and not part of the headless `e2e/reverts` check.
 
 ## Guardrails
 
