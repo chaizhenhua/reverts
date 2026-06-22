@@ -399,9 +399,23 @@ fn try_synthesize_plan(
 ) -> Option<IslandPackagePlan> {
     let mut synthesized_members = Vec::new();
     let mut member_bindings: BTreeSet<String> = BTreeSet::new();
+    // A scope-hoisting bundler inlines each of a package's source files as ONE
+    // CJS module unit, so a given submodule (e.g. `classes/range.js`) is claimed
+    // by exactly one island unit. If several distinct units map to the SAME
+    // submodule, the function-ownership fingerprint over-matched (a trivial
+    // member body collided onto a popular submodule, dragging unrelated island
+    // modules — even those of OTHER packages — in with it). Trusting that would
+    // rebind every false-positive unit's exports to the same namespace member
+    // (e.g. 96 unrelated bindings all set to `semver.Range`, blanking out a real
+    // module's init body). The attribution is unreliable, so bail and leave the
+    // package inlined rather than emit broken externalization.
+    let mut seen_submodules: BTreeSet<&str> = BTreeSet::new();
     for &unit_index in member_indices {
         let unit = &units[unit_index];
         let relpath = member_submodule.get(&unit_index)?; // unknown submodule → bail
+        if !seen_submodules.insert(relpath.as_str()) {
+            return None; // duplicate submodule → fingerprint over-match → not safe
+        }
         let reexports = index.for_submodule(relpath);
         if reexports.is_empty() {
             return None; // member not re-exported by the index → cannot externalize cleanly
@@ -563,6 +577,40 @@ mod tests {
             vec![(String::new(), "A".to_string())]
         );
         assert_eq!(member_a.init_fn, "iA");
+    }
+
+    #[test]
+    fn over_matched_duplicate_submodule_is_not_synthesized() {
+        // Two distinct island units (eA, eB) both anchored to the SAME submodule
+        // (`classes/a.js`) — the signature of a function-ownership fingerprint
+        // over-match (a trivial body collided onto one popular submodule, sweeping
+        // in an unrelated module). Synthesis must bail and leave the package
+        // inlined rather than rebind both exports to the same `ns.A` (which would
+        // blank out the second module's real init body — the semver/`Range`
+        // regression that broke RxJS's Scheduler).
+        let source = "var eA = {};\nvar gA;\nfunction iA() { return gA || (gA = 1, eA.a = 1), eA; }\n\
+                      var eB = {};\nvar gB;\nfunction iB() { return gB || (gB = 1, eB.b = 2), eB; }\n";
+        let mut index_maps = BTreeMap::new();
+        index_maps.insert(
+            ("pkg-z".to_string(), "1.9.0".to_string()),
+            reverts_js::parse_index_reexports(
+                "module.exports = { A: require('./classes/a'), B: require('./classes/b') };",
+            ),
+        );
+        let plans = aggregate_island_packages(
+            &prelude(source),
+            &[
+                anchor_sub("eA", "pkg-z", "pkg-z/classes/a.js"),
+                anchor_sub("eB", "pkg-z", "pkg-z/classes/a.js"),
+            ],
+            &index_maps,
+        );
+        assert_eq!(plans.len(), 1, "{plans:?}");
+        assert!(
+            !plans[0].externalizable,
+            "duplicate submodule must not externalize: {:?}",
+            plans[0]
+        );
     }
 
     #[test]
