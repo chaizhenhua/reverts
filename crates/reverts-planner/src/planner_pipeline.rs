@@ -145,6 +145,15 @@ pub(crate) struct PlanningState {
     pub(crate) runtime: RuntimePlanPreparation,
     pub(crate) runtime_helpers: RuntimeHelperUsageAccumulator,
     pub(crate) package_runtime: PackageRuntimeAccumulator,
+    /// The entrypoint island's `(source_file_id, written runtime-setter bindings)`,
+    /// captured by `MarkEntrypointRuntimePass` from the island plan it already
+    /// computes, so `RegisterEntrypointIslandSettersPass` can register the setters
+    /// WITHOUT recomputing the identical ≈3.7s `entrypoint_island_plan`. `None` when
+    /// the Mark pass produced no island (the Register pass then computes it itself).
+    /// The island closure is unchanged by the intervening island-emit (it only adds
+    /// the island file; the module imports the plan-dependent steps inspect were all
+    /// planned earlier), and the e2e equivalence smoke gates any drift.
+    entrypoint_island_setters: Option<(u32, BTreeSet<BindingName>)>,
 }
 
 impl PlanningState {
@@ -158,6 +167,7 @@ impl PlanningState {
             runtime,
             runtime_helpers,
             package_runtime: PackageRuntimeAccumulator::default(),
+            entrypoint_island_setters: None,
         }
     }
 }
@@ -291,6 +301,12 @@ impl PlanningPass for MarkEntrypointRuntimePass {
                 &context.analysis().externalized_packages,
                 Some(&state.plan),
             ) {
+                // Capture the island's setter bindings now so RegisterSetters reuses
+                // them instead of recomputing the identical island plan.
+                state.entrypoint_island_setters = Some((
+                    island.source_file_id,
+                    cli_entrypoint::island_written_runtime_setter_bindings(&island),
+                ));
                 let runtime_bindings = island.runtime_bindings.clone();
                 cli_entrypoint::emit_planned_entrypoint_island(
                     context.program(),
@@ -324,6 +340,19 @@ impl PlanningPass for RegisterEntrypointIslandSettersPass {
         context: &PlannerContext<'_>,
         state: &mut PlanningState,
     ) -> Result<(), PlanError> {
+        // Reuse the island setter bindings MarkEntrypointRuntimePass already derived
+        // from the island plan, avoiding a second ≈3.7s entrypoint_island_plan.
+        if let Some((source_file_id, written)) = state.entrypoint_island_setters.take() {
+            if !written.is_empty() {
+                state
+                    .runtime_helpers
+                    .used_runtime_helper_setters
+                    .entry(source_file_id)
+                    .or_default()
+                    .extend(written);
+            }
+            return Ok(());
+        }
         let occupied = runtime_entrypoint(context.program())
             .map(|(_prelude, entrypoint)| {
                 occupied_runtime_bindings_for_entrypoint(context, state, entrypoint.source_file_id)

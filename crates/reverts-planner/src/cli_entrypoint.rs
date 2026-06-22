@@ -274,7 +274,9 @@ pub(crate) fn entrypoint_island_plan(
 /// through the helper's `__reverts_set_X` setter, exactly like normal modules do
 /// via `record_lowered_runtime_helper_usage`. The island bypasses that path, so
 /// we recover the written set here from the island source's implicit writes.
-fn island_written_runtime_setter_bindings(island: &EntrypointIslandPlan) -> BTreeSet<BindingName> {
+pub(crate) fn island_written_runtime_setter_bindings(
+    island: &EntrypointIslandPlan,
+) -> BTreeSet<BindingName> {
     implicit_global_writes_in_source(island.source.as_str())
         .into_iter()
         .filter(|binding| island.runtime_bindings.contains(binding))
