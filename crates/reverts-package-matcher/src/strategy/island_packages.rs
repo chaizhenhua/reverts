@@ -417,44 +417,44 @@ fn try_synthesize_plan(
     // module's init body). The attribution is unreliable, so bail and leave the
     // package inlined rather than emit broken externalization.
     let debug = std::env::var_os("REVERTS_DEBUG_ISLAND_PKG").is_some();
-    let mut seen_submodules: BTreeSet<&str> = BTreeSet::new();
+    // How many member units claim each submodule. A submodule claimed by >1 unit
+    // is a fingerprint over-match (a trivial body collided onto a popular submodule
+    // like `classes/range.js`, dragging unrelated island units in). Rebinding those
+    // false positives all to one namespace member blanks a real module's body — so
+    // EXCLUDE every over-claimed submodule's units (they stay inlined, untouched)
+    // and synthesize only the cleanly 1:1-mapped members. Previously the whole
+    // package bailed on the first duplicate, leaving e.g. semver fully inlined even
+    // though its other submodules map cleanly.
+    let mut units_per_submodule: BTreeMap<&str, usize> = BTreeMap::new();
+    for &unit_index in member_indices {
+        if let Some(relpath) = member_submodule.get(&unit_index) {
+            *units_per_submodule.entry(relpath.as_str()).or_default() += 1;
+        }
+    }
+    let mut excluded_overmatched = 0usize;
     for &unit_index in member_indices {
         let unit = &units[unit_index];
         let Some(relpath) = member_submodule.get(&unit_index) else {
+            // Unknown submodule for this unit: cannot safely rebind it, and it may
+            // genuinely belong to the package — keep the package inlined rather than
+            // emit a barrel missing this member.
             if debug {
                 eprintln!("island-pkg synth bail {package}: unit {unit_index} has no submodule");
             }
-            return None; // unknown submodule → bail
+            return None;
         };
-        if !seen_submodules.insert(relpath.as_str()) {
-            if debug {
-                let dupes: Vec<String> = member_indices
-                    .iter()
-                    .filter(|&&i| member_submodule.get(&i).map(String::as_str) == Some(relpath.as_str()))
-                    .map(|&i| {
-                        format!(
-                            "{}(init={},binds={})",
-                            i,
-                            units[i].init_fn,
-                            unit_binding_count(&units[i])
-                        )
-                    })
-                    .collect();
-                eprintln!(
-                    "island-pkg synth bail {package}: duplicate submodule '{relpath}' units=[{}]",
-                    dupes.join(", ")
-                );
-            }
-            return None; // duplicate submodule → fingerprint over-match → not safe
+        if units_per_submodule.get(relpath.as_str()).copied().unwrap_or(0) > 1 {
+            // Over-claimed submodule → false-positive collision. Skip these units;
+            // they stay inlined (NOT added to member_bindings, so the planner never
+            // removes them) and are never rebound.
+            excluded_overmatched += 1;
+            continue;
         }
         let reexports = index.for_submodule(relpath);
         if reexports.is_empty() {
-            if debug {
-                eprintln!(
-                    "island-pkg synth bail {package}: submodule '{relpath}' not re-exported by index"
-                );
-            }
-            return None; // member not re-exported by the index → cannot externalize cleanly
+            // Cleanly-claimed but not re-exported by the index → can't provide it
+            // from the package's public surface; leave it inlined too.
+            continue;
         }
         let namespace_members: Vec<(String, String)> = reexports
             .iter()
@@ -472,6 +472,12 @@ fn try_synthesize_plan(
         });
         extend_unit_bindings(&mut member_bindings, unit);
     }
+    if debug && excluded_overmatched > 0 {
+        eprintln!(
+            "island-pkg synth {package}: excluded {excluded_overmatched} over-matched unit(s), synthesized {} clean member(s)",
+            synthesized_members.len()
+        );
+    }
     if synthesized_members.is_empty() {
         return None;
     }
@@ -487,12 +493,6 @@ fn try_synthesize_plan(
         skip_reason: None,
         synthesized_members,
     })
-}
-
-fn unit_binding_count(unit: &RecognizedCjsModule) -> usize {
-    let mut set = BTreeSet::new();
-    extend_unit_bindings(&mut set, unit);
-    set.len()
 }
 
 fn extend_unit_bindings(bindings: &mut BTreeSet<String>, unit: &RecognizedCjsModule) {
@@ -653,6 +653,46 @@ mod tests {
             "duplicate submodule must not externalize: {:?}",
             plans[0]
         );
+    }
+
+    #[test]
+    fn over_matched_submodule_is_excluded_but_clean_members_still_externalize() {
+        // Resilience: `classes/a.js` is over-claimed by two units (eA, eB — a
+        // fingerprint collision), while `classes/b.js` is cleanly claimed by one
+        // unit (eC). The over-matched units must be EXCLUDED (left inlined, never
+        // rebound — no blanking), and the clean member `B` must still synthesize,
+        // so the package externalizes its clean surface instead of bailing wholesale.
+        let source = "var eA = {};\nvar gA;\nfunction iA() { return gA || (gA = 1, eA.a = 1), eA; }\n\
+                      var eB = {};\nvar gB;\nfunction iB() { return gB || (gB = 1, eB.b = 2), eB; }\n\
+                      var eC = {};\nvar gC;\nfunction iC() { return gC || (gC = 1, eC.c = 3), eC; }\n";
+        let mut index_maps = BTreeMap::new();
+        index_maps.insert(
+            ("pkg-z".to_string(), "1.9.0".to_string()),
+            reverts_js::parse_index_reexports(
+                "module.exports = { A: require('./classes/a'), B: require('./classes/b') };",
+            ),
+        );
+        let plans = aggregate_island_packages(
+            &prelude(source),
+            &[
+                anchor_sub("eA", "pkg-z", "pkg-z/classes/a.js"),
+                anchor_sub("eB", "pkg-z", "pkg-z/classes/a.js"),
+                anchor_sub("eC", "pkg-z", "pkg-z/classes/b.js"),
+            ],
+            &index_maps,
+        );
+        assert_eq!(plans.len(), 1, "{plans:?}");
+        assert!(
+            plans[0].externalizable,
+            "clean member B must externalize despite the over-matched A: {:?}",
+            plans[0]
+        );
+        // Only the clean unit (eC → classes/b) is synthesized; the over-matched
+        // eA/eB stay inlined (their bindings are NOT in member_bindings).
+        assert_eq!(plans[0].synthesized_members.len(), 1, "{:?}", plans[0]);
+        assert!(plans[0].member_bindings.contains("eC"));
+        assert!(!plans[0].member_bindings.contains("eA"));
+        assert!(!plans[0].member_bindings.contains("eB"));
     }
 
     #[test]
