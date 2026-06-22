@@ -206,6 +206,31 @@ barrel 合成(单元→子模块→导出名)**无可映射**。且真 barrel(`m
 node-pty/ws 已走 module-path;@opentelemetry/core 等其余候选 0 anchored island 单元、进不了
 synth 路径。20 个 tree-shaken 包结构性不可外化(三层证明)。
 
+## sentry 外化达成 —— 7/7(2026-06-20,`0cc687f9`,SUPERSEDES「6 个上界」)
+
+上面「sentry 不可快修 / NULL subpath / 上界 6」的结论**部分错判**:NULL subpath 是
+`package_attributions` 表的,但 island 合成走的是 **`package_island_anchors`**,该表里 sentry 的
+33 个 anchor **都有** submodule `export_specifier`(5 个子模块,11 个 recognized 单元)。真正阻塞是
+**`index=MISSING`**:loader 只读根 `index.js`,而 sentry 的根 index 是 dual-entry **guard**
+(只 `throw "use /main or /renderer"`,re-export 为空)→ 合成器拿到空 index 直接 skip。
+
+**修复(四层,各有单测):**
+1. **解析器**:支持 `exports.Name = sub.Member` / `exports.Name = sub` 的逐成员赋值 barrel
+   形态(sentry `main/index.js`)。跨包 `node.X`(`require('@sentry/node')`)行 naming 无 `./`
+   子模块 → 自动忽略;**所以并不需要真正的跨包机制**,被锚的单元全是本地子模块。
+2. **`PackageIndexReexports::rebased/merge`**:把 subpath barrel 的 relpath 提升为包根相对
+   (`transports/x`→`main/transports/x`)并打上公共 import specifier(`@sentry/electron/main`)。
+3. **CLI loader**:根 index 为空(guard)时,回退到公共 subpath barrel(`<dir>/index.js`,dir 由
+   锚定子模块顶层目录推出,排除 esm/cjs/dist 等构建目录)。**仅在根空时触发**,故 6 个有可用
+   根 index 的包零影响。
+4. **model + planner 发射**:`SynthesizedMember` 带可选 per-member `import_specifier`;合成 barrel
+   按 specifier 分组,每个 subpath 发一条 `import * as <alias>`(绝不 import 不可用的 guard 裸包)。
+
+**实测**:`excluded 8 over-matched, synthesized 2 clean member(s)` →
+`import '@sentry/electron/main'` + `/renderer`,dep 注册 7.13.0。**7/7 已识别包全部外化**。
+验证:esbuild bundle 干净(无 dangling export)、e2e 等价 **PASS(recovered 2956 ⊇ reference 310,
+loadError=null)**。2 个 clean 成员之外的 9 个 over-matched 单元按 resilient gate 留内联(安全)。
+
 ## 风险提示
 
 - gate 放松 / 锚定放宽都可能重新产出**坏的外化**(把真实模块 body 清空)→ 每期必须
