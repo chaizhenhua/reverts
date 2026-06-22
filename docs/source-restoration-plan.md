@@ -25,6 +25,16 @@ generate 写出:
 复用 `module-names` 机制 + M1 的 subpath 数据。只改文件位置,不改代码 → 安全。
 价值:一眼看出哪些是 vendored zod/cookie/…。
 
+**M2a 已实现(`vendor_path` 标注,纯 sidecar,零运行风险)** —— `recognized-packages.json`
+的每个条目现带 `vendor_path` 字段:`vendor_module_path(package, subpath)` 确定性地算出
+`vendor/<pkg>/<subpath>.ts`(丢 scope `@`、规范化扩展名为 `.ts`、NULL subpath → `index.ts`),
+**保证**同时过 module-path 命名闸(`validate_module_path_acceptance`)与输出布局
+(`is_safe_typescript_module_path`)—— 即可被 `module-names` 原样接受、不退化成
+`modules/<id>-…` slug。单测覆盖映射 + 对抗输入(traversal/绝对路径/空段/怪字符)恒安全。
+**这一步只标注、不动文件**(像 M1)。**M2b 待做**:把 `vendor_path` 经 `module_path_overrides`
+真正落地为文件重定位 —— 机制(module-names)已被项目证明安全,但布局变更需在真实语料上
+跑 e2e 验证(本环境无 DMG/DB),故留作语料内的后续。
+
 ### M3 — 模块体内联源码还原(中风险,核心)
 对 matched 模块,把 minified 体**替换成真实子模块源**,并**保留导出接口**:
 用 ownership 的函数级对应(minified fn ↔ real fn)推出 `真名 → minified 导出名` 别名,

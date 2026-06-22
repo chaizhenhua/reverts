@@ -874,6 +874,10 @@ fn write_recognized_package_sources(
             "externalized": accepted,
             "status": if *accepted { "externalized" } else { status.as_str() },
             "restored_source": restored_rel,
+            // M2: the package-aware path this recognized module *would* occupy in a
+            // vendored layout (`vendor/<pkg>/<subpath>.ts`). Deterministic and
+            // gate-safe; an annotation only — the emitted file is unchanged.
+            "vendor_path": vendor_module_path(package, subpath),
         }));
     }
     let manifest_json = serde_json::to_string_pretty(&serde_json::Value::Array(manifest))
@@ -993,6 +997,64 @@ fn sanitize_restored_path(package: &str, version: &str, subpath: &str) -> String
     format!("{}@{}/{}", clean(package), clean(version), sub)
 }
 
+/// Source-restoration M2. The package-aware path a recognized third-party module
+/// would occupy in a vendored layout: `vendor/<package>/<subpath>.ts`. The result
+/// is guaranteed safe for both the module-path naming gate
+/// (`validate_module_path_acceptance`) and the output-path layout
+/// (`is_safe_typescript_module_path`): every segment is non-empty, never `.`/`..`,
+/// the scope `@` is dropped, and the extension is normalized to `.ts`. A NULL
+/// subpath (the common island-inlined case) falls back to `index`.
+fn vendor_module_path(package: &str, subpath: &str) -> String {
+    // A path segment reduced to the gate-safe alphabet (alphanumeric + `_-.`),
+    // with runs of replaced characters collapsed and `.`/`-` trimmed at the ends
+    // so no segment is empty, `.`, or `..`.
+    let segment = |raw: &str| -> Option<String> {
+        let mut out = String::with_capacity(raw.len());
+        let mut last_dash = false;
+        for ch in raw.chars() {
+            let mapped = if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+                ch
+            } else {
+                '-'
+            };
+            if mapped == '-' {
+                if last_dash {
+                    continue;
+                }
+                last_dash = true;
+            } else {
+                last_dash = false;
+            }
+            out.push(mapped);
+        }
+        let trimmed = out.trim_matches(|ch| matches!(ch, '-' | '.')).to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    };
+    let segments = |raw: &str| -> Vec<String> { raw.split('/').filter_map(&segment).collect() };
+
+    let mut parts = vec!["vendor".to_string()];
+    parts.extend(segments(package));
+    // Drop any source extension from the subpath; we re-append `.ts` below.
+    let stem = subpath
+        .trim()
+        .trim_end_matches('/')
+        .rsplit_once('.')
+        .map(|(head, ext)| {
+            if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts") {
+                head
+            } else {
+                subpath.trim()
+            }
+        })
+        .unwrap_or_else(|| subpath.trim());
+    let mut tail = segments(stem);
+    if tail.is_empty() {
+        tail.push("index".to_string());
+    }
+    parts.extend(tail);
+    format!("{}.ts", parts.join("/"))
+}
+
 pub(crate) use crate::project_writer::write_accepted_project;
 
 #[cfg(test)]
@@ -1004,8 +1066,9 @@ pub(crate) use crate::project_writer::{
 mod tests {
     use super::{
         restored_source_for, sanitize_restored_path, validate_accepted_naming_gate_records,
-        write_recognized_package_sources,
+        vendor_module_path, write_recognized_package_sources,
     };
+    use crate::commands::naming_gates::validate_module_path_acceptance;
 
     use std::collections::BTreeMap;
 
@@ -1424,6 +1487,9 @@ mod tests {
         assert_eq!(sentry["status"], "rejected");
         assert_eq!(sentry["subpath"], "main/index.js");
         assert_eq!(sentry["file_path"], "src/sentry-main.ts");
+        // M2 annotation: the package-aware vendored path for each recognized module.
+        assert_eq!(sentry["vendor_path"], "vendor/sentry/electron/main/index.ts");
+        assert_eq!(semver["vendor_path"], "vendor/semver/index.ts");
     }
 
     #[test]
@@ -1477,6 +1543,69 @@ mod tests {
             !base.join("../semver@9.9.9").join("index.js").exists(),
             "the unrecognized 9.9.9 version must not be restored"
         );
+    }
+
+    /// Mirror of `output_paths::is_safe_typescript_module_path` (crate-private in
+    /// reverts-pipeline): a path the output layout emits verbatim rather than
+    /// slugging into `modules/<id>-…`.
+    fn is_safe_typescript_layout_path(path: &str) -> bool {
+        (path.ends_with(".ts") || path.ends_with(".tsx"))
+            && path.split('/').all(|segment| {
+                !segment.is_empty()
+                    && segment != "."
+                    && segment != ".."
+                    && segment
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+            })
+    }
+
+    #[test]
+    fn vendor_module_path_maps_package_and_subpath_into_a_ts_layout_path() {
+        assert_eq!(
+            vendor_module_path("semver", "classes/range.js"),
+            "vendor/semver/classes/range.ts"
+        );
+        // Scope `@` is dropped; the `/` inside the scope stays a separator.
+        assert_eq!(
+            vendor_module_path("@sentry/electron", "main/index.js"),
+            "vendor/sentry/electron/main/index.ts"
+        );
+        // A NULL/empty subpath (the common island-inlined case) → index.ts.
+        assert_eq!(vendor_module_path("semver", ""), "vendor/semver/index.ts");
+        // A non-source extension (e.g. `.json`) is preserved as a slugged segment,
+        // not stripped, and the whole path still ends in `.ts`.
+        assert_eq!(
+            vendor_module_path("pkg", "data/table.json"),
+            "vendor/pkg/data/table.json.ts"
+        );
+    }
+
+    #[test]
+    fn vendor_module_path_output_is_always_gate_and_layout_safe() {
+        // Adversarial inputs: traversal, absolute, empty segments, odd chars.
+        let cases = [
+            ("@scope/../evil", "../../etc/passwd"),
+            ("", "/leading/slash/x.js"),
+            ("a b:c", "weird name!.js"),
+            ("...", "./.."),
+            ("pkg", ""),
+            ("@only-scope", "a//b///c.js"),
+        ];
+        for (package, subpath) in cases {
+            let path = vendor_module_path(package, subpath);
+            // The output layout emits it verbatim (no `modules/<id>-…` slug fallback).
+            assert!(
+                is_safe_typescript_layout_path(&path),
+                "layout-unsafe path {path:?} from ({package:?}, {subpath:?})"
+            );
+            // And the module-path naming gate accepts it.
+            validate_module_path_acceptance(&path, "package-attribution").unwrap_or_else(|err| {
+                panic!("gate rejected {path:?} from ({package:?}, {subpath:?}): {err:?}")
+            });
+            assert!(path.starts_with("vendor/"));
+            assert!(!path.contains("//"), "collapsed separators in {path:?}");
+        }
     }
 
     #[test]
