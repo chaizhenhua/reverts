@@ -283,12 +283,210 @@ pub(crate) fn entry_import_for_cluster(
     named_import_statement(moved_bindings.iter(), specifier)
 }
 
+/// One inlined package to replace with a bare import. Recovered upstream
+/// (`reverts_package_matcher::aggregate_island_packages`): the package's whole
+/// set of inlined CommonJS unit bindings, its barrel entry, and the public
+/// specifier to import instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IslandPackageExternalization {
+    /// Bare public import specifier, e.g. `@opentelemetry/api`.
+    pub(crate) import_specifier: String,
+    /// The barrel unit's init function — consumers call it to get the package.
+    pub(crate) entry_init: BindingName,
+    /// The barrel unit's exports object — bound to the imported namespace.
+    pub(crate) entry_exports: BindingName,
+    /// Every binding of the package's inlined units (all dropped from the island).
+    pub(crate) member_bindings: BTreeSet<BindingName>,
+}
+
+/// The island after inlined packages were replaced with bare imports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IslandExternalization {
+    /// Island source with every externalized package's unit declarations removed
+    /// and a barrel-init shim appended for each.
+    pub(crate) source: String,
+    /// Bare `import * as … from '…'` lines to emit at the top of the island.
+    pub(crate) imports: Vec<String>,
+    /// Every binding removed from the island (left the naming denominator).
+    pub(crate) externalized_bindings: BTreeSet<BindingName>,
+}
+
+/// Replace each inlined package's CommonJS units with a bare import.
+///
+/// For a package whose barrel exports object is `E`, init is `I`, and member
+/// bindings are `M`: delete every top-level statement that declares only
+/// bindings in `M`, emit `import * as E from '<specifier>'`, and append a shim
+/// `function I() { return E; }` so both existing `I()` callers and direct `E`
+/// reads keep working against the real package.
+///
+/// A package is externalized only when it is SAFE: every internal member (a
+/// member that is neither the barrel exports nor the barrel init) must be
+/// referenced nowhere in the island except the statements being removed — i.e.
+/// the inlined copy is self-contained behind its barrel. A package failing that
+/// gate is left inlined (skipped) rather than risk a dangling reference.
+///
+/// Returns `None` if nothing was externalized.
+pub(crate) fn externalize_island_packages(
+    island_source: &str,
+    packages: &[IslandPackageExternalization],
+) -> Option<IslandExternalization> {
+    if packages.is_empty() {
+        return None;
+    }
+    let facts = collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript).ok()?;
+
+    // Map each binding to the statement ranges that declare ONLY package members,
+    // so a straddling statement (declares a member + a non-member) is never cut.
+    let mut imports = Vec::new();
+    let mut removed_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut externalized_bindings: BTreeSet<BindingName> = BTreeSet::new();
+    let mut shims = String::new();
+
+    for package in packages {
+        // Candidate removals: statements whose every binding is a member.
+        let mut package_ranges: Vec<(usize, usize)> = Vec::new();
+        let mut covered: BTreeSet<BindingName> = BTreeSet::new();
+        for fact in &facts {
+            if fact.bindings.is_empty() {
+                continue;
+            }
+            let names: Vec<BindingName> =
+                fact.bindings.iter().map(|n| BindingName::new(n.as_str())).collect();
+            if names
+                .iter()
+                .all(|binding| package.member_bindings.contains(binding))
+            {
+                package_ranges.push((fact.byte_start as usize, fact.byte_end as usize));
+                covered.extend(names);
+            }
+        }
+
+        // Safety gate: every INTERNAL member (not the barrel surface) must be
+        // declared by a removable statement and referenced only within them.
+        let internal: BTreeSet<&BindingName> = package
+            .member_bindings
+            .iter()
+            .filter(|binding| **binding != package.entry_exports && **binding != package.entry_init)
+            .collect();
+        let all_covered = internal.iter().all(|binding| covered.contains(*binding));
+        let kept_source = remove_ranges(island_source, &package_ranges);
+        let referenced_outside = internal
+            .iter()
+            .any(|binding| source_references_identifier(&kept_source, binding.as_str()));
+        if !all_covered || referenced_outside || package_ranges.is_empty() {
+            continue; // leave this package inlined — not provably safe
+        }
+
+        imports.push(format!(
+            "import * as {} from '{}';",
+            package.entry_exports.as_str(),
+            package.import_specifier
+        ));
+        // The barrel init becomes a trivial accessor of the imported namespace.
+        shims.push_str(&format!(
+            "function {}() {{ return {}; }}\n",
+            package.entry_init.as_str(),
+            package.entry_exports.as_str()
+        ));
+        removed_ranges.extend(package_ranges);
+        externalized_bindings.extend(covered);
+    }
+
+    if removed_ranges.is_empty() {
+        return None;
+    }
+
+    let mut source = remove_ranges(island_source, &removed_ranges);
+    if !shims.is_empty() {
+        source.push('\n');
+        source.push_str(&shims);
+    }
+    Some(IslandExternalization {
+        source,
+        imports,
+        externalized_bindings,
+    })
+}
+
+/// Whether `source` references `name` as a whole identifier token (not as a
+/// substring of a longer identifier). A deliberately simple lexical check used
+/// only as a conservative safety gate — a false positive merely keeps a package
+/// inlined.
+fn source_references_identifier(source: &str, name: &str) -> bool {
+    let is_ident_char = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut rest = source;
+    while let Some(pos) = rest.find(name) {
+        let before = rest[..pos].chars().next_back();
+        let after_index = pos + name.len();
+        let after = rest[after_index..].chars().next();
+        let boundary_before = before.is_none_or(|c| !is_ident_char(c));
+        let boundary_after = after.is_none_or(|c| !is_ident_char(c));
+        if boundary_before && boundary_after {
+            return true;
+        }
+        rest = &rest[pos + 1..];
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn bindings(names: &[&str]) -> BTreeSet<BindingName> {
         names.iter().map(|name| BindingName::new(*name)).collect()
+    }
+
+    fn externalization(specifier: &str, init: &str, exports: &str, members: &[&str]) -> IslandPackageExternalization {
+        IslandPackageExternalization {
+            import_specifier: specifier.to_string(),
+            entry_init: BindingName::new(init),
+            entry_exports: BindingName::new(exports),
+            member_bindings: bindings(members),
+        }
+    }
+
+    #[test]
+    fn externalizes_a_self_contained_inlined_package() {
+        // An inlined package: internal submodule (eA/gA/iA), barrel (eIdx/gIdx/iIdx).
+        // A consumer calls the barrel init. The whole package is replaced by an
+        // import; the barrel init becomes a shim; the consumer keeps working.
+        let island = "var eA = {};\nvar gA;\nfunction iA() { return gA || (gA = 1, eA.a = 1), eA; }\n\
+                      var eIdx = {};\nvar gIdx;\nfunction iIdx() { return gIdx || (gIdx = 1, eIdx.a = iA()), eIdx; }\n\
+                      var consumer = iIdx();\n";
+        let result = externalize_island_packages(
+            island,
+            &[externalization("pkg-x", "iIdx", "eIdx", &["eA", "gA", "iA", "eIdx", "gIdx", "iIdx"])],
+        )
+        .expect("should externalize");
+
+        assert_eq!(result.imports, vec!["import * as eIdx from 'pkg-x';"]);
+        // All unit declarations removed; the consumer survives.
+        assert!(!result.source.contains("function iA()"), "{}", result.source);
+        assert!(!result.source.contains("var eA = {}"), "{}", result.source);
+        assert!(result.source.contains("var consumer = iIdx();"), "{}", result.source);
+        // Barrel init shim returns the imported namespace.
+        assert!(result.source.contains("function iIdx() { return eIdx; }"), "{}", result.source);
+        assert!(result.externalized_bindings.contains(&BindingName::new("iA")));
+    }
+
+    #[test]
+    fn skips_package_whose_internal_member_is_referenced_outside() {
+        // `iA` (an internal submodule init) is also called directly by external
+        // code — removing it would dangle, so the package is left inlined.
+        let island = "var eA = {};\nvar gA;\nfunction iA() { return gA || (gA = 1, eA.a = 1), eA; }\n\
+                      var eIdx = {};\nvar gIdx;\nfunction iIdx() { return gIdx || (gIdx = 1, eIdx.a = iA()), eIdx; }\n\
+                      var direct = iA();\n";
+        let result = externalize_island_packages(
+            island,
+            &[externalization("pkg-x", "iIdx", "eIdx", &["eA", "gA", "iA", "eIdx", "gIdx", "iIdx"])],
+        );
+        assert!(result.is_none(), "internal member referenced outside -> not safe");
+    }
+
+    #[test]
+    fn empty_package_list_externalizes_nothing() {
+        assert!(externalize_island_packages("var a = 1;", &[]).is_none());
     }
 
     #[test]
