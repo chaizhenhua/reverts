@@ -1002,9 +1002,14 @@ pub(crate) use crate::project_writer::{
 
 #[cfg(test)]
 mod tests {
-    use super::validate_accepted_naming_gate_records;
+    use super::{
+        restored_source_for, sanitize_restored_path, validate_accepted_naming_gate_records,
+        write_recognized_package_sources,
+    };
 
-    use rusqlite::{Connection, params};
+    use std::collections::BTreeMap;
+
+    use rusqlite::{Connection, OpenFlags, params};
     use tempfile::TempDir;
 
     fn gate_db() -> (TempDir, std::path::PathBuf) {
@@ -1194,5 +1199,303 @@ mod tests {
 
         validate_accepted_naming_gate_records(path.as_path(), 1)
             .expect("gate-passed accepted binding name should pass preflight");
+    }
+
+    // --- Source-restoration (recognized-package sidecar) coverage ---------------
+
+    /// A fixture DB with the `package_attributions` and `package_source_cache`
+    /// schemas used by the restoration writer, matching production columns.
+    fn restoration_db() -> (TempDir, std::path::PathBuf) {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("input.sqlite");
+        let connection = Connection::open(path.as_path()).expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE package_attributions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    module_id INTEGER NOT NULL,
+                    module_original_name TEXT NOT NULL,
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    package_subpath TEXT,
+                    resolved_file TEXT,
+                    export_specifier TEXT,
+                    emission_mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    evidence_json TEXT,
+                    rejection_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (module_id)
+                );
+                CREATE TABLE package_source_cache (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    external_importable INTEGER NOT NULL DEFAULT 1,
+                    external_import_policy_version INTEGER NOT NULL DEFAULT 0,
+                    export_specifier TEXT NOT NULL DEFAULT '',
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, package_version, entry_path)
+                );
+                ",
+            )
+            .expect("create restoration schema");
+        drop(connection);
+        (temp, path)
+    }
+
+    fn insert_attribution(
+        connection: &Connection,
+        module_id: i64,
+        package: &str,
+        version: &str,
+        subpath: Option<&str>,
+        status: &str,
+    ) {
+        connection
+            .execute(
+                r"
+                INSERT INTO package_attributions (
+                    module_id, module_original_name, package_name, package_version,
+                    package_subpath, emission_mode, status, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 'inline', ?6, 't', 't')
+                ",
+                params![
+                    module_id,
+                    format!("m{module_id}"),
+                    package,
+                    version,
+                    subpath,
+                    status
+                ],
+            )
+            .expect("insert attribution");
+    }
+
+    fn insert_cache_entry(
+        connection: &Connection,
+        package: &str,
+        version: &str,
+        entry_path: &str,
+        source: &str,
+    ) {
+        connection
+            .execute(
+                r"
+                INSERT INTO package_source_cache (
+                    package_name, package_version, entry_path, source_content,
+                    content_hash, export_specifier, fetched_at, expires_at
+                ) VALUES (?1, ?2, ?3, ?4, 'h', '', 't', 't')
+                ",
+                params![package, version, entry_path, source],
+            )
+            .expect("insert cache entry");
+    }
+
+    fn read_manifest(metadata_dir: &std::path::Path) -> Vec<serde_json::Value> {
+        let raw = std::fs::read_to_string(metadata_dir.join("recognized-packages.json"))
+            .expect("manifest written");
+        match serde_json::from_str(&raw).expect("manifest is valid json") {
+            serde_json::Value::Array(items) => items,
+            other => panic!("manifest must be an array, got {other}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_restored_path_namespaces_scope_version_and_subpath() {
+        assert_eq!(
+            sanitize_restored_path("@sentry/electron", "4.5.0", "main/index.js"),
+            "@sentry/electron@4.5.0/main/index.js"
+        );
+        // Empty subpath falls back to index.js.
+        assert_eq!(
+            sanitize_restored_path("semver", "7.6.0", ""),
+            "semver@7.6.0/index.js"
+        );
+        // A leading slash on the subpath is trimmed so the path stays relative.
+        assert_eq!(
+            sanitize_restored_path("ws", "8.0.0", "/lib/websocket.js"),
+            "ws@8.0.0/lib/websocket.js"
+        );
+        // Characters outside the allowlist are replaced with '-' (no spaces/colons).
+        assert_eq!(
+            sanitize_restored_path("pkg", "1.0.0", "a b:c.js"),
+            "pkg@1.0.0/a-b-c.js"
+        );
+    }
+
+    #[test]
+    fn restored_source_for_prefers_exact_then_falls_back_to_basename() {
+        let (_temp, path) = restoration_db();
+        let connection =
+            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("open ro");
+
+        // Exact entry_path match.
+        {
+            let connection = Connection::open(&path).expect("open rw");
+            insert_cache_entry(&connection, "semver", "7.6.0", "index.js", "// barrel");
+            insert_cache_entry(
+                &connection,
+                "semver",
+                "7.6.0",
+                "classes/range.js",
+                "// real range",
+            );
+            // A submodule the bundle keys under a build prefix the bare subpath misses.
+            insert_cache_entry(&connection, "ws", "8.0.0", "lib/websocket.js", "// ws impl");
+        }
+
+        // Empty subpath resolves to index.js.
+        assert_eq!(
+            restored_source_for(&connection, "semver", "7.6.0", "")
+                .expect("query ok")
+                .as_deref(),
+            Some("// barrel")
+        );
+        // Exact subpath hit.
+        assert_eq!(
+            restored_source_for(&connection, "semver", "7.6.0", "classes/range.js")
+                .expect("query ok")
+                .as_deref(),
+            Some("// real range")
+        );
+        // Basename fallback: subpath `websocket.js` keyed under `lib/websocket.js`.
+        assert_eq!(
+            restored_source_for(&connection, "ws", "8.0.0", "websocket.js")
+                .expect("query ok")
+                .as_deref(),
+            Some("// ws impl")
+        );
+        // A genuine miss returns None, not an error.
+        assert_eq!(
+            restored_source_for(&connection, "semver", "7.6.0", "does/not/exist.js")
+                .expect("query ok"),
+            None
+        );
+    }
+
+    #[test]
+    fn recognized_manifest_distinguishes_externalized_from_inlined() {
+        let (temp, path) = restoration_db();
+        {
+            let connection = Connection::open(&path).expect("open rw");
+            // An accepted (externalized) module and a rejected-but-matched (inlined) one.
+            insert_attribution(&connection, 10, "semver", "7.6.0", None, "accepted");
+            insert_attribution(
+                &connection,
+                11,
+                "@sentry/electron",
+                "4.5.0",
+                Some("main/index.js"),
+                "rejected",
+            );
+        }
+        let metadata_dir = temp.path().join(".reverts");
+        std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
+
+        let mut module_output_paths = BTreeMap::new();
+        module_output_paths.insert(reverts_ir::ModuleId(11), "src/sentry-main.ts".to_string());
+
+        write_recognized_package_sources(&path, &module_output_paths, &metadata_dir)
+            .expect("restoration writer ok");
+
+        let manifest = read_manifest(&metadata_dir);
+        assert_eq!(manifest.len(), 2);
+
+        let semver = manifest
+            .iter()
+            .find(|item| item["package"] == "semver")
+            .expect("semver in manifest");
+        assert_eq!(semver["externalized"], serde_json::Value::Bool(true));
+        assert_eq!(semver["status"], "externalized");
+        // No output path was supplied for an externalized/inlined-island module.
+        assert_eq!(semver["file_path"], serde_json::Value::Null);
+
+        let sentry = manifest
+            .iter()
+            .find(|item| item["package"] == "@sentry/electron")
+            .expect("sentry in manifest");
+        assert_eq!(sentry["externalized"], serde_json::Value::Bool(false));
+        assert_eq!(sentry["status"], "rejected");
+        assert_eq!(sentry["subpath"], "main/index.js");
+        assert_eq!(sentry["file_path"], "src/sentry-main.ts");
+    }
+
+    #[test]
+    fn recognized_restoration_dumps_full_package_source_tree() {
+        let (temp, path) = restoration_db();
+        {
+            let connection = Connection::open(&path).expect("open rw");
+            // Only ONE module is attributed (NULL subpath, as island-inlined packages
+            // are), yet the whole cached source tree should still be restored.
+            insert_attribution(&connection, 10, "semver", "7.6.0", None, "rejected");
+            insert_cache_entry(&connection, "semver", "7.6.0", "index.js", "// barrel");
+            insert_cache_entry(
+                &connection,
+                "semver",
+                "7.6.0",
+                "classes/range.js",
+                "// range",
+            );
+            insert_cache_entry(
+                &connection,
+                "semver",
+                "7.6.0",
+                "functions/compare.js",
+                "// compare",
+            );
+            // A different package version must not be pulled into this tree.
+            insert_cache_entry(&connection, "semver", "9.9.9", "index.js", "// wrong ver");
+        }
+        let metadata_dir = temp.path().join(".reverts");
+        std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
+
+        let restored =
+            write_recognized_package_sources(&path, &BTreeMap::new(), &metadata_dir)
+                .expect("restoration writer ok");
+        assert_eq!(restored, 3, "all three 7.6.0 entries restored, not the 9.9.9 one");
+
+        let base = metadata_dir.join("restored-sources").join("semver@7.6.0");
+        assert_eq!(
+            std::fs::read_to_string(base.join("index.js")).expect("index restored"),
+            "// barrel"
+        );
+        assert_eq!(
+            std::fs::read_to_string(base.join("classes/range.js")).expect("range restored"),
+            "// range"
+        );
+        assert_eq!(
+            std::fs::read_to_string(base.join("functions/compare.js")).expect("compare restored"),
+            "// compare"
+        );
+        assert!(
+            !base.join("../semver@9.9.9").join("index.js").exists(),
+            "the unrecognized 9.9.9 version must not be restored"
+        );
+    }
+
+    #[test]
+    fn recognized_restoration_writes_empty_manifest_without_attributions_table() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("input.sqlite");
+        // A DB with no package_attributions table at all.
+        Connection::open(&path).expect("open sqlite");
+        let metadata_dir = temp.path().join(".reverts");
+        std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
+
+        let restored =
+            write_recognized_package_sources(&path, &BTreeMap::new(), &metadata_dir)
+                .expect("restoration writer tolerates a missing table");
+        assert_eq!(restored, 0);
+        assert_eq!(
+            std::fs::read_to_string(metadata_dir.join("recognized-packages.json"))
+                .expect("manifest written"),
+            "[]\n"
+        );
     }
 }
