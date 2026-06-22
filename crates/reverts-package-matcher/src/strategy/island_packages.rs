@@ -51,6 +51,10 @@ pub struct SynthesizedMemberBinding {
     /// a single `("", "Range")` means `local = ns.Range` (whole submodule object);
     /// multiple `(key, name)` means `local = { key: ns.name, … }` (member-pick).
     pub namespace_members: Vec<(String, String)>,
+    /// The public import specifier whose namespace `ns` resolves to, when the
+    /// member is reached through a package SUBPATH barrel (`@sentry/electron/main`)
+    /// rather than the package root. `None` means the plan's bare package specifier.
+    pub import_specifier: Option<String>,
 }
 
 /// A per-package plan for externalizing an inlined package's island units.
@@ -465,10 +469,17 @@ fn try_synthesize_plan(
                 )
             })
             .collect();
+        // All re-exports of one submodule come from the same barrel, so share the
+        // import specifier — a subpath entry (`@sentry/electron/main`) when the
+        // submodule lives under a package subpath, else the bare package.
+        let import_specifier = reexports
+            .iter()
+            .find_map(|reexport| reexport.import_specifier.clone());
         synthesized_members.push(SynthesizedMemberBinding {
             init_fn: unit.init_fn.clone(),
             local_binding: unit.exports.clone(),
             namespace_members,
+            import_specifier,
         });
         extend_unit_bindings(&mut member_bindings, unit);
     }

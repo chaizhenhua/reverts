@@ -164,6 +164,11 @@ pub struct SynthesizedMemberExternalization {
     /// `("", "Range")` means `local = ns.Range`; several `(key, name)` means
     /// `local = { key: ns.name, … }`.
     pub namespace_members: Vec<(String, String)>,
+    /// The public import specifier this member's namespace resolves to when it is
+    /// reached through a package SUBPATH barrel (`@sentry/electron/main`); `None`
+    /// means the package's bare `import_specifier`. Members under different subpaths
+    /// each get their own namespace import in the emission.
+    pub import_specifier: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

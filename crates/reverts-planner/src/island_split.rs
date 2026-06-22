@@ -847,37 +847,47 @@ pub(crate) fn externalize_island_packages(
             // its init thunk. Recover the full surface once (see
             // `package_namespace_surface_expr`) so member lookups never miss a
             // named export that the partial default omits.
-            let alias = sanitize_namespace_alias(&package.import_specifier);
-            let unwrapped = format!("{alias}_d");
-            imports.push(format!(
-                "import * as {alias} from '{}';",
-                package.import_specifier
-            ));
-            imports.push(format!(
-                "const {unwrapped} = {};",
-                package_namespace_surface_expr(&alias)
-            ));
+            //
+            // Members may resolve through DIFFERENT public specifiers: a package
+            // whose root `index.js` is an unusable guard (e.g. @sentry/electron, whose
+            // index throws "use /main or /renderer") exposes each submodule only via a
+            // subpath entry. Group members by their effective specifier so each gets
+            // its own `import * as <alias>` + surface const, imported once.
+            let mut members_by_specifier: BTreeMap<&str, Vec<&_>> = BTreeMap::new();
             for member in &package.synthesized_members {
-                let value = match member.namespace_members.as_slice() {
-                    [(key, name)] if key.is_empty() => format!("{unwrapped}.{name}"),
-                    members => {
-                        let fields: Vec<String> = members
-                            .iter()
-                            .map(|(key, name)| format!("{key}: {unwrapped}.{name}"))
-                            .collect();
-                        format!("{{ {} }}", fields.join(", "))
-                    }
-                };
+                let specifier = member
+                    .import_specifier
+                    .as_deref()
+                    .unwrap_or(package.import_specifier.as_str());
+                members_by_specifier.entry(specifier).or_default().push(member);
+            }
+            for (specifier, members) in members_by_specifier {
+                let alias = sanitize_namespace_alias(specifier);
+                let unwrapped = format!("{alias}_d");
+                imports.push(format!("import * as {alias} from '{specifier}';"));
                 imports.push(format!(
-                    "const {} = {value};",
-                    member.local_binding.as_str()
+                    "const {unwrapped} = {};",
+                    package_namespace_surface_expr(&alias)
                 ));
-                shims.push_str(&format!(
-                    "function {}() {{ return {}; }}\n",
-                    member.init_fn.as_str(),
-                    member.local_binding.as_str()
-                ));
-                entry_bindings.insert(member.local_binding.clone());
+                for member in members {
+                    let value = match member.namespace_members.as_slice() {
+                        [(key, name)] if key.is_empty() => format!("{unwrapped}.{name}"),
+                        members => {
+                            let fields: Vec<String> = members
+                                .iter()
+                                .map(|(key, name)| format!("{key}: {unwrapped}.{name}"))
+                                .collect();
+                            format!("{{ {} }}", fields.join(", "))
+                        }
+                    };
+                    imports.push(format!("const {} = {value};", member.local_binding.as_str()));
+                    shims.push_str(&format!(
+                        "function {}() {{ return {}; }}\n",
+                        member.init_fn.as_str(),
+                        member.local_binding.as_str()
+                    ));
+                    entry_bindings.insert(member.local_binding.clone());
+                }
             }
         }
         removed_ranges.extend(package_ranges);
@@ -978,6 +988,7 @@ mod tests {
                         .iter()
                         .map(|(key, name)| ((*key).to_string(), (*name).to_string()))
                         .collect(),
+                    import_specifier: None,
                 }
             })
             .collect();
@@ -1319,6 +1330,68 @@ var theApi = apiInit();
         // The member units' own declarations are gone; the consumer call survives.
         assert!(!result.source.contains("var gRange;"), "{}", result.source);
         assert!(result.source.contains("var keep = iRange();"));
+    }
+
+    #[test]
+    fn synthesized_members_under_distinct_subpaths_each_get_their_own_namespace() {
+        // @sentry/electron's shape: the package root `index.js` is an unusable guard
+        // (it throws "use /main or /renderer"), so each member resolves only through
+        // a SUBPATH entry. Two members under different subpaths must each import their
+        // own namespace, not share one `import '@sentry/electron'` (which would throw).
+        let island = "var eMain = {};\nvar gMain;\nfunction iMain() { return gMain || (gMain = 1, eMain.x = 1), eMain; }\n\
+                      var eRend = {};\nvar gRend;\nfunction iRend() { return gRend || (gRend = 1, eRend.y = 1), eRend; }\n\
+                      var keep = iMain();\n";
+        let externalization = IslandPackageExternalization {
+            import_specifier: "@sentry/electron".to_string(),
+            version: "4.5.0".to_string(),
+            entry_init: BindingName::new(""),
+            entry_exports: BindingName::new(""),
+            member_bindings: ["eMain", "gMain", "iMain", "eRend", "gRend", "iRend"]
+                .iter()
+                .map(|b| BindingName::new(*b))
+                .collect(),
+            synthesized_members: vec![
+                reverts_model::SynthesizedMemberExternalization {
+                    init_fn: BindingName::new("iMain"),
+                    local_binding: BindingName::new("eMain"),
+                    namespace_members: vec![(String::new(), "mainProcessSessionIntegration".to_string())],
+                    import_specifier: Some("@sentry/electron/main".to_string()),
+                },
+                reverts_model::SynthesizedMemberExternalization {
+                    init_fn: BindingName::new("iRend"),
+                    local_binding: BindingName::new("eRend"),
+                    namespace_members: vec![(String::new(), "scopeToMainIntegration".to_string())],
+                    import_specifier: Some("@sentry/electron/renderer".to_string()),
+                },
+            ],
+        };
+        let result = externalize_island_packages(island, &[externalization])
+            .expect("synthesized externalization across subpaths");
+        let imports = result.imports.join("\n");
+        // Two distinct subpath namespaces, NOT the unusable bare package.
+        assert!(
+            imports.contains("import * as _pkg__sentry_electron_main from '@sentry/electron/main';"),
+            "{imports}"
+        );
+        assert!(
+            imports.contains(
+                "import * as _pkg__sentry_electron_renderer from '@sentry/electron/renderer';"
+            ),
+            "{imports}"
+        );
+        assert!(
+            !imports.contains("from '@sentry/electron';"),
+            "bare guard specifier must not be imported: {imports}"
+        );
+        // Each member binds off its OWN subpath namespace.
+        assert!(
+            imports.contains("const eMain = _pkg__sentry_electron_main_d.mainProcessSessionIntegration;"),
+            "{imports}"
+        );
+        assert!(
+            imports.contains("const eRend = _pkg__sentry_electron_renderer_d.scopeToMainIntegration;"),
+            "{imports}"
+        );
     }
 
     #[test]

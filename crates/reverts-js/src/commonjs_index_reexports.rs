@@ -22,7 +22,9 @@ use oxc_ast::ast::{Expression, ModuleExportName, ObjectPropertyKind, Statement};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
-use crate::commonjs_exports::{commonjs_module_exports_target, static_property_key_name};
+use crate::commonjs_exports::{
+    commonjs_export_property_name, commonjs_module_exports_target, static_property_key_name,
+};
 
 /// One way a submodule is re-exported by the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +37,10 @@ pub struct IndexReexport {
     /// exports object (`re.t` → `Some("t")`); `None` when the export IS the whole
     /// submodule exports object.
     pub member: Option<String>,
+    /// The public import specifier this re-export is reached through, when the
+    /// barrel is a package SUBPATH entry (`@sentry/electron/main`) rather than the
+    /// package root. `None` means the bare package name. Set by [`PackageIndexReexports::rebased`].
+    pub import_specifier: Option<String>,
 }
 
 /// A package index's full submodule → export-name re-export map.
@@ -56,6 +62,34 @@ impl PackageIndexReexports {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.reexports.is_empty()
+    }
+
+    /// Re-anchor this map as a package SUBPATH barrel. A subpath barrel (e.g.
+    /// `@sentry/electron/main`'s `main/index.js`) re-exports submodules by paths
+    /// relative to its OWN directory (`require('./transports/x')`), but anchors are
+    /// keyed package-root-relative (`main/transports/x`). Prefix every relpath with
+    /// `base_dir` so they line up, and tag each re-export with the public
+    /// `import_specifier` it is reached through. `base_dir` empty leaves relpaths
+    /// untouched (the package-root barrel); `import_specifier` empty means the bare
+    /// package name (`None`).
+    #[must_use]
+    pub fn rebased(mut self, base_dir: &str, import_specifier: &str) -> Self {
+        let base = base_dir.trim_matches('/');
+        let specifier = (!import_specifier.is_empty()).then(|| import_specifier.to_string());
+        for reexport in &mut self.reexports {
+            if !base.is_empty() {
+                reexport.submodule_relpath =
+                    format!("{base}/{}", reexport.submodule_relpath);
+            }
+            reexport.import_specifier = specifier.clone();
+        }
+        self
+    }
+
+    /// Merge another map's re-exports into this one (used to combine a package's
+    /// several subpath barrels into one index).
+    pub fn merge(&mut self, other: PackageIndexReexports) {
+        self.reexports.extend(other.reexports);
     }
 }
 
@@ -114,28 +148,42 @@ pub fn parse_index_reexports(index_source: &str) -> PackageIndexReexports {
     let mut reexports = Vec::new();
     for statement in &program.body {
         match statement {
-            // CJS: `module.exports = { … }` / `exports = { … }`.
             Statement::ExpressionStatement(expression_statement) => {
                 let Expression::AssignmentExpression(assignment) =
                     &expression_statement.expression
                 else {
                     continue;
                 };
-                if !commonjs_module_exports_target(&assignment.left) {
-                    continue;
-                }
-                let Expression::ObjectExpression(object) = &assignment.right else {
-                    continue;
-                };
-                for property in &object.properties {
-                    let ObjectPropertyKind::ObjectProperty(property) = property else {
+                if commonjs_module_exports_target(&assignment.left) {
+                    // Whole-object barrel: `module.exports = { Range, … }`.
+                    let Expression::ObjectExpression(object) = &assignment.right else {
                         continue;
                     };
-                    let Some(export_name) = static_property_key_name(&property.key) else {
-                        continue;
-                    };
+                    for property in &object.properties {
+                        let ObjectPropertyKind::ObjectProperty(property) = property else {
+                            continue;
+                        };
+                        let Some(export_name) = static_property_key_name(&property.key) else {
+                            continue;
+                        };
+                        if let Some(reexport) =
+                            resolve_property_value(&export_name, &property.value, &requires)
+                        {
+                            reexports.push(reexport);
+                        }
+                    }
+                } else if let Some(export_name) = commonjs_export_property_name(&assignment.left) {
+                    // Per-member barrel: `exports.init = sdk.init;` /
+                    // `exports.Foo = sub;`. Emitted by bundlers that assign each
+                    // public name in sequence rather than one object literal (e.g.
+                    // @sentry/electron's `main/index.js`). The same require-local
+                    // value shapes apply, so reuse the property-value resolver. A
+                    // value whose require-local is a BARE specifier (e.g.
+                    // `exports.X = node.X` where `node = require('@sentry/node')`)
+                    // resolves to no local submodule and is skipped — only `./`
+                    // submodule re-exports are recovered.
                     if let Some(reexport) =
-                        resolve_property_value(&export_name, &property.value, &requires)
+                        resolve_property_value(&export_name, &assignment.right, &requires)
                     {
                         reexports.push(reexport);
                     }
@@ -164,6 +212,7 @@ pub fn parse_index_reexports(index_source: &str) -> PackageIndexReexports {
                         submodule_relpath: relpath.clone(),
                         export_name: exported.to_string(),
                         member: Some(local.to_string()),
+                        import_specifier: None,
                     });
                 }
             }
@@ -219,6 +268,7 @@ fn resolve_property_value(
             submodule_relpath: relpath,
             export_name: export_name.to_string(),
             member: None,
+            import_specifier: None,
         }),
         // `Range` (shorthand) or `Range: SemVer` — a require-local.
         Expression::Identifier(identifier) => {
@@ -228,6 +278,7 @@ fn resolve_property_value(
                     submodule_relpath: relpath.clone(),
                     export_name: export_name.to_string(),
                     member: None,
+                    import_specifier: None,
                 })
         }
         // `tokens: internalRe.t` — a property of a require-local.
@@ -241,6 +292,7 @@ fn resolve_property_value(
                     submodule_relpath: relpath.clone(),
                     export_name: export_name.to_string(),
                     member: Some(member.property.name.as_str().to_string()),
+                    import_specifier: None,
                 })
         }
         _ => None,
@@ -328,6 +380,53 @@ mod tests {
     }
 
     #[test]
+    fn per_member_exports_assignment_barrel() {
+        // @sentry/electron's `main/index.js` shape: each public name assigned in
+        // sequence as `exports.Name = localSub.Member`, mixing LOCAL `./submodule`
+        // re-exports (recovered) with CROSS-PACKAGE `node.X` re-exports (ignored,
+        // since `node = require('@sentry/node')` is a bare specifier).
+        let map = parse_index_reexports(
+            "const node = require('@sentry/node');\n\
+             const electronOfflineNet = require('./transports/electron-offline-net.js');\n\
+             const sdk = require('./sdk.js');\n\
+             exports.captureException = node.captureException;\n\
+             exports.makeElectronOfflineTransport = electronOfflineNet.makeElectronOfflineTransport;\n\
+             exports.init = sdk.init;\n",
+        );
+        // Local submodule member-picks are recovered.
+        assert_eq!(
+            names(&map, "transports/electron-offline-net"),
+            vec![(
+                "makeElectronOfflineTransport".to_string(),
+                Some("makeElectronOfflineTransport".to_string())
+            )]
+        );
+        assert_eq!(
+            names(&map, "sdk"),
+            vec![("init".to_string(), Some("init".to_string()))]
+        );
+        // The cross-package `node.*` re-export names no local submodule → ignored.
+        assert_eq!(map.reexports.len(), 2, "{map:?}");
+    }
+
+    #[test]
+    fn per_member_whole_submodule_assignment() {
+        // `exports.Foo = sub;` (whole submodule object) and the
+        // `module.exports.Foo = sub.Bar;` long form.
+        let map = parse_index_reexports(
+            "const range = require('./classes/range.js');\n\
+             const cmp = require('./functions/compare.js');\n\
+             exports.Range = range;\n\
+             module.exports.compare = cmp.compare;\n",
+        );
+        assert_eq!(names(&map, "classes/range"), vec![("Range".to_string(), None)]);
+        assert_eq!(
+            names(&map, "functions/compare"),
+            vec![("compare".to_string(), Some("compare".to_string()))]
+        );
+    }
+
+    #[test]
     fn ignores_non_submodule_and_unparseable() {
         // A bare function export (not a require) and a foreign package are skipped.
         let map = parse_index_reexports(
@@ -337,6 +436,53 @@ mod tests {
         assert!(map.is_empty(), "{map:?}");
         assert!(parse_index_reexports("this is not js {{{").is_empty());
         assert!(parse_index_reexports("const x = 1;").is_empty());
+    }
+
+    #[test]
+    fn rebased_prefixes_relpaths_and_tags_specifier() {
+        // A subpath barrel (`main/index.js`) re-exports by paths relative to its own
+        // dir; rebasing lines the relpaths up with package-root-relative anchors and
+        // tags the public subpath specifier.
+        let map = parse_index_reexports(
+            "const t = require('./transports/electron-offline-net.js');\n\
+             exports.makeElectronOfflineTransport = t.makeElectronOfflineTransport;\n",
+        )
+        .rebased("main", "@sentry/electron/main");
+        let rebased = map.for_submodule("main/transports/electron-offline-net");
+        assert_eq!(rebased.len(), 1);
+        assert_eq!(
+            rebased[0].import_specifier.as_deref(),
+            Some("@sentry/electron/main")
+        );
+        // The un-prefixed relpath no longer resolves.
+        assert!(
+            map.for_submodule("transports/electron-offline-net")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn merge_combines_subpath_barrels() {
+        let mut main = parse_index_reexports(
+            "const t = require('./transports/x.js');\nexports.makeX = t.makeX;\n",
+        )
+        .rebased("main", "@sentry/electron/main");
+        let renderer =
+            parse_index_reexports("const t = require('./transport.js');\nexports.makeR = t.makeR;\n")
+                .rebased("renderer", "@sentry/electron/renderer");
+        main.merge(renderer);
+        assert_eq!(
+            main.for_submodule("main/transports/x")[0]
+                .import_specifier
+                .as_deref(),
+            Some("@sentry/electron/main")
+        );
+        assert_eq!(
+            main.for_submodule("renderer/transport")[0]
+                .import_specifier
+                .as_deref(),
+            Some("@sentry/electron/renderer")
+        );
     }
 
     #[test]

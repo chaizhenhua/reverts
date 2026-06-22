@@ -380,28 +380,104 @@ fn load_package_index_reexports(
             )
         })
         .collect();
-    let mut statement = connection
-        .prepare(
-            "SELECT source_content FROM package_source_cache \
-             WHERE package_name = ?1 AND package_version = ?2 \
-               AND entry_path IN ('index.js', 'dist/index.js', 'lib/index.js', 'src/index.js') \
-             ORDER BY length(entry_path) LIMIT 1",
-        )
-        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let debug = std::env::var_os("REVERTS_DEBUG_ISLAND_PKG").is_some();
     let mut maps = BTreeMap::new();
     for (package, version) in packages {
-        let source: Option<String> = statement
-            .query_row(params![package, version], |row| row.get::<_, String>(0))
-            .optional()
-            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
-        if let Some(source) = source {
-            let map = reverts_js::parse_index_reexports(&source);
-            if !map.is_empty() {
-                maps.insert((package, version), map);
+        // The package-root barrel first (existing behavior for all packages).
+        let root = load_cache_entry_first(
+            &connection,
+            &package,
+            &version,
+            &["index.js", "dist/index.js", "lib/index.js", "src/index.js"],
+        )?
+        .map(|source| reverts_js::parse_index_reexports(&source))
+        .unwrap_or_default();
+        if !root.is_empty() {
+            maps.insert((package, version), root);
+            continue;
+        }
+        // Guard/empty root (e.g. @sentry/electron index.js only throws "use /main
+        // or /renderer") -> recover the package's public SUBPATH barrels instead.
+        let mut merged = reverts_js::PackageIndexReexports::default();
+        for subpath in subpath_entries_from_anchors(&package, attributions) {
+            let candidates = [format!("{subpath}/index.js"), format!("{subpath}/index.cjs")];
+            let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+            let Some(source) = load_cache_entry_first(&connection, &package, &version, &refs)? else {
+                continue;
+            };
+            let parsed = reverts_js::parse_index_reexports(&source);
+            if parsed.is_empty() {
+                continue;
             }
+            let specifier = format!("{package}/{subpath}");
+            merged.merge(parsed.rebased(&subpath, &specifier));
+            if debug {
+                eprintln!("island-pkg subpath-barrel {package}: loaded {subpath}/index.js");
+            }
+        }
+        if !merged.is_empty() {
+            maps.insert((package, version), merged);
         }
     }
     Ok(maps)
+}
+
+/// First cached source among `entry_paths` (in the order given), or `None`.
+fn load_cache_entry_first(
+    connection: &Connection,
+    package: &str,
+    version: &str,
+    entry_paths: &[&str],
+) -> Result<Option<String>, CliRunError> {
+    for entry in entry_paths {
+        let source: Option<String> = connection
+            .query_row(
+                "SELECT source_content FROM package_source_cache \
+                 WHERE package_name = ?1 AND package_version = ?2 AND entry_path = ?3 LIMIT 1",
+                params![package, version, entry],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+        if source.is_some() {
+            return Ok(source);
+        }
+    }
+    Ok(None)
+}
+
+/// The package's candidate public-subpath directories, derived from its anchored
+/// submodules: the first path segment of each anchor's `export_specifier` (after
+/// the `<pkg>/` prefix), keeping only single-segment NESTED entries that are real
+/// public subpaths -- not bundler build-output dirs (`esm`, `cjs`, `dist`, ...),
+/// which are internal and not importable.
+fn subpath_entries_from_anchors(
+    package: &str,
+    attributions: &[IslandUnitAttribution],
+) -> BTreeSet<String> {
+    const BUILD_DIRS: &[&str] = &[
+        "esm", "cjs", "dist", "lib", "build", "src", "types", "umd", "browser", "node", "module",
+        "internal",
+    ];
+    let mut dirs = BTreeSet::new();
+    for attribution in attributions {
+        if attribution.package_name != package || attribution.export_specifier.is_empty() {
+            continue;
+        }
+        let relpath = attribution
+            .export_specifier
+            .strip_prefix(package)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .unwrap_or(attribution.export_specifier.as_str());
+        let mut segments = relpath.split('/');
+        let (Some(first), Some(_)) = (segments.next(), segments.next()) else {
+            continue; // a top-level file, not a nested subpath submodule
+        };
+        if !first.is_empty() && !BUILD_DIRS.contains(&first) {
+            dirs.insert(first.to_string());
+        }
+    }
+    dirs
 }
 
 /// Aggregate per-binding island attributions into per-package externalization
@@ -447,6 +523,7 @@ fn island_package_externalizations(
                     init_fn: reverts_ir::BindingName::new(member.init_fn),
                     local_binding: reverts_ir::BindingName::new(member.local_binding),
                     namespace_members: member.namespace_members,
+                    import_specifier: member.import_specifier,
                 })
                 .collect();
             externalizations.push(IslandPackageExternalization {
