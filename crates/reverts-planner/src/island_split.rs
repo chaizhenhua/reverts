@@ -503,6 +503,112 @@ fn bin_pack_by_size<'a>(
     bins
 }
 
+/// Byte offsets that are SAFE top-level statement boundaries: a position right
+/// after a brace-depth-0 `;`, or after a `}` that ends a statement (its next
+/// non-trivia token does not continue an expression — so object/arrow `}` in the
+/// middle of a `var x = {…};` is never a cut). Strings, templates, comments, and
+/// regex literals are skipped so their braces never perturb the depth. Cutting
+/// only at these offsets guarantees a chunk is never split mid-statement.
+fn top_level_cut_offsets(source: &str) -> Vec<usize> {
+    use crate::byte_lexer::{
+        looks_like_regex_literal, skip_quoted, skip_regex_literal, skip_template_literal,
+        skip_ws_and_comments,
+    };
+    use reverts_js::{skip_block_comment, skip_line_comment};
+
+    let bytes = source.as_bytes();
+    let mut cuts = Vec::new();
+    let mut depth: i32 = 0;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' => {
+                index = skip_quoted(bytes, index, bytes[index]);
+                continue;
+            }
+            b'`' => {
+                index = skip_template_literal(bytes, index);
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index = skip_line_comment(bytes, index + 2);
+                continue;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_block_comment(bytes, index + 2);
+                continue;
+            }
+            b'/' if looks_like_regex_literal(bytes, index) => {
+                index = skip_regex_literal(bytes, index);
+                continue;
+            }
+            b'{' | b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let next = skip_ws_and_comments(bytes, index + 1, bytes.len());
+                    // A `}` ends a statement unless its next token continues an
+                    // expression (`}.x`, `}(…)`, `};`, `},`, `} +`, …).
+                    let continues = matches!(
+                        bytes.get(next),
+                        Some(
+                            b';' | b',' | b')' | b']' | b'.' | b'=' | b'+' | b'-' | b'*' | b'/'
+                                | b'%' | b'?' | b':' | b'<' | b'>' | b'&' | b'|' | b'^' | b'('
+                                | b'`'
+                        )
+                    );
+                    if !continues {
+                        cuts.push(index + 1);
+                    }
+                }
+            }
+            b';' if depth == 0 => cuts.push(index + 1),
+            _ => {}
+        }
+        index += 1;
+    }
+    cuts
+}
+
+/// Split the entry's residual eager body into contiguous, order-preserving chunks
+/// each within the line budget. UNLIKE cluster extraction this keeps EVERY
+/// statement (bare side-effecting expressions included) in original order — the
+/// chunks are emitted as an ordered import chain so evaluation order is unchanged.
+/// Cuts fall only on brace-depth-0 statement boundaries, so a statement is never
+/// split. Returns the whole source as one chunk when it fits or has no boundary.
+pub(crate) fn chain_split_eager_body(source: &str, max_body_lines: usize) -> Vec<String> {
+    let target = max_body_lines * 4 / 5;
+    if estimated_emitted_lines(source) <= target {
+        return vec![source.to_string()];
+    }
+    let cut_offsets = top_level_cut_offsets(source);
+    if cut_offsets.is_empty() {
+        return vec![source.to_string()];
+    }
+    let mut chunks: Vec<String> = Vec::new();
+    let mut chunk_start = 0usize;
+    let mut segment_start = 0usize;
+    let mut lines = 0usize;
+    for &cut in &cut_offsets {
+        let segment = source.get(segment_start..cut).unwrap_or_default();
+        let segment_lines = estimated_emitted_lines(segment).max(1);
+        if lines > 0 && lines + segment_lines > target && segment_start > chunk_start {
+            chunks.push(source.get(chunk_start..segment_start).unwrap_or_default().to_string());
+            chunk_start = segment_start;
+            lines = 0;
+        }
+        lines += segment_lines;
+        segment_start = cut;
+    }
+    chunks.push(source.get(chunk_start..).unwrap_or_default().to_string());
+    chunks.retain(|chunk| !chunk.trim().is_empty());
+    if chunks.is_empty() {
+        return vec![source.to_string()];
+    }
+    chunks
+}
+
 /// Assemble the source of an extracted cluster file: an import per source
 /// specifier for the external bindings the moved declarations reference, then
 /// the declarations, then a single re-export of every moved binding.
@@ -1333,5 +1439,56 @@ var theApi = apiInit();
         // `a` is in the cluster, so it moves; but verify the all-bindings rule by
         // excluding it from the cluster.
         assert!(extract_hoistable_cluster(island, &bindings(&["b"]), &BTreeSet::new()).is_none());
+    }
+
+    #[test]
+    fn top_level_cut_offsets_only_marks_statement_boundaries() {
+        // A `}` that ends a statement is a cut; a `}` that closes an object inside
+        // a `var x = {…};` is NOT (its next token continues the expression), and
+        // braces inside strings/templates/regex/comments never perturb depth.
+        let source = "var a = { x: 1 };function f() { return 2; }var s = \"};\";\n";
+        let cuts = top_level_cut_offsets(source);
+        // Boundaries: after the first `;` (end of `var a`), after the function
+        // body `}`, and after the final `;` of `var s`.
+        let boundary_strings: Vec<&str> = cuts.iter().map(|&c| &source[..c]).collect();
+        // The three real statement ends are cut points.
+        assert!(boundary_strings.iter().any(|s| s.ends_with("{ x: 1 };")));
+        assert!(boundary_strings.iter().any(|s| s.ends_with("return 2; }")));
+        assert!(boundary_strings.iter().any(|s| s.ends_with("\"};\";")));
+        // Every cut lands immediately after a `;` or a statement-ending `}` — never
+        // mid-token. In particular the object-literal `}` in `{ x: 1 }` is not a
+        // cut on its own (its next token `;` continues the statement), and the
+        // `}` inside the string `"};"` is skipped entirely (string scanning).
+        for &cut in &cuts {
+            let prev = source.as_bytes()[cut - 1];
+            assert!(matches!(prev, b';' | b'}'), "cut at {cut} not at a boundary");
+        }
+        // The `}` inside the string must not produce a spurious cut: the only cut
+        // ending in the `var s` statement is the final `;`, so total cuts == 3.
+        assert_eq!(cuts.len(), 3, "unexpected cut points: {boundary_strings:?}");
+    }
+
+    #[test]
+    fn chain_split_keeps_a_small_body_as_one_chunk() {
+        let source = "var a = 1;\nvar b = 2;\n";
+        let chunks = chain_split_eager_body(source, 10_000);
+        assert_eq!(chunks, vec![source.to_string()]);
+    }
+
+    #[test]
+    fn chain_split_partitions_an_oversized_body_at_statement_boundaries() {
+        // Each statement is one "line" by the brace/`;`/`,` estimator. With a tiny
+        // budget the body splits into multiple contiguous, order-preserving chunks
+        // whose concatenation reproduces the original source exactly.
+        let source = "var a=1;\nvar b=2;\nvar c=3;\nvar d=4;\nvar e=5;\nvar f=6;\n";
+        let chunks = chain_split_eager_body(source, 5);
+        assert!(chunks.len() > 1, "expected multiple chunks: {chunks:?}");
+        assert_eq!(chunks.concat(), source, "chunks must reconstruct the source");
+        // No chunk splits a statement: each chunk's braces/parens balance.
+        for chunk in &chunks {
+            let opens = chunk.bytes().filter(|&b| b == b'{' || b == b'(').count();
+            let closes = chunk.bytes().filter(|&b| b == b'}' || b == b')').count();
+            assert_eq!(opens, closes, "chunk splits mid-statement: {chunk:?}");
+        }
     }
 }

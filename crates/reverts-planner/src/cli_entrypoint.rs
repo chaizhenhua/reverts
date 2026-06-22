@@ -352,6 +352,35 @@ const MIN_ISLAND_CLUSTER_SIZE: usize = 24;
 /// file is unwieldy to read or load.
 const MAX_ISLAND_CLUSTER_LINES: usize = 5000;
 
+/// True for a name that can never be a real cross-module binding emitted as an
+/// `import`/`export` specifier: a reserved word (JS keyword or a TS/strict-mode
+/// reserved word the flat binding scanner mis-reads off top-level control flow)
+/// or the `arguments` pseudo-identifier.
+fn is_reserved_or_pseudo_binding(name: &str) -> bool {
+    name == "arguments"
+        || reverts_js::is_js_keyword(name)
+        || matches!(
+            name,
+            "enum"
+                | "await"
+                | "implements"
+                | "interface"
+                | "let"
+                | "package"
+                | "private"
+                | "protected"
+                | "public"
+                | "static"
+                | "yield"
+                | "as"
+                | "from"
+                | "get"
+                | "set"
+                | "of"
+                | "async"
+        )
+}
+
 /// A recognized inlined CommonJS module unit cleared for relocation into its own
 /// file: the memoized init thunk plus the exports object and (optional) guard
 /// variable it owns. Moving all three together keeps the writer co-located with
@@ -522,6 +551,68 @@ fn eval_order_safe_island_classes(island_source: &str) -> BTreeSet<BindingName> 
         .collect()
 }
 
+/// Where a chain-split chunk obtains one of its free variables. The chunk import
+/// graph is kept a DAG aligned with source order so esbuild evaluates chunks in
+/// the original monolith order (see `route_chunk_need`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChunkNeedRoute {
+    /// Declared in this chunk — already in scope, no import.
+    Local,
+    /// Import directly from the owning (necessarily earlier) chunk.
+    Chunk(usize),
+    /// Import directly from the owning extracted cluster.
+    Cluster(usize),
+    /// Import directly from the owning emitted source module (by output path) —
+    /// an esbuild lazy-init module binding the entry imports from that module.
+    SourceModule(String),
+    /// Route through the entry hub as a re-exported live binding.
+    Entry,
+}
+
+/// Decide how chunk `current_chunk_id` should obtain free variable `need`.
+///
+/// Chunk ids are assigned sequentially in chain (source) order, so a chunk-owned
+/// binding is in an EARLIER chunk iff its owner id is smaller. The rule that keeps
+/// the chunk import graph a source-order DAG — and so preserves the monolith's
+/// evaluation order under esbuild — is:
+/// - own binding → `Local`;
+/// - earlier chunk → direct `Chunk` import (only forces the order source already
+///   has, so no reordering and no cycle);
+/// - later chunk → `Entry`: a direct import would be a back-edge that drags the
+///   later chunk's eager statements ahead of this one's (and, with mutual deferred
+///   refs, forms an init-order cycle — the `rd`/`lze` crash). The reference is
+///   necessarily deferred, so a live binding through the entry hub resolves by
+///   call time;
+/// - cluster-owned → direct `Cluster` import (clusters load before any chunk and
+///   never import a chunk, so this is always DAG-safe);
+/// - source-module-owned → direct `SourceModule` import from the owning module
+///   (the same edge the entry has; bypasses the entry hub, whose own import would
+///   be pruned as unused once the eager body moved out);
+/// - otherwise (entry-resident / runtime binding) → `Entry`.
+fn route_chunk_need(
+    need: &BindingName,
+    current_chunk_id: usize,
+    chunk_owner: &BTreeMap<BindingName, usize>,
+    binding_owner: &BTreeMap<BindingName, usize>,
+    source_module_owner: &BTreeMap<BindingName, String>,
+) -> ChunkNeedRoute {
+    if let Some(&owner) = chunk_owner.get(need) {
+        if owner == current_chunk_id {
+            ChunkNeedRoute::Local
+        } else if owner < current_chunk_id {
+            ChunkNeedRoute::Chunk(owner)
+        } else {
+            ChunkNeedRoute::Entry
+        }
+    } else if let Some(&owner) = binding_owner.get(need) {
+        ChunkNeedRoute::Cluster(owner)
+    } else if let Some(module_path) = source_module_owner.get(need) {
+        ChunkNeedRoute::SourceModule(module_path.clone())
+    } else {
+        ChunkNeedRoute::Entry
+    }
+}
+
 /// Split the eager island's hoistable declarations into per-cluster files,
 /// pushing each cluster file onto `plan` and writing the rewritten entry body
 /// (cluster imports + the original eager statements in order + the re-exports
@@ -538,6 +629,7 @@ fn emit_island_clusters(
     island_source: &str,
     planned_bindings: &BTreeSet<BindingName>,
     entrypoint_callee: &BindingName,
+    source_module_owner: &BTreeMap<BindingName, String>,
 ) -> bool {
     use std::collections::BTreeMap;
 
@@ -767,11 +859,12 @@ fn emit_island_clusters(
         // `arguments` would route it through the entry hub as a phantom export.
         .filter(|name| name != "arguments")
         .map(BindingName::new)
-        .filter(|name| entry_available.contains(name))
+        .filter(|name| entry_available.contains(name) || source_module_owner.contains_key(name))
         .collect();
 
-        // Route each need to its source: another cluster (direct import) or the
-        // entry (hub, for eager/entry-resident bindings only).
+        // Route each need to its source: another cluster, its owning source
+        // module (direct import), or the entry hub (for eager/entry-resident
+        // bindings only).
         let mut imports: BTreeMap<String, BTreeSet<BindingName>> = BTreeMap::new();
         for need in &cluster_needs {
             match binding_owner.get(need) {
@@ -784,10 +877,20 @@ fn emit_island_clusters(
                 }
                 Some(_) => {} // owned by this cluster (already local) — nothing to import
                 None => {
-                    let specifier =
-                        relative_import_specifier(cluster_path.as_str(), ENTRYPOINT_ISLAND_PATH);
-                    imports.entry(specifier).or_default().insert(need.clone());
-                    entry_reexports.insert(need.clone());
+                    if let Some(module_path) = source_module_owner.get(need) {
+                        // An esbuild source-module binding: import it directly from
+                        // its owning module, exactly as the entry would.
+                        let specifier =
+                            relative_import_specifier(cluster_path.as_str(), module_path.as_str());
+                        imports.entry(specifier).or_default().insert(need.clone());
+                    } else {
+                        let specifier = relative_import_specifier(
+                            cluster_path.as_str(),
+                            ENTRYPOINT_ISLAND_PATH,
+                        );
+                        imports.entry(specifier).or_default().insert(need.clone());
+                        entry_reexports.insert(need.clone());
+                    }
                 }
             }
         }
@@ -827,9 +930,157 @@ fn emit_island_clusters(
     }
 
     // Entry body: import the moved declarations back, then the original eager
-    // statements in their original order (preserving side effects).
+    // statements. If the residual eager body still exceeds the per-file budget,
+    // split it into contiguous, order-preserving chunks emitted as an ORDERED
+    // import chain — the entry imports each chunk in source order (named imports
+    // both load the chunk's side effects in order and expose its bindings), so
+    // evaluation order is unchanged while no file exceeds the budget. A chunk's
+    // free variables route to the owning chunk/cluster/entry exactly like a
+    // cluster's. Contiguous chunking keeps each reassigned binding's declaration
+    // with its writers, so no chunk reassigns a read-only import.
     entry_file.push_source(entry_imports);
-    entry_file.push_source(remaining_source);
+    let eager_chunks =
+        crate::island_split::chain_split_eager_body(&remaining_source, MAX_ISLAND_CLUSTER_LINES);
+    if eager_chunks.len() <= 1 {
+        entry_file.push_source(remaining_source);
+    } else {
+        let chunk_ids: Vec<usize> = eager_chunks
+            .iter()
+            .map(|_| {
+                let id = next_forced_cluster_id;
+                next_forced_cluster_id += 1;
+                id
+            })
+            .collect();
+        // A chunk's exportable bindings are its TOP-LEVEL declarations only — use
+        // the statement-fact bindings (top-level), NOT the flat local scanner which
+        // also returns nested function params/locals (and mis-reads control-flow
+        // keywords). Exporting a nested local would be "not declared in this file".
+        let chunk_locals: Vec<BTreeSet<BindingName>> = eager_chunks
+            .iter()
+            .map(|chunk| {
+                reverts_js::collect_top_level_statement_facts(
+                    chunk,
+                    None,
+                    reverts_js::ParseGoal::TypeScript,
+                )
+                .unwrap_or_default()
+                .into_iter()
+                .flat_map(|fact| fact.bindings)
+                .filter(|name| !is_reserved_or_pseudo_binding(name))
+                .map(|name| BindingName::new(name.as_str()))
+                .collect()
+            })
+            .collect();
+        let mut chunk_owner: BTreeMap<BindingName, usize> = BTreeMap::new();
+        for (index, locals) in chunk_locals.iter().enumerate() {
+            for binding in locals {
+                chunk_owner.entry(binding.clone()).or_insert(chunk_ids[index]);
+            }
+        }
+        let mut chain_imports = String::new();
+        for (index, chunk) in eager_chunks.iter().enumerate() {
+            let chunk_path = island_cluster_path(chunk_ids[index]);
+            let locals = &chunk_locals[index];
+            let needs: BTreeSet<BindingName> = reverts_js::free_identifiers_in_source(
+                chunk,
+                None,
+                reverts_js::ParseGoal::TypeScript,
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| name != "arguments")
+            .map(BindingName::new)
+            // Wire only ROUTABLE free variables: a binding owned by another chunk,
+            // by a cluster, or imported by the entry. A free name that is none of
+            // these is a phantom (a pre-existing undefined reference the source
+            // already carried — benign as a module-scope undefined, never executed)
+            // or a runtime global; importing it would be a "no matching export"
+            // error, so it stays an undefined reference exactly as in the unsplit
+            // entry.
+            .filter(|name| {
+                !locals.contains(name)
+                    && (chunk_owner.contains_key(name)
+                        || binding_owner.contains_key(name)
+                        || source_module_owner.contains_key(name)
+                        || planned_bindings.contains(name))
+            })
+            .collect();
+            // Route each free variable to its source, keeping the chunk import
+            // graph a source-order DAG so esbuild evaluates chunks in monolith
+            // order (see `route_chunk_need`).
+            let mut imports: BTreeMap<String, BTreeSet<BindingName>> = BTreeMap::new();
+            for need in &needs {
+                match route_chunk_need(
+                    need,
+                    chunk_ids[index],
+                    &chunk_owner,
+                    &binding_owner,
+                    source_module_owner,
+                ) {
+                    ChunkNeedRoute::Local => {}
+                    ChunkNeedRoute::Chunk(owner) | ChunkNeedRoute::Cluster(owner) => {
+                        let specifier = relative_import_specifier(
+                            chunk_path.as_str(),
+                            island_cluster_path(owner).as_str(),
+                        );
+                        imports.entry(specifier).or_default().insert(need.clone());
+                    }
+                    ChunkNeedRoute::SourceModule(module_path) => {
+                        let specifier =
+                            relative_import_specifier(chunk_path.as_str(), module_path.as_str());
+                        imports.entry(specifier).or_default().insert(need.clone());
+                    }
+                    ChunkNeedRoute::Entry => {
+                        let specifier =
+                            relative_import_specifier(chunk_path.as_str(), ENTRYPOINT_ISLAND_PATH);
+                        imports.entry(specifier).or_default().insert(need.clone());
+                        entry_reexports.insert(need.clone());
+                    }
+                }
+            }
+            let chunk_source =
+                crate::island_split::assemble_cluster_file(chunk, locals, &imports);
+            if std::env::var("REVERTS_DEBUG_CHUNKS").is_ok() {
+                let _ = std::fs::create_dir_all("/tmp/chunks");
+                let _ = std::fs::write(format!("/tmp/chunks/chunk-{index}.ts"), &chunk_source);
+            }
+            let mut chunk_file = PlannedFile::new(chunk_path.clone());
+            chunk_file.unmodularized_recovered_code = true;
+            chunk_file.push_source(chunk_source);
+            for binding in locals {
+                chunk_file.add_binding(PlannedBinding::new(
+                    binding.clone(),
+                    binding.clone(),
+                    BindingShape::Unknown,
+                    true,
+                ));
+                chunk_file.add_export_with_source_backed(binding.clone(), true);
+            }
+            crate::finalize_planned_file(&mut chunk_file);
+            plan.push_file(chunk_file);
+
+            // The entry imports the chunk IN ORDER: a named import of its bindings
+            // both runs its side effects (loading it) and exposes its bindings for
+            // the entry's own export block; an empty chunk needs a bare import.
+            let from_entry = relative_import_specifier(ENTRYPOINT_ISLAND_PATH, chunk_path.as_str());
+            if locals.is_empty() {
+                chain_imports.push_str(&format!("import '{from_entry}';\n"));
+            } else {
+                chain_imports.push_str(
+                    crate::island_split::entry_import_for_cluster(locals, from_entry.as_str())
+                        .as_str(),
+                );
+                chain_imports.push('\n');
+            }
+            moved_all.extend(locals.iter().cloned());
+        }
+        if std::env::var("REVERTS_DEBUG_CHUNKS").is_ok() {
+            let _ = std::fs::create_dir_all("/tmp/chunks");
+            let _ = std::fs::write("/tmp/chunks/_chain_imports.ts", &chain_imports);
+        }
+        entry_file.push_source(chain_imports);
+    }
     for binding in &moved_all {
         entry_file.add_binding(PlannedBinding::new(
             binding.clone(),
@@ -938,9 +1189,15 @@ pub(crate) fn emit_planned_entrypoint_island(
             externalizations,
         )
     {
-        for import in &externalized.imports {
-            file.push_source(import.clone());
-        }
+        // Prepend the externalization imports + `const <exports> = ns.default ?? ns`
+        // rebindings to the island body (not the entry header): if the body is
+        // later split into an ordered import chain, these eager consts must live in
+        // the FIRST chunk so they are assigned before any chunk that reads them —
+        // entry-body consts run AFTER the (hoisted) chunk imports and would be
+        // undefined at chunk load.
+        let mut prelude = externalized.imports.join("\n");
+        prelude.push('\n');
+        island_source = format!("{prelude}{}", externalized.source);
         for binding in &externalized.entry_bindings {
             planned_bindings.insert(binding.clone());
             file.add_binding(PlannedBinding::new(
@@ -950,7 +1207,6 @@ pub(crate) fn emit_planned_entrypoint_island(
                 true,
             ));
         }
-        island_source = externalized.source;
     }
     // The entrypoint island carries the main bundle's recovered esbuild node-ESM
     // banner, which uses the CommonJS globals `require`/`__filename`/`__dirname`
@@ -969,6 +1225,30 @@ pub(crate) fn emit_planned_entrypoint_island(
     }
     // Decompose the eager island into per-cluster files where worthwhile;
     // otherwise emit the single aggregate island unchanged.
+    //
+    // The eager body references bindings the entry imports from emitted source
+    // modules — both esbuild lazy-init module thunks like `XY` (imported via
+    // `push_packed_runtime_helper_imports` from `source_module_imports`) and
+    // direct owner imports like `cdA` (`emit_direct_owner_imports` from
+    // `direct_imports`). When the body is split, the chunk that inherits such a
+    // reference must import the binding too. Routing it through the entry hub
+    // fails: the entry's own import of it is unused in the residual entry body
+    // and gets pruned, so a re-export would dangle. Instead give the split each
+    // binding's OWNING module path so the chunk imports it DIRECTLY — the same
+    // edge the entry would have, with no hub indirection.
+    let source_module_owner: BTreeMap<BindingName, String> = island
+        .source_module_imports
+        .iter()
+        .chain(island.direct_imports.iter())
+        .filter_map(|(module_id, bindings)| {
+            module_output_path(program, *module_id).map(|path| (path, bindings))
+        })
+        .flat_map(|(path, bindings)| {
+            bindings
+                .iter()
+                .map(move |binding| (binding.clone(), path.clone()))
+        })
+        .collect();
     if !emit_island_clusters(
         prelude,
         plan,
@@ -976,6 +1256,7 @@ pub(crate) fn emit_planned_entrypoint_island(
         island_source.as_str(),
         &planned_bindings,
         &entrypoint.callee,
+        &source_module_owner,
     ) {
         file.push_source(island_source);
     }
@@ -1115,4 +1396,64 @@ fn module_file_is_planned(
         return false;
     };
     plan.files.iter().any(|file| file.path == path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owners(pairs: &[(&str, usize)]) -> BTreeMap<BindingName, usize> {
+        pairs
+            .iter()
+            .map(|(name, id)| (BindingName::new(*name), *id))
+            .collect()
+    }
+
+    fn module_owners(pairs: &[(&str, &str)]) -> BTreeMap<BindingName, String> {
+        pairs
+            .iter()
+            .map(|(name, path)| (BindingName::new(*name), (*path).to_string()))
+            .collect()
+    }
+
+    /// The chain-split routing rule that keeps the chunk import graph a
+    /// source-order DAG. Chunk ids ascend with chain position, so chunk 20 is the
+    /// "current" chunk: earlier chunks have smaller ids, later chunks larger ones.
+    #[test]
+    fn chunk_needs_route_to_keep_a_source_order_dag() {
+        // chunk_owner: `self` lives here (20), `back` earlier (10), `fwd` later (30).
+        let chunk_owner = owners(&[("self", 20), ("back", 10), ("fwd", 30)]);
+        // binding_owner: an extracted cluster owns `cl`.
+        let binding_owner = owners(&[("cl", 7)]);
+        // source_module_owner: an esbuild module owns `XY`.
+        let source_module_owner = module_owners(&[("XY", "modules/390-telemetry/als.ts")]);
+        let route = |name: &str| {
+            route_chunk_need(
+                &BindingName::new(name),
+                20,
+                &chunk_owner,
+                &binding_owner,
+                &source_module_owner,
+            )
+        };
+
+        // A binding declared in this chunk needs no import.
+        assert_eq!(route("self"), ChunkNeedRoute::Local);
+        // A backward reference imports directly from the earlier chunk (DAG-safe).
+        assert_eq!(route("back"), ChunkNeedRoute::Chunk(10));
+        // A FORWARD reference must NOT import the later chunk directly (that is the
+        // back-edge that reorders eager init / forms the `rd`/`lze` cycle) — it
+        // routes through the entry hub instead.
+        assert_eq!(route("fwd"), ChunkNeedRoute::Entry);
+        // A cluster-owned binding imports directly from its cluster.
+        assert_eq!(route("cl"), ChunkNeedRoute::Cluster(7));
+        // A source-module binding imports directly from its owning module — never
+        // through the entry hub (whose own import would be pruned as unused).
+        assert_eq!(
+            route("XY"),
+            ChunkNeedRoute::SourceModule("modules/390-telemetry/als.ts".to_string())
+        );
+        // An entry-resident / runtime binding routes through the entry hub.
+        assert_eq!(route("glob"), ChunkNeedRoute::Entry);
+    }
 }
