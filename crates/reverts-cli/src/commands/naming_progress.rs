@@ -530,6 +530,56 @@ fn headline_coverage(breakdown: &TierBreakdown, target: NamingProgressTier) -> T
     }
 }
 
+/// Actionable guidance when naming is below 100% at the requested tier: how many
+/// symbols remain and which mechanism to continue with, split by rename channel
+/// (module symbols → `symbol-names`; island bindings → `binding-names`). Returns
+/// `None` when the tier is already fully named (no further work to point at).
+#[must_use]
+pub(crate) fn naming_next_step(
+    report: &NamingProgressReport,
+    target: NamingProgressTier,
+) -> Option<String> {
+    let headline = headline_coverage(&report.totals, target);
+    let pending = headline.universe.saturating_sub(headline.named);
+    if pending == 0 {
+        return None;
+    }
+    let (mut symbol_pending, mut binding_pending) = (0usize, 0usize);
+    for module in &report.modules {
+        let coverage = headline_coverage(&module.breakdown, target);
+        let module_pending = coverage.universe.saturating_sub(coverage.named);
+        if module_pending == 0 {
+            continue;
+        }
+        if module.module_id.is_some() {
+            symbol_pending += module_pending;
+        } else {
+            binding_pending += module_pending;
+        }
+    }
+    let mut mechanisms = Vec::new();
+    if symbol_pending > 0 {
+        mechanisms.push(format!(
+            "{symbol_pending} module-symbol(s) via `symbol-names --batch` (module_id-keyed)"
+        ));
+    }
+    if binding_pending > 0 {
+        mechanisms.push(format!(
+            "{binding_pending} island-binding(s) via `binding-names --batch` (file-path-keyed)"
+        ));
+    }
+    Some(format!(
+        "next: NOT complete — {pending} symbol(s) still unnamed at target '{}'. Continue semantic naming: {}. \
+         Pull the per-tier worklist with `naming-plan --symbol-index <output>/.reverts/symbol-index.json` \
+         (it routes each item to its channel + carries evidence tokens), accept names, then regenerate and \
+         re-run naming-progress. Before declarations/full, also name any non-semantic file/module paths \
+         (`cluster-NNNN.ts`, `NNN-domain/…`) via `module-names`/`cluster-names`. Recognized inlined \
+         third-party should be externalized or relocated under `vendor/`, not named.",
+        target_label(target),
+        mechanisms.join("; "),
+    ))
+}
+
 #[must_use]
 pub fn naming_progress_json(report: &NamingProgressReport, target: NamingProgressTier) -> String {
     let headline = headline_coverage(&report.totals, target);
@@ -543,6 +593,7 @@ pub fn naming_progress_json(report: &NamingProgressReport, target: NamingProgres
         "percent": pct(headline),
         "reached": tier_label(report.totals.reached_level),
         "complete": headline.universe == 0 || headline.named == headline.universe,
+        "next_step": naming_next_step(report, target),
         "tiers": {
             "public_surface": coverage_json(report.totals.public_surface),
             "declarations": coverage_json(report.totals.declarations),
@@ -630,6 +681,15 @@ pub(crate) fn run(args: NamingProgressArgs) -> Result<(), CliRunError> {
             module.breakdown.full.named,
             module.breakdown.full.universe,
             tier_label(module.breakdown.reached_level),
+        );
+    }
+    if let Some(next_step) = naming_next_step(&report, args.target_level) {
+        println!("{next_step}");
+    } else {
+        println!(
+            "complete: target '{}' is 100% named. Advance to the next tier (declarations → full) or \
+             move on to externalization/verification.",
+            target_label(args.target_level),
         );
     }
     Ok(())
@@ -811,10 +871,16 @@ mod tests {
             classify_emitted_entry(&tp, &universe).is_none(),
             "a vendor-marked island binding must be excluded from the denominator",
         );
-        assert!(is_third_party_island_path("src/modules/island/vendor/rxjs-3.ts"));
-        assert!(!is_third_party_island_path("src/modules/island/auth/token-store.ts"));
+        assert!(is_third_party_island_path(
+            "src/modules/island/vendor/rxjs-3.ts"
+        ));
+        assert!(!is_third_party_island_path(
+            "src/modules/island/auth/token-store.ts"
+        ));
         // A first-party file that merely has 'vendor' in a NON-island segment is unaffected.
-        assert!(!is_third_party_island_path("src/modules/vendoring-ui/panel.ts"));
+        assert!(!is_third_party_island_path(
+            "src/modules/vendoring-ui/panel.ts"
+        ));
     }
 
     #[test]

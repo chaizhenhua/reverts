@@ -340,12 +340,17 @@ pub(crate) fn materialize_package_sources_from_hints(
             }
             Ok(None) => {
                 eprintln!(
-                    "skipping package source materialization for {package_name}@{requested_version}: no matching npm version"
+                    "skipping package source materialization for {package_name}@{requested_version}: no matching npm version\n  \
+                     next: the version hint does not exist on npm. Run `npm view {package_name} versions` for the real list, \
+                     have an Agent pick the version that matches the inlined source (VERSION constant / API shape / peer-dep \
+                     coherence with already-anchored packages), then re-propose it via \
+                     `island-package-candidates --accept {package_name} --version <valid> --apply` and re-run match-packages."
                 );
             }
             Err(error) => {
                 eprintln!(
-                    "skipping package source materialization for {package_name}@{requested_version}: {error}"
+                    "skipping package source materialization for {package_name}@{requested_version}: {error}{}",
+                    next_step_hint(package_name.as_str(), &error.to_string())
                 );
             }
         }
@@ -362,11 +367,37 @@ pub(crate) fn materialize_package_sources_from_hints(
             &mut sources,
         ) {
             eprintln!(
-                "skipping package source materialization for {package_name}@{package_version}: {error}"
+                "skipping package source materialization for {package_name}@{package_version}: {error}{}",
+                next_step_hint(package_name.as_str(), &error.to_string())
             );
         }
     }
     Ok(sources)
+}
+
+/// Append an actionable next-step hint to a materialization-skip warning, chosen
+/// by the failure shape so an operator/Agent knows how to proceed instead of just
+/// seeing a dead end.
+fn next_step_hint(package_name: &str, error: &str) -> String {
+    if error.contains("404") || error.contains("Connection Failed") {
+        // Private / unpublished registry name (e.g. @ant/*, workspace:* deps).
+        format!(
+            "\n  next: '{package_name}' is not on the public registry (private/unpublished/workspace dep) — \
+             expected. It cannot be externalized; if it is a recognized inlined library, relocate its island \
+             cluster under vendor/ via `cluster-names --accept <fingerprint>=vendor/<name> --apply`."
+        )
+    } else if error.contains("did not contain a package") || error.contains("extract") {
+        // Tarball shape the extractor cannot use (often @types/* type-only packages).
+        format!(
+            "\n  next: '{package_name}' tarball could not be extracted (often a types-only `@types/*` package \
+             with no runtime source) — harmless; it is not a runtime dependency to externalize."
+        )
+    } else {
+        format!(
+            "\n  next: registry/network error for '{package_name}'. Retry; if it persists, confirm the version \
+             exists (`npm view {package_name} versions`) and re-propose via `island-package-candidates`."
+        )
+    }
 }
 
 /// Network-resolution hints for reference-manifest packages that have NO bundle

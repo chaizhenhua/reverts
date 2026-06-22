@@ -173,7 +173,14 @@ fn package_json_dependency_ranges(source: &str) -> BTreeMap<String, String> {
     let Some(value) = parse_package_json_source(source) else {
         return ranges;
     };
-    for field in ["dependencies", "optionalDependencies", "peerDependencies"] {
+    // Only `dependencies`/`optionalDependencies` are actually installed when a
+    // package is installed. `peerDependencies` are NOT — the consumer (our root
+    // `package.json`) must provide them. Counting peers here wrongly concludes
+    // that e.g. `@opentelemetry/api` (a peer of `@opentelemetry/sdk-trace-base`,
+    // intentionally pinned a major behind the SDK) is transitively provided, then
+    // prunes it from the root deps — leaving the emitted `import '@opentelemetry/api'`
+    // with nothing to resolve. Peers must stay root-declared.
+    for field in ["dependencies", "optionalDependencies"] {
         let Some(object) = value.get(field).and_then(serde_json::Value::as_object) else {
             continue;
         };
@@ -312,6 +319,37 @@ mod tests {
             "browser is not transitively provided, keep it: {names:?}"
         );
         assert_eq!(pruned.len(), 4);
+    }
+
+    #[test]
+    fn keeps_off_major_peer_dependency_that_is_not_transitively_installed() {
+        // @opentelemetry/api@1 is a PEER dependency of @opentelemetry/sdk-trace-base@2
+        // (the API is intentionally pinned a major behind the SDK). Peers are NOT
+        // installed by the SDK — the root must declare them — so the off-major api
+        // must stay, otherwise the emitted `import '@opentelemetry/api'` resolves to
+        // nothing on a clean install.
+        let dependencies = vec![
+            dep("@opentelemetry/api", "1.9.1"),
+            dep("@opentelemetry/sdk-trace-base", "2.8.0"),
+        ];
+        let mut manifests = MaterializedPackageManifests::new();
+        manifests.insert_source(
+            "@opentelemetry/sdk-trace-base",
+            "2.8.0",
+            "package.json",
+            "export default {\"dependencies\":{\"@opentelemetry/core\":\"2.8.0\"},\
+             \"peerDependencies\":{\"@opentelemetry/api\":\">=1.3.0 <1.10.0\"}}"
+                .to_string(),
+        );
+
+        let pruned =
+            prune_transitively_provided_scope_incoherent_dependencies(dependencies, &manifests);
+        let names: Vec<&str> = pruned.iter().map(|d| d.package_name.as_str()).collect();
+        assert!(
+            names.contains(&"@opentelemetry/api"),
+            "api is a peer (not transitively installed by the SDK) — keep it: {names:?}"
+        );
+        assert!(names.contains(&"@opentelemetry/sdk-trace-base"));
     }
 
     #[test]

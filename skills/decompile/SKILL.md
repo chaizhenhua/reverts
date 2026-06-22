@@ -389,6 +389,26 @@ deterministic matching"):
      `--materialize-package-sources` flow only for libs whose sources are NOT
      on disk and must be fetched from the registry.
 
+3. **Invalid / missing version → Agent re-analyzes and re-proposes.** When
+   materialization logs `skipping … : no matching npm version` (or a candidate has
+   no version), the hint was wrong and that package will NOT anchor. Do **not**
+   give up — `match-packages` now prints the next step inline. Dispatch an Agent
+   to determine a **real** npm version:
+   - List actual versions: `npm view <pkg> versions --json`. Never propose a
+     version absent from this list.
+   - Read the inlined source (`island/vendor/<pkg>*.ts` or the original bundle)
+     for a `VERSION` constant, characteristic API shape, and **dependency
+     coherence** — `npm view <pkg>@<v> dependencies` must be consistent with
+     already-anchored packages (e.g. an `@opentelemetry/api@1.9.0` anchor pins the
+     compatible `core`/`sdk-trace-base` line; a bundled `@sentry/electron@7.4.0`
+     literal pins its exact `@sentry/core`/`@sentry/node`).
+   - Beware version-line confusion: a `VERSION` string lifted from one module may
+     belong to a *different* package in the same family (OTel's experimental line
+     `0.2xx` vs the stable `2.x` line for `core`/`sdk-trace-base`).
+   - Re-propose with the corrected version: `island-package-candidates --accept
+     <pkg> --version <real> --evidence "<dating chain>" --apply`, then re-run
+     `match-packages`. A wrong re-guess is still harmless (no anchor).
+
 ### Report quirk: verify the *output*, not just the metric
 
 `match-packages` can log `0 package source eliminated (0.00%)` while still
@@ -409,6 +429,50 @@ imports are present, `tsc -p tsconfig.runtime.json --noEmit` still exits 0, and
 the equivalence trace is unchanged (externalized package calls become stubbed
 interactions but must keep the same multiset). Never demote a real match to
 `app` to silence a verification miss — fix the identity/version/subpath instead.
+
+### C. When a package CANNOT be externalized → relocate to `vendor/`
+
+Externalization is not always possible, and forcing it would emit broken code.
+A package is **un-externalizable** when any of these hold — `generate-project-v2`
+logs the reason as `island-package skip: <pkg> (…)`:
+
+- **No coverable barrel.** "no single unit transitively reaches all of the
+  package's member submodules" — the inlined units don't share one entry that
+  dominates them, so there is no synthesizable barrel to route a single
+  `import 'pkg'` through (seen for `node-pty`, `ws` as island libs; they still
+  externalize via shape A when they own real `node_modules` modules).
+- **App reaches into internals.** The emitter safety gate rejects when a member
+  outside the barrel-dominated closure is referenced by retained (first-party)
+  code — deleting it would dangle. The whole package is conservatively kept
+  inlined rather than emit a hanging reference.
+- **Tree-shaken fragment.** Only a partial slice of the library was bundled
+  (most of `zod`, `lodash`, `rxjs`, `ajv`, …). There is no complete package to
+  import, and minified fragments fingerprint-match weakly or not at all. These
+  never anchor in the first place.
+
+For all three, **do not name the region as first-party and do not leave it as an
+anonymous `cluster-NNNN.ts`.** Relocate it to a `vendor/`-prefixed path whose
+name reflects the recognized package, so the output is honest about provenance:
+
+1. The agent reading the cluster recognizes the library (string anchors, API
+   shapes, `VERSION`, known class names) and assigns a path via
+   `cluster-names --accept <fingerprint>=vendor/<package-or-submodule> --evidence
+   "<what it saw>" --apply` (keyed by the cluster's stable content fingerprint,
+   `origin=agent`). Examples already in use: `vendor/zod-checks-string`,
+   `vendor/ajv-formats`, `vendor/opentelemetry-instrumentation-koa`.
+2. Regenerate — the cluster now emits as `modules/island/vendor/<package>.ts`
+   instead of `cluster-NNNN.ts`. The code stays inlined (it runs; equivalence
+   trace unchanged), but it is clearly labeled third-party.
+3. **`vendor/` contents are NOT first-party naming work.** Once a region is
+   relocated under `vendor/`, agents must not spend semantic-naming effort on its
+   internal bindings — it is recovered third-party code, not application code.
+   Only genuinely first-party clusters get binding/symbol names.
+
+Decision order per recognized third-party region: **externalize (A or B) first;
+only if that is impossible, relocate to `vendor/` via `cluster-names`.** The end
+state is N externalized `import 'pkg'` + a `vendor/` tree that mirrors the
+remaining inlined libraries by package, leaving only true first-party code as
+anonymous/named clusters.
 
 ## Phase 1: Setup
 

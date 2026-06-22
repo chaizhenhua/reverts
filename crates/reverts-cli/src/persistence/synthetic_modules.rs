@@ -107,7 +107,12 @@ fn database_parent_dir(connection: &Connection) -> Result<PathBuf, MatchPackages
         .query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
         .map_err(MatchPackagesError::WriteAttribution)?;
     if db_path.is_empty() {
-        return Ok(std::env::temp_dir().join("reverts-synthetic-sources"));
+        // In-memory / pathless DB: anchor synthetic sources to the current working
+        // directory, NOT the system temp dir. Synthetic source bytes are read back
+        // on every later generate/match (the DB stores only paths), so writing them
+        // under a volatile /tmp that macOS periodically cleans silently breaks the
+        // project days later.
+        return Ok(PathBuf::from("."));
     }
     Ok(PathBuf::from(db_path)
         .parent()

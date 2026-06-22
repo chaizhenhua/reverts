@@ -570,6 +570,40 @@ fn materialize_source_records(
     Ok(sources)
 }
 
+/// Copy an asset's bytes next to the DB and return that path. Like
+/// [`materialize_parseable_source`], this keeps `project_assets.source_path` —
+/// read on every later generate — out of the volatile `--input` tree (e.g. an
+/// app extracted under /tmp that macOS later cleans), so the project stays
+/// self-contained and relocatable with its SQLite file.
+fn materialize_asset(
+    physical_path: &Path,
+    relative_path: &str,
+    args: &ImportUnpackedArgs,
+) -> Result<PathBuf, ImportUnpackedError> {
+    let parent = args
+        .output_db
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let stored_path = parent
+        .join(".reverts-import-sources")
+        .join(sanitize_path_segment(args.project_name.as_str()))
+        .join(Path::new(relative_path));
+    if let Some(dir) = stored_path.parent() {
+        fs::create_dir_all(dir).map_err(|source| ImportUnpackedError::WriteSource {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::copy(physical_path, stored_path.as_path()).map_err(|source| {
+        ImportUnpackedError::WriteSource {
+            path: stored_path.clone(),
+            source,
+        }
+    })?;
+    Ok(stored_path)
+}
+
 fn materialize_parseable_source(
     file: &ImportFile,
     args: &ImportUnpackedArgs,
@@ -580,35 +614,41 @@ fn materialize_parseable_source(
             source,
         }
     })?;
-    if !content.starts_with("#!") {
-        return Ok(file.physical_path.clone());
-    }
+    // Always materialize the source NEXT TO THE DB rather than referencing the
+    // `--input` tree. The recorded `file_path` is read on every later
+    // generate/match (the DB stores only paths, not bytes), so if it points into
+    // a volatile location — e.g. an app extracted under /tmp, which macOS's
+    // periodic tmp cleanup erodes — the project silently breaks days later. A
+    // DB-adjacent copy keeps the project self-contained and relocatable with its
+    // SQLite file. Shebang sources are additionally rewritten to a comment so the
+    // parser accepts them.
     let parent = args
         .output_db
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let normalized_path = parent
+    let stored_path = parent
         .join(".reverts-import-sources")
         .join(sanitize_path_segment(args.project_name.as_str()))
         .join(Path::new(file.relative_path.as_str()));
-    if let Some(parent) = normalized_path.parent() {
+    if let Some(parent) = stored_path.parent() {
         fs::create_dir_all(parent).map_err(|source| ImportUnpackedError::WriteSource {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    let normalized = format!(
-        "//{}",
-        content.strip_prefix("#").unwrap_or(content.as_str())
-    );
-    fs::write(normalized_path.as_path(), normalized).map_err(|source| {
+    let stored_content = if content.starts_with("#!") {
+        format!("//{}", content.strip_prefix("#").unwrap_or(content.as_str()))
+    } else {
+        content
+    };
+    fs::write(stored_path.as_path(), stored_content).map_err(|source| {
         ImportUnpackedError::WriteSource {
-            path: normalized_path.clone(),
+            path: stored_path.clone(),
             source,
         }
     })?;
-    Ok(normalized_path)
+    Ok(stored_path)
 }
 
 fn collect_module_dependencies(
@@ -916,6 +956,7 @@ fn persist_import(
         .iter()
         .filter(|file| file.kind != ImportFileKind::Source)
     {
+        let stored_path = materialize_asset(&file.physical_path, &file.relative_path, args)?;
         transaction
             .execute(
                 r"
@@ -928,7 +969,7 @@ fn persist_import(
                     asset_id,
                     file.logical_path,
                     format!("assets/{}", file.relative_path),
-                    file.physical_path.to_string_lossy(),
+                    stored_path.to_string_lossy(),
                     asset_kind(file),
                     if file.executable { 1_i64 } else { 0_i64 }
                 ],
@@ -943,6 +984,7 @@ fn persist_import(
         .iter()
         .filter(|source| is_private_package_source_asset(source, &private_package_roots))
     {
+        let stored_path = materialize_asset(&source.physical_path, &source.relative_path, args)?;
         transaction
             .execute(
                 r"
@@ -955,7 +997,7 @@ fn persist_import(
                     asset_id,
                     source.relative_path,
                     format!("assets/{}", source.relative_path),
-                    source.physical_path.to_string_lossy()
+                    stored_path.to_string_lossy()
                 ],
             )
             .map_err(ImportUnpackedError::WriteDatabase)?;
@@ -1532,6 +1574,91 @@ mod tests {
             },
         )?;
         assert_eq!(selections[0].source_bytes, 71);
+        Ok(())
+    }
+
+    #[test]
+    fn import_is_self_contained_after_input_tree_is_deleted() -> Result<(), Box<dyn Error>> {
+        // Regression: source/asset bytes are read from disk on every later
+        // generate/match (the DB stores only paths). They must be materialized
+        // next to the DB, NOT referenced in the volatile `--input` tree — an app
+        // extracted under /tmp is eroded by macOS's periodic tmp cleanup, silently
+        // breaking the project days later. Deleting `--input` after import must
+        // leave the project fully loadable.
+        let temp = tempdir()?;
+        let root = temp.path().join("app");
+        fs::create_dir_all(root.join("node_modules/ws"))?;
+        fs::write(root.join("a.js"), "const b = require('./b');\n")?;
+        fs::write(root.join("b.js"), "export const value = 1;\n")?;
+        fs::write(
+            root.join("node_modules/ws/package.json"),
+            r#"{"name":"ws","version":"8.0.0"}"#,
+        )?;
+        fs::write(
+            root.join("node_modules/ws/index.js"),
+            "module.exports = {};\n",
+        )?;
+        fs::write(root.join("native.node"), b"\xcf\xfa\xed\xfe")?;
+        let manifest = temp.path().join("reverts-import-evidence.json");
+        let ws_package = package("ws", "8.0.0", "node_modules/ws");
+        write_evidence(
+            root.as_path(),
+            manifest.as_path(),
+            vec![
+                evidence_file(root.as_path(), "a.js", None),
+                evidence_file(root.as_path(), "b.js", None),
+                evidence_file(
+                    root.as_path(),
+                    "node_modules/ws/index.js",
+                    Some(ws_package.clone()),
+                ),
+            ],
+            vec![evidence_file(
+                root.as_path(),
+                "node_modules/ws/package.json",
+                Some(ws_package),
+            )],
+            vec![evidence_file(root.as_path(), "native.node", None)],
+        )?;
+        let output_db = temp.path().join("project.sqlite");
+        let args = ImportUnpackedArgs {
+            input: root.clone(),
+            manifest,
+            project_name: "fixture".to_string(),
+            output_db: output_db.clone(),
+            ignore_native_assets: true,
+            max_source_bytes: None,
+            bundle_source_bytes: None,
+        };
+
+        import_unpacked_to_sqlite(&args)?;
+
+        // The fragility trigger: the original input tree disappears.
+        fs::remove_dir_all(root.as_path())?;
+
+        // No recorded source/asset path may point back into the deleted input.
+        let connection = Connection::open(output_db.as_path())?;
+        let mut statement = connection.prepare("SELECT file_path FROM source_files")?;
+        let source_paths = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(!source_paths.is_empty());
+        for path in &source_paths {
+            assert!(
+                !path.starts_with(root.to_string_lossy().as_ref()),
+                "source path still references the deleted --input tree: {path}"
+            );
+            assert!(
+                std::path::Path::new(path).exists(),
+                "materialized source must survive --input deletion: {path}"
+            );
+        }
+
+        // The whole project still loads (reads every source/asset off disk).
+        let bundle =
+            reverts_input::sqlite::load_project_bundle_from_sqlite(output_db.as_path(), 1)?;
+        assert_eq!(bundle.source_files.len(), 3);
+        assert_eq!(bundle.assets.len(), 1);
         Ok(())
     }
 

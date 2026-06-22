@@ -388,7 +388,21 @@ fn load_package_index_reexports(
             &connection,
             &package,
             &version,
-            &["index.js", "dist/index.js", "lib/index.js", "src/index.js"],
+            &[
+                "index.js",
+                "dist/index.js",
+                "lib/index.js",
+                "src/index.js",
+                // Modern dual-build layouts (e.g. @sentry/* ship the entry under
+                // build/cjs|esm, others under dist/cjs|esm). Prefer the CJS entry
+                // so `parse_index_reexports` sees `require(...)`-shaped re-exports.
+                "build/cjs/index.js",
+                "build/esm/index.js",
+                "dist/cjs/index.js",
+                "dist/esm/index.js",
+                "cjs/index.js",
+                "esm/index.js",
+            ],
         )?
         .map(|source| reverts_js::parse_index_reexports(&source))
         .unwrap_or_default();

@@ -718,6 +718,101 @@ pub enum CliRunError {
     MatchModulesRecall(String),
 }
 
+impl CliRunError {
+    /// A concrete next step for every failure, so the CLI never dead-ends: the
+    /// operator/Agent always sees how to recover or what to try next. Printed by
+    /// `main` after the error message.
+    #[must_use]
+    pub fn next_step(&self) -> &'static str {
+        match self {
+            Self::Args(_) => {
+                "next: invalid arguments. Run `reverts-cli <command> --help` for the exact usage and flags."
+            }
+            Self::LoadInput(_) => {
+                "next: the SQLite DB or a referenced source file is missing/unreadable. Source BYTES live on \
+                 disk at `source_files.file_path` (the DB stores only paths). If a working dir was deleted \
+                 (/tmp, .reverts-synthetic-sources, .reverts-import-sources), restore it from the generated \
+                 `<output>/sources/<original-path>` mirror, then retry."
+            }
+            Self::Pipeline(_) => {
+                "next: a recovery/emit invariant failed. Re-run `generate-project-v2`; if it is a parse/audit \
+                 issue, inspect the printed audit warnings and fix the pipeline cause — never hand-edit output."
+            }
+            Self::MatchPackages(_) => {
+                "next: package matching failed. Confirm the version exists (`npm view <pkg> versions`), check \
+                 network access, and re-propose inlined-library candidates with valid versions via \
+                 `island-package-candidates --accept <pkg> --version <v> --apply`, then re-run match-packages."
+            }
+            Self::ImportUnpacked(_) => {
+                "next: import failed — the reverts.import_evidence.v1 manifest must cover EVERY input file with \
+                 matching recorded size/hash. Regenerate the manifest for the extracted app root and retry."
+            }
+            Self::ExtractAssets(_) => {
+                "next: asset extraction failed. Check the output directory exists and is writable, and that the \
+                 source assets are present, then retry."
+            }
+            Self::RuntimeInventory(_) | Self::FullInventory(_) | Self::IdentifierInventory(_) => {
+                "next: inventory could not be computed. Ensure the DB loads (`naming-progress` should succeed) \
+                 and that any `--symbol-index` path exists; regenerate the project to refresh `.reverts/`."
+            }
+            Self::NamingProgress(_) | Self::CoverageLedger(_) => {
+                "next: could not compute naming coverage. Ensure the DB loads and the `--symbol-index` file (if \
+                 passed) exists; otherwise omit it so the command regenerates the index from the DB."
+            }
+            Self::ModuleClassify(_) => {
+                "next: classification spec rejected. Run `module-classify --list` to inspect current state and \
+                 check the `--batch` rows (MODULE_ID<TAB>classification<TAB>evidence); `--help` for the format."
+            }
+            Self::SymbolNames(_) => {
+                "next: symbol-name spec rejected. Verify the DB module id space (symbol-names is module_id-keyed) \
+                 and the accept/batch format; `symbol-names --list` shows current names, `--help` the usage."
+            }
+            Self::BindingNames(_) => {
+                "next: binding-name spec rejected. binding-names is file-path-keyed (island bindings). Check the \
+                 `file_path<TAB>original<TAB>semantic<TAB>evidence` rows; `--origin human` is evidence-exempt."
+            }
+            Self::ModuleNames(_) => {
+                "next: module-name spec rejected. module-names is emitted-id-keyed; verify the id and the \
+                 `ID=path` form, then re-run with `--apply`. `--list` shows current overrides."
+            }
+            Self::ClusterNames(_) => {
+                "next: cluster-name spec rejected. cluster-names is content-fingerprint-keyed; verify the \
+                 `<fingerprint>=vendor/<name>` form. Use this to relocate un-externalizable inlined libraries \
+                 under `vendor/`. `--list` shows current names."
+            }
+            Self::IslandPackageCandidates(_) => {
+                "next: island-package candidate rejected. Check the `accept|reject<TAB>pkg<TAB>version|-<TAB>evidence` \
+                 rows; a wrong version is harmless (it just won't anchor). `--list` shows accepted candidates."
+            }
+            Self::ReferenceSourceNames(_) => {
+                "next: reference-source naming failed. Confirm `--reference-source-root` points at a readable \
+                 first-party source tree and the project loads; `--help` for usage."
+            }
+            Self::AuditRejected(_) => {
+                "next: the generated project failed structural audit. Read each listed finding and fix its \
+                 pipeline cause (wire-rename, dangling import, missing asset, …) — do NOT hand-edit the output. \
+                 Re-run after the fix."
+            }
+            Self::UnsafeOutputPath(_) => {
+                "next: an emitted path escaped the output root — a pipeline bug, not a usage error. Report the \
+                 offending module/binding; do not work around it by relocating files manually."
+            }
+            Self::WriteOutput { .. } => {
+                "next: could not write output. Check free disk space (`df -h`) and write permissions on the \
+                 output directory, then retry."
+            }
+            Self::GenerateProject(_) => {
+                "next: project generation failed. Re-run `generate-project-v2`; if a source file is missing, \
+                 restore it from `<output>/sources/` (see LoadInput), and check the output dir is writable."
+            }
+            Self::MatchModulesRecall(_) => {
+                "next: recall measurement failed. Confirm both the project and the ground-truth project load; \
+                 `--help` for usage."
+            }
+        }
+    }
+}
+
 impl fmt::Display for CliRunError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
