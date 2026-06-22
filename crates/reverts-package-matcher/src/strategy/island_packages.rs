@@ -348,6 +348,13 @@ fn build_plan(
             }
         }
         _ => {
+            if std::env::var_os("REVERTS_DEBUG_ISLAND_PKG").is_some() {
+                eprintln!(
+                    "island-pkg no-barrel {package}: members={} ambiguous={ambiguous} index={}",
+                    member_indices.len(),
+                    if index.is_some() { "loaded" } else { "MISSING" }
+                );
+            }
             // No single in-bundle barrel. If the real package index is known, the
             // package was tree-shaken (its barrel dropped) — synthesize one.
             if !ambiguous
@@ -409,15 +416,44 @@ fn try_synthesize_plan(
     // (e.g. 96 unrelated bindings all set to `semver.Range`, blanking out a real
     // module's init body). The attribution is unreliable, so bail and leave the
     // package inlined rather than emit broken externalization.
+    let debug = std::env::var_os("REVERTS_DEBUG_ISLAND_PKG").is_some();
     let mut seen_submodules: BTreeSet<&str> = BTreeSet::new();
     for &unit_index in member_indices {
         let unit = &units[unit_index];
-        let relpath = member_submodule.get(&unit_index)?; // unknown submodule → bail
+        let Some(relpath) = member_submodule.get(&unit_index) else {
+            if debug {
+                eprintln!("island-pkg synth bail {package}: unit {unit_index} has no submodule");
+            }
+            return None; // unknown submodule → bail
+        };
         if !seen_submodules.insert(relpath.as_str()) {
+            if debug {
+                let dupes: Vec<String> = member_indices
+                    .iter()
+                    .filter(|&&i| member_submodule.get(&i).map(String::as_str) == Some(relpath.as_str()))
+                    .map(|&i| {
+                        format!(
+                            "{}(init={},binds={})",
+                            i,
+                            units[i].init_fn,
+                            unit_binding_count(&units[i])
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "island-pkg synth bail {package}: duplicate submodule '{relpath}' units=[{}]",
+                    dupes.join(", ")
+                );
+            }
             return None; // duplicate submodule → fingerprint over-match → not safe
         }
         let reexports = index.for_submodule(relpath);
         if reexports.is_empty() {
+            if debug {
+                eprintln!(
+                    "island-pkg synth bail {package}: submodule '{relpath}' not re-exported by index"
+                );
+            }
             return None; // member not re-exported by the index → cannot externalize cleanly
         }
         let namespace_members: Vec<(String, String)> = reexports
@@ -451,6 +487,12 @@ fn try_synthesize_plan(
         skip_reason: None,
         synthesized_members,
     })
+}
+
+fn unit_binding_count(unit: &RecognizedCjsModule) -> usize {
+    let mut set = BTreeSet::new();
+    extend_unit_bindings(&mut set, unit);
+    set.len()
 }
 
 fn extend_unit_bindings(bindings: &mut BTreeSet<String>, unit: &RecognizedCjsModule) {
