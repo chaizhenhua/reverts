@@ -100,18 +100,18 @@ Resolve `$ARGUMENTS` into `project_id` and optional `output_dir`.
 
 ### Output directory
 
-If `$ARGUMENTS` contains `-o <path>` or `--output <path>`, resolve it to `output_dir`. Otherwise default to `{project_root_path}/out` and pass it as `generate-project-v2 --output <output_dir>`.
+If `$ARGUMENTS` contains `-o <path>` or `--output <path>`, resolve it to `output_dir`. Otherwise default to `{project_root_path}/out` and pass it as `generate --output <output_dir>`.
 
 **The output directory must be persistent — never under `/tmp` or any
 scratch/temp location.** A decompiled app is a long-term project: its generated
 source, its SQLite project DB, and its `e2e/` validation harness must survive
-reboots and tmp cleanup, and regeneration (`generate-project-v2 --output <dir>`
+reboots and tmp cleanup, and regeneration (`generate --output <dir>`
 preserves a pre-existing `e2e/` subtree). Prefer a stable project root such as
 `~/<workspace>/<app>-decompiled/` holding the project DB beside the generated
 app, e.g. `…/app/` (generated source) + `…/project.sqlite`. If the resolved
 output is a temp path, relocate it and tell the user where it lives.
 
-**Prefer the modern layout: `generate-project-v2 --source-root src`.** It emits
+**Prefer the modern layout: `generate --source-root src`.** It emits
 recovered source under `src/`, a `NodeNext` tsconfig (the recovered code runs on
 Node ESM with explicit `.js` specifiers — `NodeNext` models that), a
 `package.json` `exports` map, `README.md` + `.gitignore`, and relocates pipeline
@@ -288,13 +288,13 @@ naming.
 6. **Name the module files, not just the symbols.** Readability also means the
    emitted file paths. Accept a semantic path per module
    (`module-names --accept <MODULE_ID=path> --apply`, stored as a
-   `module_path_overrides` row); `generate-project-v2` then moves the module's
+   `module_path_overrides` row); `generate` then moves the module's
    file to that path and recomputes every importing file's relative specifier.
    Reference-source matching can also set these automatically when an upstream
    tree exists. Wire/export names are untouched, so the build still links.
 
 7. **Regenerate and re-measure; loop until the tier target is met.**
-   `generate-project-v2` applies accepted names, then return to step 3.
+   `generate` applies accepted names, then return to step 3.
    Export-name readability holds by construction: an exported symbol's semantic
    name propagates into every importing module, so consumers read the semantic
    name. For a binding whose semantic name is provably safe to expose
@@ -389,7 +389,7 @@ deterministic matching"):
    shipped deps), downloads only concrete compatible versions into the package
    cache, and fingerprints island bindings against them, writing
    `package_island_anchors` (keyed by `(project, source_file, binding)`, no
-   `module_id`). `generate-project-v2` then drops anchored island bindings from
+   `module_id`). `generate` then drops anchored island bindings from
    the naming denominator.
    - Anchoring uses minification-robust axes (structural/feature/string anchors).
      Per-function structural hashing alone is too weak across esbuild
@@ -447,7 +447,7 @@ interactions but must keep the same multiset). Never demote a real match to
 ### C. When a package CANNOT be externalized → relocate to `vendor/`
 
 Externalization is not always possible, and forcing it would emit broken code.
-A package is **un-externalizable** when any of these hold — `generate-project-v2`
+A package is **un-externalizable** when any of these hold — `generate`
 logs the reason as `island-package skip: <pkg> (…)`:
 
 - **No coverable barrel.** "no single unit transitively reaches all of the
@@ -501,7 +501,7 @@ Only for fresh projects:
    `project_assets`, and `package_attributions`; module/dependency discovery is
    part of the import.
 3. Runtime helpers are detected deterministically by `import-unpacked` and
-   `generate-project-v2` — there is no manual confirm step. Inspect them with
+   `generate` — there is no manual confirm step. Inspect them with
    `reverts-cli runtime-inventory --input <db> --project-id <id>`.
 
 Helper detection is automatic, so naming/fix agents read the runtime inventory
@@ -526,7 +526,7 @@ For each module the agent must:
    <id> --target-level <tier>` — each unnamed target carries its `module_id`,
    `evidence_tokens`, and `rename_channel`. Skip modules with no unnamed targets.
 2. Read the module's source on disk (under `<output>/src/...`) once it has been
-   materialized by `generate-project-v2`; before the first generation, read the
+   materialized by `generate`; before the first generation, read the
    worklist's `evidence_tokens` and the import-evidence inputs.
 3. **Classify**: determine application vs third-party using package fingerprints
    (see below). Vendored `node_modules` paths classify deterministically with
@@ -734,7 +734,7 @@ If any P0 condition fails, do not generate output yet.
 
 ## Phase 5: Output & Verification
 
-1. `reverts-cli generate-project-v2 --input <db> --project-id <id> --output
+1. `reverts-cli generate --input <db> --project-id <id> --output
    $OUTPUT_DIR --source-root src`
 2. If generation errors occur (non-zero exit + stderr), go back to the control loop.
 3. Spot-check key modules by reading the generated TypeScript on disk under
@@ -761,7 +761,7 @@ regeneration, not a generated-output hand edit. Full procedures live in
 | Dangling named import | Every generated output | A first-party `import { Orig }` has no matching export in its target module (`DanglingNamedImport` audit **error**, blocks output) — esbuild's `No matching export`, caught in-pipeline |
 
 Use the SQLite project DB metadata and AST or structured parsing for these
-audits (the pipeline emits them during `generate-project-v2`). Do not replace
+audits (the pipeline emits them during `generate`). Do not replace
 them with grep over generated `.ts` files.
 
 **Module-size contract.** A recovered module must be a human-readable unit — no
@@ -960,4 +960,4 @@ common mistakes.
 | `cluster-names` | Island-cluster file-path overrides (keyed by cluster fingerprint) |
 | `reference-source-names` | Deterministic naming from a historical first-party source tree |
 | `runtime-inventory` | Inspect deterministically detected runtime helpers |
-| `generate-project-v2` | Output generation (materializes source under `<output>/src/…`) |
+| `generate` | Output generation (materializes source under `<output>/src/…`) |

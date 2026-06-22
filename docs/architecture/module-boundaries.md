@@ -50,7 +50,7 @@ planning, emission, and command orchestration.
 | `reverts-planner` | planning | Produce file-level import, export, local binding, and synthetic binding plans |
 | `reverts-emitter` | emission | Convert accepted plans into AST-backed emitted files and `EmittedProject` |
 | `reverts-pipeline` | orchestration | Connect input, model enrichment, planning, emission, and parse audit for the core library loop |
-| `reverts-cli` | orchestration | Provide `generate-project-v2` and user-facing command orchestration |
+| `reverts-cli` | orchestration | Provide `generate` and user-facing command orchestration |
 | `reverts-fixtures` | test support | Provide self-contained fixture builders for tests without production dependency edges |
 
 ## Dependency Direction

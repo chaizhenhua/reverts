@@ -125,7 +125,7 @@ The manifest always records source units and edges; `--ingest-include` /
    quality reporting).
 5. After mechanical recovery is structurally valid, use
    [decompile](../decompile/SKILL.md) for the rename worklist
-   (`reverts-cli naming-progress` / `naming-plan` / `generate-project-v2`)
+   (`reverts-cli naming-progress` / `naming-plan` / `generate`)
    and [reverts-decompile](../reverts-decompile/SKILL.md) for export
    validation.
 

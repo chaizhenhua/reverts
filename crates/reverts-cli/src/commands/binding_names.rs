@@ -1,5 +1,5 @@
 //! `binding-names` command: accept explicit semantic names for generated-output
-//! local bindings. These names are consumed by `generate-project-v2` before
+//! local bindings. These names are consumed by `generate` before
 //! emission and counted by `identifier-inventory` only when accepted.
 
 use std::collections::BTreeMap;

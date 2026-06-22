@@ -37,7 +37,7 @@ For Electron decompilation requests, do not stop after producing
    --project-id <id>`.
 4. Run [decompile](../decompile/SKILL.md) — it now drives `reverts-cli` —
    until its public-surface gate passes, then run `reverts-cli
-   generate-project-v2 --input <db> --project-id <id> --output <dir>
+   generate --input <db> --project-id <id> --output <dir>
    --source-root src` with strict gates enabled.
 5. Run [reverts-decompile](../reverts-decompile/SKILL.md) using the Electron
    runtime profile: install, `tsc --noEmit`, Electron startup, and renderer
@@ -129,7 +129,7 @@ The manifest always records source units and edges. Only JS/TS-family sources pa
    against the collector manifest.
 4. Run the standard [decompile](../decompile/SKILL.md) control loop (it drives
    `reverts-cli`) for semantic naming and strict output generation, ending with
-   `reverts-cli generate-project-v2 --input <db> --project-id <id>
+   `reverts-cli generate --input <db> --project-id <id>
    --output <dir> --source-root src`.
 5. Run [reverts-decompile](../reverts-decompile/SKILL.md) with the Electron
    validation profile. Do not substitute browser-extension or web-app checks
@@ -196,7 +196,7 @@ files.
 | Collect `.dmg` / `.img` / `.app` / `Resources` / `app.asar` | `python3 skills/electron-collector/bin/collect_electron_artifact ... --json-report` |
 | Project + import + discovery | `reverts-cli import-unpacked --input <app> --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>` |
 | Inventory + progress | `reverts-cli full-inventory --input <db> --project-id <id> [--json <file>]`, `reverts-cli naming-progress --input <db> --project-id <id> [--json]`, `reverts-cli coverage-ledger --input <db> --project-id <id>` |
-| Semantic naming + output | [decompile](../decompile/SKILL.md) (drives `reverts-cli`), ending with `reverts-cli generate-project-v2 --input <db> --project-id <id> --output <dir> --source-root src` |
+| Semantic naming + output | [decompile](../decompile/SKILL.md) (drives `reverts-cli`), ending with `reverts-cli generate --input <db> --project-id <id> --output <dir> --source-root src` |
 | Install/compile/runtime/UI | [reverts-decompile](../reverts-decompile/SKILL.md), Electron profile in `references/runtime-validation-profiles.md` |
 
 ## Output Contract

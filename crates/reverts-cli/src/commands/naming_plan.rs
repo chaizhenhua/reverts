@@ -4,7 +4,7 @@
 //!
 //! The work list is the intersection of two views: tier/named status from the
 //! graph (`module_naming_facts`) and location from the emitted `symbol_index`
-//! (`generate-project-v2`'s sidecar). Only bindings that actually land in an
+//! (`generate`'s sidecar). Only bindings that actually land in an
 //! emitted file are offered — a target with no readable file is not actionable.
 
 use std::collections::BTreeMap;

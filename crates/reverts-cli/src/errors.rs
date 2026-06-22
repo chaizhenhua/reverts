@@ -735,7 +735,7 @@ impl CliRunError {
                  `<output>/sources/<original-path>` mirror, then retry."
             }
             Self::Pipeline(_) => {
-                "next: a recovery/emit invariant failed. Re-run `generate-project-v2`; if it is a parse/audit \
+                "next: a recovery/emit invariant failed. Re-run `generate`; if it is a parse/audit \
                  issue, inspect the printed audit warnings and fix the pipeline cause — never hand-edit output."
             }
             Self::MatchPackages(_) => {
@@ -802,7 +802,7 @@ impl CliRunError {
                  output directory, then retry."
             }
             Self::GenerateProject(_) => {
-                "next: project generation failed. Re-run `generate-project-v2`; if a source file is missing, \
+                "next: project generation failed. Re-run `generate`; if a source file is missing, \
                  restore it from `<output>/sources/` (see LoadInput), and check the output dir is writable."
             }
             Self::MatchModulesRecall(_) => {
@@ -831,7 +831,7 @@ impl fmt::Display for CliRunError {
             Self::IdentifierInventory(message) => {
                 write!(formatter, "identifier-inventory: {message}")
             }
-            Self::GenerateProject(message) => write!(formatter, "generate-project-v2: {message}"),
+            Self::GenerateProject(message) => write!(formatter, "generate: {message}"),
             Self::BindingNames(message) => write!(formatter, "binding-names: {message}"),
             Self::ModuleNames(message) => write!(formatter, "module-names: {message}"),
             Self::ClusterNames(message) => write!(formatter, "cluster-names: {message}"),

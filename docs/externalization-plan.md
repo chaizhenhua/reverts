@@ -18,7 +18,7 @@
   @sentry/electron 6、react 2,以及 agent 命名出的 axios / undici / rxjs / fflate /
   fastify / tar / intl-messageformat / MCP SDK 等。
 
-诊断工具:`REVERTS_DEBUG_ISLAND_PKG=1 generate-project-v2`(commit `14e48a52`)逐包打印
+诊断工具:`REVERTS_DEBUG_ISLAND_PKG=1 generate`(commit `14e48a52`)逐包打印
 为何外化失败。
 
 ## 外化机制三步(回顾)
@@ -89,7 +89,7 @@
    `cp -R app.asar.unpacked/*`。
 2. `/tmp/gen_import_evidence.py` → `import-unpacked` → `module-classify --auto --apply`
    → `match-packages --package-source-root … --apply`(**含本期的锚定精度/覆盖改进**)。
-3. `generate-project-v2 --source-root src`。
+3. `generate --source-root src`。
 
 **命名迁移**:`cluster-names` 是 **fingerprint-keyed**,内容不变则 fingerprint 不变 →
 已命名的 121 个 cluster 在 fresh DB 上**仍适用**;只需把 `island_cluster_names` 行从旧 DB

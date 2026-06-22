@@ -2,7 +2,7 @@
 //! package-category modules the planner would treat as
 //! `accepted/external_import` (source-suppressed) vs still-source-emitted.
 //! Useful for verifying the effect of `reverts-rollup-apply` on emission
-//! independent of whether `generate-project-v2` passes its audit gate.
+//! independent of whether `generate` passes its audit gate.
 
 use std::error::Error;
 use std::path::PathBuf;

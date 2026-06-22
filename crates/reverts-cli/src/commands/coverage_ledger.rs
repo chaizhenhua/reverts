@@ -312,7 +312,7 @@ fn group_reason(kind: &str) -> &'static str {
             "binding identifiers with meaningful names beyond module-scope symbol index"
         }
         "generated_output_file" => {
-            "emitted by generate-project-v2 before validation dependencies/build outputs"
+            "emitted by generate before validation dependencies/build outputs"
         }
         _ => "covered by decompile ledger",
     }

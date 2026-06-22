@@ -110,7 +110,7 @@ fn insert_package_json(
 #[test]
 fn parses_generate_project_v2_paths_without_external_process() {
     let args = GenerateProjectV2Args::parse([
-        "generate-project-v2".to_string(),
+        "generate".to_string(),
         "--input".to_string(),
         "input.db".to_string(),
         "--project-id".to_string(),
@@ -437,7 +437,7 @@ fn parses_top_level_help_and_version_without_required_command_args() {
 #[test]
 fn parses_command_specific_help_without_running_command() {
     assert_eq!(
-        CliCommand::parse(["generate-project-v2".to_string(), "--help".to_string()])
+        CliCommand::parse(["generate".to_string(), "--help".to_string()])
             .expect("generate help should parse"),
         CliCommand::Help(HelpTopic::GenerateProjectV2)
     );
@@ -5925,7 +5925,7 @@ fn cli_match_packages_then_generate_project_uses_written_attribution() {
     ])
     .expect("package matching should persist attribution");
     run([
-        "generate-project-v2".to_string(),
+        "generate".to_string(),
         "--input".to_string(),
         database_path.to_string_lossy().into_owned(),
         "--project-id".to_string(),
@@ -5995,7 +5995,7 @@ fn cli_extract_assets_then_generate_project_materializes_assets() {
     ])
     .expect("asset extraction should persist project_assets");
     run([
-        "generate-project-v2".to_string(),
+        "generate".to_string(),
         "--input".to_string(),
         database_path.to_string_lossy().into_owned(),
         "--project-id".to_string(),
@@ -6085,7 +6085,7 @@ fn cli_extract_assets_can_materialize_bun_embedded_native_asset() {
     ])
     .expect("asset extraction should persist embedded asset");
     run([
-        "generate-project-v2".to_string(),
+        "generate".to_string(),
         "--input".to_string(),
         database_path.to_string_lossy().into_owned(),
         "--project-id".to_string(),
@@ -6186,7 +6186,7 @@ fn cli_extract_assets_accepts_multiple_roots_for_bun_and_vendor_assets() {
     ])
     .expect("asset extraction should persist assets from both roots");
     run([
-        "generate-project-v2".to_string(),
+        "generate".to_string(),
         "--input".to_string(),
         database_path.to_string_lossy().into_owned(),
         "--project-id".to_string(),

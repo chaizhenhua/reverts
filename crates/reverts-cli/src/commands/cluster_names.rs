@@ -4,7 +4,7 @@
 //! eager entrypoint island) emits at a mechanical `modules/island/cluster-<id>.ts`
 //! path. This command records a semantic path keyed by the cluster's stable
 //! content FINGERPRINT (printed in `.reverts/island-clusters.json` by
-//! `generate-project-v2`), persisted as `island_cluster_names` rows. The input
+//! `generate`), persisted as `island_cluster_names` rows. The input
 //! loader feeds accepted rows to the planner, which moves the cluster's emitted
 //! file to the semantic path and recomputes every importer's relative specifier —
 //! the same machinery as `module-names`, but for module-less island code.

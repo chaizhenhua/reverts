@@ -56,7 +56,7 @@ agent semantic naming    (fills the remaining public surface)
   ↓
 public-surface naming gate
   ↓
-generate-project-v2
+generate
   ↓
 validate-output
 ```
@@ -451,12 +451,12 @@ Extend `symbol-names` or add companion validation for:
 
 ### 10. Emit Gate
 
-`generate-project-v2` should either gain strict flags or be preceded by `validate-input`.
+`generate` should either gain strict flags or be preceded by `validate-input`.
 
 Possible flags:
 
 ```bash
-reverts-cli generate-project-v2 \
+reverts-cli generate \
   --input <db> \
   --project-id <id> \
   --output <dir> \
@@ -609,7 +609,7 @@ reverts-cli public-surface-names \
   --project-id <id> \
   --require-complete
 
-reverts-cli generate-project-v2 \
+reverts-cli generate \
   --input work/reverts.db \
   --project-id <id> \
   --output <out>
@@ -679,7 +679,7 @@ The current codebase already has working local pieces:
 
 - `symbol-names` persistence and batch flow.
 - package matching and package surface logic.
-- `generate-project-v2` emit.
+- `generate` emit.
 - TypeScript compile validation for small emitted projects.
 
 Observed gaps from validation (historical; see Status section above for what has

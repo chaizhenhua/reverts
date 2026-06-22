@@ -2,7 +2,7 @@
 //!
 //! `--propose` records a naming suggestion without changing emission.
 //! `--accept` records the suggestion and updates the active
-//! `symbols.semantic_name` input field, so the next `generate-project-v2` run
+//! `symbols.semantic_name` input field, so the next `generate` run
 //! carries the accepted name through the normal input → analyze → plan → emit
 //! path. The verbs are `propose` / `accept` / `clear-active`, matching the batch
 //! TSV ops and the `binding-names` schema (`op⇥key⇥original⇥semantic⇥[evidence]`).

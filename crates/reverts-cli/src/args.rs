@@ -285,7 +285,7 @@ pub struct NamingProgressArgs {
     pub target_level: NamingProgressTier,
     #[arg(long)]
     pub json: bool,
-    /// Reuse a symbol-index.json produced by generate-project-v2 instead of
+    /// Reuse a symbol-index.json produced by generate instead of
     /// re-emitting the project just to compute naming coverage.
     #[arg(long = "symbol-index")]
     pub symbol_index: Option<PathBuf>,
@@ -306,7 +306,7 @@ pub struct NamingPlanArgs {
     pub project_id: u32,
     #[arg(long = "target-level", value_parser = parse_target_level, default_value = "full")]
     pub target_level: NamingProgressTier,
-    /// Reuse a symbol-index.json produced by generate-project-v2 instead of
+    /// Reuse a symbol-index.json produced by generate instead of
     /// re-emitting the project just to locate bindings.
     #[arg(long = "symbol-index")]
     pub symbol_index: Option<PathBuf>,

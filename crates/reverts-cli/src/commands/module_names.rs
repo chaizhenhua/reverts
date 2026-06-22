@@ -1,7 +1,7 @@
 //! `module-names` command: accept semantic file paths for first-party modules.
 //!
 //! Module semantic paths are persisted as `module_path_overrides` rows and
-//! consumed by `generate-project-v2` (via the input loader) to place each
+//! consumed by `generate` (via the input loader) to place each
 //! module's emitted file and to recompute every importing file's relative
 //! specifier. This is the agent-facing writer of `module_path_overrides` — the
 //! mechanism that turns minified module file names (e.g. `247-esbuild-rbr.ts`)

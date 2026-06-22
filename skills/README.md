@@ -58,7 +58,7 @@ flowchart TD
     M["Artifact manifest<br/>+ SQLite facts DB"]
 
     M --> D
-    D["decompile (core engine)<br/>module split → externalize →<br/>semantic naming → structural audit →<br/>generate-project-v2"]
+    D["decompile (core engine)<br/>module split → externalize →<br/>semantic naming → structural audit →<br/>generate"]
 
     D --> P["Readable TypeScript project"]
     P --> V

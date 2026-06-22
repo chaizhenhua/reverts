@@ -1,4 +1,4 @@
-//! `generate-project-v2` subcommand: load a project bundle from SQLite,
+//! `generate` subcommand: load a project bundle from SQLite,
 //! run the output pipeline, audit-gate the result, then materialise the
 //! TypeScript project (sources, scaffold, assets) under `--output`.
 
@@ -47,11 +47,11 @@ impl GenerateProjectV2Args {
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
-            .is_some_and(|argument| argument == crate::help::GENERATE_PROJECT_V2_COMMAND)
+            .is_some_and(|argument| argument == crate::help::GENERATE_COMMAND || argument == "generate-project-v2")
         {
             args.remove(0);
         }
-        parse_args_with_name(crate::help::GENERATE_PROJECT_V2_COMMAND, args)
+        parse_args_with_name(crate::help::GENERATE_COMMAND, args)
     }
 }
 
