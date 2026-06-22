@@ -1560,6 +1560,7 @@ impl PackageMatchPass for CascadeMatchPass {
             context.rows,
             &state.fingerprints_by_module,
             context.package_sources,
+            context.package_filter,
         );
         ownership::cascade::promote_cascade_function_coverage_to_module_attributions(
             context.rows,
@@ -1902,7 +1903,27 @@ fn match_with_cascade_scoped_by_module_hints(
     rows: &InputRows,
     fingerprints_by_module: &BTreeMap<ModuleId, Vec<FunctionFingerprint>>,
     package_sources: &[PackageSource],
+    package_filter: Option<&BTreeSet<String>>,
 ) -> CascadeMatchReport {
+    // Honor `--package-name`: restrict the cascade to the requested packages so an
+    // incremental re-match (e.g. anchoring one newly-proposed island library)
+    // fingerprints the anonymous island corpus against ONLY those package sources,
+    // not all cached packages. Without this the anonymous branch below matches the
+    // hundreds of no-module island sources against every cached package — minutes
+    // to hours per run. `StructuralBagPass` already passes this filter; the cascade
+    // was the one pass that dropped it.
+    let filtered_storage: Vec<PackageSource>;
+    let package_sources: &[PackageSource] = match package_filter {
+        Some(filter) => {
+            filtered_storage = package_sources
+                .iter()
+                .filter(|source| filter.contains(&source.package_name))
+                .cloned()
+                .collect();
+            &filtered_storage
+        }
+        None => package_sources,
+    };
     let modules_by_id = rows
         .modules
         .iter()
