@@ -277,6 +277,15 @@ pub(crate) fn emitted_universe(
 /// Classifies one emitted symbol-index entry into a tier with named status.
 /// `None` when its module is not first-party (externalized / vendored /
 /// classified out). Single source of truth for both progress and plan.
+/// Whether an emitted island file path is an agent-classified inlined third-party
+/// cluster — its `cluster-names` semantic path was placed under `vendor/`, so it
+/// emits at `…/island/vendor/…`. Such clusters are vendored library bodies that
+/// the matcher could not externalize; they are excluded from the first-party
+/// naming denominator exactly like a `module-classify`d third-party module.
+pub(crate) fn is_third_party_island_path(file_path: &str) -> bool {
+    file_path.contains("/island/vendor/") || file_path.starts_with("island/vendor/")
+}
+
 pub(crate) fn classify_emitted_entry(
     entry: &SymbolIndexEntry,
     universe: &EmittedUniverse,
@@ -293,9 +302,18 @@ pub(crate) fn classify_emitted_entry(
         NamingKind::ValueLike
     };
     let Some(module_id) = entry.module_id else {
-        // Module-less binding from an unmodularized recovered-code file (e.g.
-        // the eager entrypoint island): first-party application code by
-        // construction, so it always counts toward the naming universe.
+        // Module-less binding from an unmodularized recovered-code file (the
+        // split eager island). First-party application code by construction —
+        // EXCEPT an island cluster an agent classified as inlined third-party by
+        // naming its file path under `island/vendor/…` (the cluster-level
+        // equivalent of `module-classify third-party-library`, which can only
+        // touch modules with an id). Tree-shaken inlined libraries can't be
+        // externalized, so this `vendor/` marking is how they leave the naming
+        // denominator — otherwise a corpus that inlines ~half its public surface
+        // as vendored libraries can never reach the 100% public-surface gate.
+        if is_third_party_island_path(&entry.file_path) {
+            return None;
+        }
         // Exportedness comes from the emitted file itself — the binding exists
         // in no module graph.
         return Some(SymbolDetail {
@@ -621,7 +639,8 @@ pub(crate) fn run(args: NamingProgressArgs) -> Result<(), CliRunError> {
 mod tests {
     use super::{
         NamingKind, NamingProgressReport, SymbolDetail, SymbolIndexEntry, Tier,
-        classify_emitted_entry, compute_naming_progress, symbol_tier, tier_breakdown,
+        classify_emitted_entry, compute_naming_progress, is_third_party_island_path, symbol_tier,
+        tier_breakdown,
     };
 
     fn fact(named: bool, exported: bool, kind: NamingKind) -> SymbolDetail {
@@ -769,6 +788,33 @@ mod tests {
             dead: false,
             exported: false,
         }
+    }
+
+    #[test]
+    fn classify_excludes_vendor_marked_island_cluster_from_denominator() {
+        // A module-less island binding is first-party BY DEFAULT and counts.
+        let universe = universe(&[], &[]);
+        let mut fp = entry(0, "doWork", "doWork", true, false);
+        fp.module_id = None;
+        fp.file_path = "src/modules/island/auth/token-store.ts".to_string();
+        assert!(
+            classify_emitted_entry(&fp, &universe).is_some(),
+            "a first-party island binding must count toward the denominator",
+        );
+        // But once its cluster is agent-classified as inlined third-party (path
+        // placed under island/vendor/), its bindings leave the denominator —
+        // they are vendored library internals, not first-party naming work.
+        let mut tp = entry(0, "Deflate", "Deflate", true, false);
+        tp.module_id = None;
+        tp.file_path = "src/modules/island/vendor/fflate.ts".to_string();
+        assert!(
+            classify_emitted_entry(&tp, &universe).is_none(),
+            "a vendor-marked island binding must be excluded from the denominator",
+        );
+        assert!(is_third_party_island_path("src/modules/island/vendor/rxjs-3.ts"));
+        assert!(!is_third_party_island_path("src/modules/island/auth/token-store.ts"));
+        // A first-party file that merely has 'vendor' in a NON-island segment is unaffected.
+        assert!(!is_third_party_island_path("src/modules/vendoring-ui/panel.ts"));
     }
 
     #[test]
