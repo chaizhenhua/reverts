@@ -618,19 +618,35 @@ pub fn generate_project_from_prepared_with_options(
     let pre_accept_report = pre_accept.report.clone();
     mark_timing!("pre_accept");
 
-    audit.extend(audit_emitted_project_parse(&emitted_project));
-    mark_timing!("parse_audit");
-    audit.extend(audit_emitted_relative_import_targets(
-        &emitted_project,
-        &assets,
-        input,
-        &module_output_paths,
-    ));
-    mark_timing!("relative_import_audit");
-    audit.extend(audit_emitted_named_export_consistency(&emitted_project));
-    mark_timing!("named_export_audit");
-    audit.extend(audit_binding_shape_consistency(&plan, &emitted_project));
-    mark_timing!("binding_shape_audit");
+    // These four audits are independent, read-only scans of the immutable emitted
+    // project/plan; run them concurrently (the parse audit alone re-parses every
+    // emitted file). `thread::scope` borrows the shared inputs without `'static`
+    // bounds; results are merged in a fixed order so findings stay deterministic.
+    let (parse_findings, relative_findings, named_findings, shape_findings) =
+        std::thread::scope(|scope| {
+            let parse = scope.spawn(|| audit_emitted_project_parse(&emitted_project));
+            let relative = scope.spawn(|| {
+                audit_emitted_relative_import_targets(
+                    &emitted_project,
+                    &assets,
+                    input,
+                    &module_output_paths,
+                )
+            });
+            let named = scope.spawn(|| audit_emitted_named_export_consistency(&emitted_project));
+            let shape = scope.spawn(|| audit_binding_shape_consistency(&plan, &emitted_project));
+            (
+                parse.join().expect("parse audit thread"),
+                relative.join().expect("relative-import audit thread"),
+                named.join().expect("named-export audit thread"),
+                shape.join().expect("binding-shape audit thread"),
+            )
+        });
+    audit.extend(parse_findings);
+    audit.extend(relative_findings);
+    audit.extend(named_findings);
+    audit.extend(shape_findings);
+    mark_timing!("parse+relative+named+shape audits (parallel)");
     audit.extend(audit_namespace_object_member_consistency(
         &plan,
         &emitted_project,
