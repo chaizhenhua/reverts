@@ -1,5 +1,6 @@
 mod classify;
 mod commonjs_exports;
+mod commonjs_index_reexports;
 mod errors;
 mod facts;
 mod format;
@@ -23,6 +24,9 @@ mod type_annotations;
 pub use classify::{
     DeclarationCallability, ImportUsageScope, classify_import_usage_scope,
     classify_top_level_bindings, verify_only_immediate_call_references,
+};
+pub use commonjs_index_reexports::{
+    IndexReexport, PackageIndexReexports, normalize_submodule_relpath, parse_index_reexports,
 };
 pub use commonjs_exports::{
     commonjs_create_binding_export_member, commonjs_export_property_name,
