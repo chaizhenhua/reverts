@@ -9,11 +9,12 @@ Use this skill when exporting a decompiled project from ReverTS and validating t
 
 ## Install
 
-This skill ships with the `reverts` MCP server distribution. See
-[skills/README.md](../README.md#install) for the full install matrix
-(`npm install -g reverts` for end users, `./skills/install` for local-dev
-symlink installation). After installing, restart the Claude/Codex session so
-the skill registry rebinds.
+This skill drives the `reverts-cli` binary. Build it with
+`cargo build --release --bin reverts-cli` and put `./target/release/reverts-cli`
+on your `PATH`. See [skills/README.md](../README.md#install) for the full install
+matrix (`./skills/install` for local-dev symlink installation of the skill
+bundle). After installing, restart the Claude/Codex session so the skill
+registry rebinds.
 
 This skill picks up where [decompile](../decompile/SKILL.md) finishes:
 `decompile` produces structurally-valid generated `.ts`; `reverts-decompile`
@@ -56,13 +57,14 @@ time; do not treat generation alone as completion.
 ## Validation tool and profile selection
 
 Validation must use scripted tools, not manual inspection. Select the runtime
-smoke by recovered artifact profile first (`list_app_artifacts` /
-`get_artifact_manifest`), then by generated manifests only when metadata is
-absent. Run every applicable profile when an artifact has multiple entrypoints.
+smoke by recovered artifact profile first
+<!-- TODO(reverts-cli): list_app_artifacts / get_artifact_manifest have no direct CLI equivalent -->,
+then by generated manifests only when metadata is absent. Run every applicable
+profile when an artifact has multiple entrypoints.
 
 Tool/profile details are in
 [runtime-validation-profiles.md](references/runtime-validation-profiles.md):
-ReverTS MCP for project metadata and persisted fixes, shell commands for
+`reverts-cli` for project metadata and decompile status, shell commands for
 install/`tsc`/Node checks, Playwright MCP for browser-extension and web UI,
 and Electron shell/CDP checks for Electron apps.
 
@@ -96,7 +98,7 @@ and Electron shell/CDP checks for Electron apps.
      before touching dependency resolution — a structural codegen defect
      masks every downstream package-conflict signal
    - startup command for the exported project
-8. After the exported project is validated and the pipeline fix is complete, use MCP tools to update and persist the module-to-package mapping in project storage. Do not leave corrected package relationships only in generated output or transient analysis state.
+8. After the exported project is validated and the pipeline fix is complete, persist the corrected module-to-package mapping in project storage <!-- TODO(reverts-cli): update_modules / persisted module-package mapping has no direct CLI equivalent -->. Do not leave corrected package relationships only in generated output or transient analysis state.
 
 ## TypeScript compile triage
 
@@ -128,7 +130,7 @@ each cluster belongs to.
 | **A. Structural decompile defects** | TS2451, TS2448, TS2449, TS2300, TS2304 (when target was emitted) | Codegen synthesized an import while a local declaration of the same name already exists; or hoist/forward-ref recovery missed a binding | ReverTS pipeline (codegen / import-synthesis / hoist passes). Run [decompile](../decompile/SKILL.md) Phase 5.1a/5.1b audit, file the finding with a regression test, regenerate. |
 | **B. Cross-source-partition import** | TS2451 + TS2304 mass duplications between independent artifact source units; runtime smoke may fail with TDZ/foreign chunk initialization | Pipeline synthesized imports from same-name symbols without original dependency evidence between source partitions | ReverTS pipeline (source-partition import synthesis). Run [decompile](../decompile/SKILL.md) Phase 5.1b audit, file evidence-tagged finding, regenerate. |
 | **C. Type narrowing limitations** | TS2339, TS2349, TS2538, TS2351 on minified short-name initializers (`Object.freeze({})`, `[]`, `''`, primitive boxed types) | Strict TS narrows the inferred type tighter than the original JS use; widen pass did not fire on this construct | ReverTS pipeline (widen-insertion phase). File as widen-coverage finding; regenerate. Do NOT lower `strict` in tsconfig to mask the cluster. |
-| **D. Package-attribution defects** | TS2305 (`Module 'X' has no exported member 'Y'`), TS2307 (`Cannot find module 'X'`) | Wrong `cat=pkg` / `pkg=...` / `ver=...` on a module, or import bound to the wrong package version | ReverTS pipeline (classification / version resolution). Use [decompile](../decompile/SKILL.md) Phase 5.1c misclassification scan, then `update_modules` to correct, regenerate. |
+| **D. Package-attribution defects** | TS2305 (`Module 'X' has no exported member 'Y'`), TS2307 (`Cannot find module 'X'`) | Wrong `cat=pkg` / `pkg=...` / `ver=...` on a module, or import bound to the wrong package version | ReverTS pipeline (classification / version resolution). Use [decompile](../decompile/SKILL.md) Phase 5.1c misclassification scan, then correct the module-package attribution and regenerate <!-- TODO(reverts-cli): update_modules has no direct CLI equivalent -->. |
 | **E. Manifest/dependency conflicts** | TS errors caused by missing `@types/<pkg>` or wrong installed version | Generated `package.json` does not match the package-attribution evidence | Manifest-generation rules in this skill's [Version conflict diagnosis during export validation](#version-conflict-diagnosis-during-export-validation). |
 | **F. Genuine TS-strict gaps in target code** | TS errors in code paths the original bundle never type-checked | Original source had unsound JS that TS surfaces; not a decompile defect | Document, do not "fix". The exported project is a transcription, not a type-correctness rewrite. |
 
@@ -175,7 +177,7 @@ Run this flow whenever one of these happens after export:
    - `pnpm install` or `npm install`
    - `tsc --noEmit -p tsconfig.json` (no `--noCheck`)
    - startup command
-6. If the conflict is caused by incorrect module-to-package or package-version attribution, update that relationship through MCP tools after validation succeeds.
+6. If the conflict is caused by incorrect module-to-package or package-version attribution, update that relationship in project storage after validation succeeds <!-- TODO(reverts-cli): module-package attribution persistence has no direct CLI equivalent -->.
 
 ### Constraints
 
@@ -200,7 +202,7 @@ Run this flow whenever one of these happens after export:
   - inspect installed transitive runtime packages when startup fails despite successful install
   - derive the minimal coherent version set that satisfies the detected peer constraints
 - When multiple packages form one runtime cluster, validate them as a set rather than pinning one package in isolation.
-- After fixing package classification or manifest-generation defects, sync the corrected module/package relationship back through MCP tooling so future exports reuse the repaired mapping.
+- After fixing package classification or manifest-generation defects, sync the corrected module/package relationship back into project storage so future exports reuse the repaired mapping <!-- TODO(reverts-cli): module-package mapping persistence has no direct CLI equivalent -->.
 
 ## Runtime smoke validation
 
@@ -230,4 +232,4 @@ succeed in the generated output directory:
   `tsc` run does NOT substitute for smoke pass
 - any newly added tests covering the recovered failure mode (compile- AND
   runtime-level), keyed to the bucket the failure was triaged into
-- MCP-side module/package mapping update when the fix changes package ownership or package identity
+- module/package mapping persisted in project storage when the fix changes package ownership or package identity <!-- TODO(reverts-cli): module-package mapping persistence has no direct CLI equivalent -->

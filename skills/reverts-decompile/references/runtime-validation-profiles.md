@@ -11,7 +11,7 @@ Manual inspection is not a substitute for a scripted pass/fail signal.
 
 | Step | Required tool | Contract |
 |---|---|---|
-| Project metadata, artifact profile, structural audits, persisted fixes | ReverTS MCP tools (`decompile_status`, `list_app_artifacts`, `get_artifact_manifest`, `query`, `generate_app_decompiled_files`, `update_modules` as needed) | Use DB/AST-backed data. Do not infer runtime profile from filenames alone when artifact metadata exists. |
+| Project metadata, decompile status, coverage, regeneration | `reverts-cli` (`naming-progress --input <db> --project-id <id> [--json]` and `coverage-ledger --input <db> --project-id <id>` for status/coverage; `generate-project-v2 --input <db> --project-id <id> --output <dir> --source-root src` to regenerate after a pipeline fix; `runtime-inventory --input <db> --project-id <id>` for emitted runtime helpers) <!-- TODO(reverts-cli): list_app_artifacts / get_artifact_manifest / query / update_modules have no direct CLI equivalent --> | Use DB/AST-backed data. Do not infer runtime profile from filenames alone when artifact metadata exists. |
 | Dependency install | Shell command in `output_dir` (`pnpm install`; `npm install` only when selected by package-manager evidence or pnpm is unavailable) | Capture stdout/stderr and installed package evidence for triage. |
 | Compile/edit validation | Shell command in `output_dir` (`pnpm exec tsc --noEmit -p tsconfig.json`, or `npm exec tsc -- --noEmit -p tsconfig.json`) plus ReverTS/AST structural audits when available | Real type checking only; no `--noCheck`, no hand-editing generated files as the final fix. |
 | Browser extension UI/runtime | Playwright MCP browser tools. Codex uses `mcp__playwright__`; Claude/Ant uses the configured Playwright MCP equivalent. | Launch Chromium with the generated extension, collect `console.error`/`pageerror`/CDP runtime errors, and perform UI interactions. A shell Playwright script is allowed only when MCP is unavailable/denied, and must be reported as a fallback. |
@@ -26,7 +26,8 @@ Choose runtime tests from the decompiled source's recovered profile, then run al
 applicable profiles.
 
 1. Prefer ReverTS artifact metadata: `profile` and source-unit roles from
-   `list_app_artifacts` / `get_artifact_manifest`.
+   recovered artifact metadata
+   <!-- TODO(reverts-cli): list_app_artifacts / get_artifact_manifest have no direct CLI equivalent -->.
 2. If metadata is absent, inspect generated manifests with structured JSON reads:
    `manifest.json` means `browser-extension`; `package.json` with `electron`,
    `main` + `preload`, or Electron scripts means `electron`; `bin`/shebang means

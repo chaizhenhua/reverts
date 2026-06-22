@@ -11,16 +11,20 @@ Decompile a webpack/esbuild JavaScript bundle into readable TypeScript source fi
 
 ## Install
 
-Bundled with the `reverts` MCP server distribution; see
+Bundled with the `reverts` distribution; see
 [skills/README.md](../README.md#install) for end-user install (`npm install -g
 reverts`) and local-dev symlink installation (`./skills/install`). After
 installing, restart your Claude/Codex session so the skill registry rebinds.
+The pipeline mechanism is the `reverts-cli` binary — build it with `cargo build
+--release --bin reverts-cli` and make sure it is on `PATH` (or invoke it by its
+built path, e.g. `./target/release/reverts-cli`).
 
 ## Agent Boundary
 
-This skill is an orchestrator over the ReverTS MCP server. It assumes the
-server is reachable, the database is writable, and the bundle has already been
-ingested into a project. It does not patch generated files, hand-edit
+This skill is an orchestrator over the `reverts-cli` pipeline. It assumes the
+`reverts-cli` binary is built and on `PATH`, the SQLite project DB is writable,
+and the bundle has already been imported into a project. It does not patch
+generated files, hand-edit
 `package.json`, or build a TypeScript scaffolding by hand — those belong to
 [reverts-decompile](../reverts-decompile/SKILL.md). Mechanical defects
 discovered here MUST be filed as ReverTS pipeline issues, not papered over in
@@ -47,9 +51,11 @@ Playwright-backed UI interaction checks for browser or extension outputs.
 - Default to `cat:"app"`. Use `cat:"pkg"` only with exact npm package identity,
   npm-installable version (e.g. `"4.28.1"`, a concrete semver that
   `npm install pkg@ver` can resolve), and clear upstream-source confidence.
-  A package classification is not complete until `update_modules` records
-  `emit`, `subpath`/`specifier`, and evidence, then `verify_package_attributions`
-  accepts it against the installed `node_modules` tree.
+  A package classification is not complete until `match-packages` (or, for
+  inlined island libraries, `island-package-candidates` + `match-packages`)
+  records the attribution with its import specifier/subpath and evidence, and
+  the matcher's built-in deterministic confirm accepts it against the package
+  source tree (`--package-source-root` / `--reference-source-root`).
 - **All public-surface names must be semantic before output.** Public surface =
   exported symbols + owned globals **+ module file paths + module names**. The
   emitted file path and the module name are read by every importer and by anyone
@@ -82,11 +88,11 @@ Stop the control loop and report the blocker if any of the following holds:
 
 | Blocker | Signal | Recovery |
 |---|---|---|
-| Missing input | `$ARGUMENTS` empty and `list_projects()` shows no candidate | Ask the user which bundle/project to decompile |
-| Permission denied | MCP write tool returns `permission denied` / FS write fails | Ask the user to grant the permission or relocate the output dir |
-| MCP unreachable | `decompile_status` returns connection error or hangs >30s | Run `cargo build --release --bin reverts-mcp`, then `/mcp` to reconnect; do NOT `pkill` |
-| Schema mismatch | `decompile_status` returns `schema version mismatch` | Run the latest migration binary or re-ingest into a fresh project |
-| Same op fails 3× | Same tool call with same params fails three consecutive times | Stop and surface the error; do not loop further |
+| Missing input | `$ARGUMENTS` empty and no project DB exists | Ask the user which bundle/project to decompile |
+| Permission denied | FS write fails (DB or output dir not writable) | Ask the user to grant the permission or relocate the output dir |
+| `reverts-cli` not built / not on PATH | command not found, or stale binary missing a subcommand/flag | Run `cargo build --release --bin reverts-cli` and put it on `PATH` (or invoke `./target/release/reverts-cli`); do NOT `pkill` |
+| Schema mismatch | a command exits non-zero with a schema/version error against the DB | Rebuild `reverts-cli` from the matching source and re-`import-unpacked` into a fresh DB |
+| Same op fails 3× | The same `reverts-cli` command with the same args exits non-zero three consecutive times | Stop and surface the stderr; do not loop further |
 
 ## Phase 0: Resolve Input
 
@@ -94,7 +100,7 @@ Resolve `$ARGUMENTS` into `project_id` and optional `output_dir`.
 
 ### Output directory
 
-If `$ARGUMENTS` contains `-o <path>` or `--output <path>`, resolve it to `output_dir`. Otherwise the MCP server default is `{project_root_path}/out`.
+If `$ARGUMENTS` contains `-o <path>` or `--output <path>`, resolve it to `output_dir`. Otherwise default to `{project_root_path}/out` and pass it as `generate-project-v2 --output <output_dir>`.
 
 **The output directory must be persistent — never under `/tmp` or any
 scratch/temp location.** A decompiled app is a long-term project: its generated
@@ -134,28 +140,36 @@ assumptions:
 
 After stripping `-o`, resolve the remaining argument as:
 
+There is no project server: each project is one SQLite DB (the `--output-db`
+created at import). The project id is known from that import; to enumerate or
+verify, query the DB's `projects` table directly (e.g. `sqlite3 <db> 'SELECT
+id, name FROM projects;'`).
+
 | Argument | Action |
 |----------|--------|
 | empty | Ask user which bundle files or directory to decompile |
-| number | Treat as `project_id`; verify with `list_projects()` |
-| file path | Find/create project, then ingest file if needed |
-| directory | Find bundle files, find/create project, ingest if needed |
-| other string | Try matching project name via `list_projects()` |
+| number | Treat as `project_id`; verify against the DB `projects` table |
+| file path | Find/create the project DB, then `import-unpacked` if not yet imported |
+| directory | Find the unpacked root + import-evidence manifest, find/create the project DB, `import-unpacked` if needed |
+| other string | Try matching a project name in the DB `projects` table |
 
 ### Resume detection
 
 After resolving `project_id`:
 
-1. Call `decompile_status(project_id)`
-2. Call `query(project_id, entity="modules", category="app", has_semantic="false", page_size=1)`
+1. Run `reverts-cli naming-progress --input <db> --project-id <id>` (add
+   `coverage-ledger` for the unified view).
+2. Run `reverts-cli naming-plan --input <db> --project-id <id> --target-level
+   public-surface` to see the unnamed app worklist.
 3. If modules already exist, skip setup and enter the decision loop.
 
 ## Control Loop
 
 Repeat:
 
-1. `decompile_status(project_id)`
-2. `query(project_id, entity="modules", category="app", has_semantic="false", page_size=1)`
+1. `reverts-cli naming-progress --input <db> --project-id <id> [--json]`
+2. `reverts-cli naming-plan --input <db> --project-id <id> --target-level
+   public-surface` (the unnamed-module/symbol worklist)
 3. Match the first applicable rule below
 4. Dispatch parallel sub-agents
 5. Re-check status
@@ -185,7 +199,7 @@ After each check, report:
 Status: public_surface={named}/{total} ({pct}%) | {unnamed} unnamed | {incomplete} incomplete | {mechanical} mechanical | {missing} missing -> dispatching {N} agents
 ```
 
-The `public_surface` field (from `decompile_status`) tracks public-surface symbol naming progress and must reach 100% before output generation.
+The `public_surface` field (from `naming-progress`) tracks public-surface symbol naming progress and must reach 100% before output generation.
 
 ## Naming to target: mechanism-first coverage
 
@@ -478,13 +492,20 @@ anonymous/named clusters.
 
 Only for fresh projects:
 
-1. `list_projects()`
-2. `create_project(...)` if needed
-3. `ingest_decompile_sources(...)`
-4. `detect_runtime_helpers(project_id)`
-5. `submit_runtime_helpers(project_id, confirmations=[...])`
+1. Check whether a project DB already exists; if so, read its id from the
+   `projects` table.
+2. Import the unpacked bundle in one step:
+   `reverts-cli import-unpacked --input <unpacked-root> --manifest
+   <reverts-import-evidence.json> --project-name <name> --output-db <db.sqlite>`.
+   This creates `projects`, `source_files`, `modules`, `module_dependencies`,
+   `project_assets`, and `package_attributions`; module/dependency discovery is
+   part of the import.
+3. Runtime helpers are detected deterministically by `import-unpacked` and
+   `generate-project-v2` — there is no manual confirm step. Inspect them with
+   `reverts-cli runtime-inventory --input <db> --project-id <id>`.
 
-Pass the confirmed helper mapping to every naming/fix agent.
+Helper detection is automatic, so naming/fix agents read the runtime inventory
+rather than receiving a hand-confirmed mapping.
 
 ## Phase 2: Classify + Name (Combined Single Pass)
 
@@ -495,24 +516,32 @@ Classification and symbol naming happen in ONE pass per agent. Each agent reads 
 - Batch **50-80 modules** per agent
 - Dispatch **3-5 agents** (NOT 8-10 — SQLite lock contention degrades throughput)
 - Each agent processes modules **sequentially** (one at a time) to avoid lock contention
-- Use `update_modules(...)` for classification, then `submit_module_decompilation(...)` for symbol naming
+- Use `module-classify` for classification, then `symbol-names` for symbol naming
 
 ### Per-module workflow (inside agent)
 
 For each module the agent must:
 
-1. `get_module(project_id, module_name, include_symbols=true)` — check if already complete
-2. `get_source(project_id, target="module", module_name, transform=true)` — read transformed source
-3. **Classify**: determine `cat` (app vs pkg) using package fingerprints (see decompiler.md)
-4. **Name**: assign semantic path AND name all unnamed symbols in one submission
-5. Submit via `update_modules` (for classification) + `submit_module_decompilation` (for symbols)
-6. For `cat:"pkg"`, include package attribution fields:
-   - `pkg`: exact npm package name
-   - `ver`: exact installed package version
-   - `emit`: `external_import` when output should import from npm, `vendored_asset` when the file stays materialized in output
-   - `specifier`: legal import specifier for `external_import`
-   - `subpath`: package-relative source file evidence when known
-   - `evidence`: concise structured evidence explaining the upstream match
+1. Read the worklist from `reverts-cli naming-plan --input <db> --project-id
+   <id> --target-level <tier>` — each unnamed target carries its `module_id`,
+   `evidence_tokens`, and `rename_channel`. Skip modules with no unnamed targets.
+2. Read the module's source on disk (under `<output>/src/...`) once it has been
+   materialized by `generate-project-v2`; before the first generation, read the
+   worklist's `evidence_tokens` and the import-evidence inputs.
+3. **Classify**: determine application vs third-party using package fingerprints
+   (see below). Vendored `node_modules` paths classify deterministically with
+   `module-classify --auto --apply`; ambiguous modules get an agent verdict via
+   `module-classify --batch <MODULE_ID<TAB>classification<TAB>evidence> --apply`.
+4. **Name**: assign a semantic file path AND name all unnamed symbols.
+5. Submit module file paths via `module-names --accept <MODULE_ID=path> --apply`
+   and symbol names via `symbol-names --batch <TSV|-> --apply` (or repeated
+   `--accept <MODULE_ID:ORIGINAL=SEMANTIC>`). Always pass `--evidence` for
+   `origin=agent` names.
+6. For third-party modules, externalization (the import specifier/subpath and
+   the upstream-match evidence) is recorded by `match-packages`, not by the
+   naming agent — see [Package matching & externalization](#package-matching--externalization-third-party).
+   `module-classify` only refines the naming denominator; it never emits a bare
+   import.
 
 ### Init-wrapper fast path
 
@@ -538,13 +567,15 @@ During classification, agents MUST check for package fingerprints BEFORE default
 
 If `incomplete_decompilation > 0` after Phase 2:
 - These are modules where the export symbol still has no semantic name
-- Dispatch agents to get_module + get_source + submit_module_decompilation for each
+- Dispatch agents to re-read the `naming-plan` worklist + module source on disk
+  and accept the missing names via `symbol-names --batch --apply`
 - Typically init-wrappers missed in Phase 2
 
 ### 3.2 Mechanical names
 
-- Fetch `decompile_status(..., issue_type="mechanical_semantic_name")`
-- Process by subject_kind in order: **module** first, then **symbol**, then **global**
+- Re-read `reverts-cli naming-progress --input <db> --project-id <id> --json`
+  (and `coverage-ledger`) for the mechanical-name residue
+- Process by subject kind in order: **module** first, then **symbol**, then **global**
 - Module-level: often indicates misclassified packages or bad init-wrapper names
 - Symbol-level: often indicates cross-module name collisions that need disambiguation
 - Global-level: often indicates cascading issues from large init-wrapper modules
@@ -552,22 +583,30 @@ If `incomplete_decompilation > 0` after Phase 2:
 
 ### 3.3 Package fixup
 
-> CLI pipeline: the deterministic externalization flow (classify → match local
-> sources → anchor inlined island libraries) lives in
+> The deterministic externalization flow (classify → match local sources →
+> anchor inlined island libraries) lives in
 > [Package matching & externalization](#package-matching--externalization-third-party).
-> The MCP steps below are the server-tool equivalents.
+> The steps below are the `reverts-cli` equivalents for the diagnostic-cleanup
+> pass.
 
 
-- Fetch `decompile_status(..., issue_type="package_attribution_unverified")`
-- For `missing_attribution` or `proposed`, read source evidence and resubmit
-  `update_modules` with `pkg/ver/emit/specifier/subpath/evidence`
-- Run `verify_package_attributions(project_id, node_modules_root=...)`
-- If verification rejects the proposal, correct the package identity,
-  version, subpath, or export specifier; do not demote to `app` unless source
-  evidence proves it is first-party code
-- Fetch `decompile_status(..., issue_type="non_existent_package")`
-- Reclassify wrong `pkg` modules back to `app`
-- Correct package names/versions only when evidence is strong
+- Read the package match/externalization state with
+  `reverts-cli match-packages-report --input <db> --project-id <id>` (or
+  `--all-projects`); unverified or proposed attributions show up there.
+- For modules that still need attribution, run `match-packages
+  --package-source-root <appRoot> [--reference-source-root <appRoot>]
+  [--materialize-package-sources] --apply` — the matcher's deterministic confirm
+  is built in (there is no separate verify step); it fingerprints each module's
+  surface against the package source and only accepts when it matches.
+- If the matcher rejects an attribution, correct the package identity, version,
+  subpath, or export specifier (via `island-package-candidates --accept <pkg>
+  --version <v> --evidence <..> --apply` for inlined libraries, or
+  `package-surface-decisions` for per-import surface decisions) and re-run
+  `match-packages`; do not demote to `app` unless source evidence proves it is
+  first-party code.
+- For a wrong package classification, reclassify the module back to application
+  with `module-classify --batch <MODULE_ID<TAB>application<TAB>evidence>
+  --apply`. Correct package names/versions only when evidence is strong.
 
 ### 3.3.1 Trivial init-wrapper misclassification
 
@@ -612,7 +651,7 @@ Use severity tiers instead of demanding cosmetic perfection.
 **All public-surface symbols MUST have semantic names before output generation.**
 
 Public surface = exported symbols + owned globals + module names + module file
-paths. Check with `decompile_status`: the `public_surface` field tracks
+paths. Check with `naming-progress`: the `public_surface` field tracks
 public-surface naming progress (e.g. `public_surface=2395/5609 (42.7%)`). This
 ratio must reach **100%** before proceeding to output, and module paths/names
 must be semantic — a tree of `modules/247-esbuild-rbr.ts` is not a named public
@@ -695,10 +734,12 @@ If any P0 condition fails, do not generate output yet.
 
 ## Phase 5: Output & Verification
 
-1. `generate_app_decompiled_files(project_id, output_dir=$OUTPUT_DIR)`
-2. If generation errors occur, go back to the control loop.
-3. Spot-check key modules with:
-   `decompile_status(project_id, verify_module="<module_name>", output_dir=$OUTPUT_DIR)`
+1. `reverts-cli generate-project-v2 --input <db> --project-id <id> --output
+   $OUTPUT_DIR --source-root src`
+2. If generation errors occur (non-zero exit + stderr), go back to the control loop.
+3. Spot-check key modules by reading the generated TypeScript on disk under
+   `$OUTPUT_DIR/src/...`, and re-run `reverts-cli full-inventory --input <db>
+   --project-id <id>` / `coverage-ledger` to confirm the inventory matches.
 4. Run the **post-output structural audit** (5.1a → 5.1b → 5.1c) before
    handing off to [reverts-decompile](../reverts-decompile/SKILL.md).
    Each audit produces a list of pipeline-issue candidates; do NOT hand-edit
@@ -719,8 +760,9 @@ regeneration, not a generated-output hand edit. Full procedures live in
 | Oversized module file | Every generated output | A generated file exceeds the line budget (`OversizedModuleFile` audit warning, budget 10k lines) |
 | Dangling named import | Every generated output | A first-party `import { Orig }` has no matching export in its target module (`DanglingNamedImport` audit **error**, blocks output) — esbuild's `No matching export`, caught in-pipeline |
 
-Use MCP/DB-backed metadata and AST or structured parsing for these audits.
-Do not replace them with grep over generated `.ts` files.
+Use the SQLite project DB metadata and AST or structured parsing for these
+audits (the pipeline emits them during `generate-project-v2`). Do not replace
+them with grep over generated `.ts` files.
 
 **Module-size contract.** A recovered module must be a human-readable unit — no
 generated file should exceed ~10k lines. The pipeline emits an
@@ -898,17 +940,24 @@ structural audits; install/compile/runtime validation belongs to
 [guardrails.md](references/guardrails.md) for the detailed out-of-scope list and
 common mistakes.
 
-## Tool Summary
+## Command Summary
 
-| Tool | Purpose |
+| `reverts-cli` command | Purpose |
 |------|---------|
-| `decompile_status` | progress, diagnostics, verification |
-| `query` | module/symbol search; AST-backed misclassification scan |
-| `get_module` | metadata, symbols, dependencies |
-| `get_source` | source inspection |
-| `update_modules` | module path/category/package updates |
-| `verify_package_attributions` | deterministically accept/reject LLM package attribution proposals against installed `node_modules` |
-| `submit_module_decompilation` | symbol/global/type naming |
-| `detect_runtime_helpers` | helper discovery |
-| `submit_runtime_helpers` | helper confirmation |
-| `generate_app_decompiled_files` | output generation |
+| `import-unpacked` | Import the unpacked bundle + evidence manifest into a fresh project DB (modules, deps, assets, attributions; discovery + runtime-helper detection built in) |
+| `naming-progress` | Public-surface/declarations/full naming completion + diagnostics |
+| `coverage-ledger` | Unified decompile coverage ledger |
+| `full-inventory` | Full decompile inventory / artifact manifest |
+| `naming-plan` | Unnamed module/symbol worklist by tier (with `evidence_tokens`, `rename_channel`) |
+| `module-classify` | Classify modules application/third-party/runtime-glue (refines the naming denominator) |
+| `match-packages` | Match + externalize vendored and inlined packages; deterministic confirm built in |
+| `match-packages-report` | Match / externalization / source-elimination rates |
+| `island-package-candidates` | Agent-proposed inlined-island package candidates (deterministically confirmed by `match-packages`) |
+| `package-surface-decisions` | Per-import package-surface accept/reject/block decisions |
+| `symbol-names` | Module symbol/global semantic naming (keyed by DB `modules.id`) |
+| `binding-names` | Module-less island binding naming (keyed by `file_path`) |
+| `module-names` | Module file-path overrides (keyed by DB `modules.id`) |
+| `cluster-names` | Island-cluster file-path overrides (keyed by cluster fingerprint) |
+| `reference-source-names` | Deterministic naming from a historical first-party source tree |
+| `runtime-inventory` | Inspect deterministically detected runtime helpers |
+| `generate-project-v2` | Output generation (materializes source under `<output>/src/…`) |

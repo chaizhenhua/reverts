@@ -6,7 +6,7 @@ description: Collect Electron application artifacts from DMG, extracted .app bun
 # Electron Collector
 
 Use this skill to turn an Electron app artifact into the standard ReverTS app
-artifact manifest, ingest it through the MCP server, and hand off to the
+artifact manifest, import it with the `reverts-cli` binary, and hand off to the
 standard decompile + post-export validation skills. Electron `.dmg` and `.img`
 disk images are first-class inputs when they contain a `.app` bundle. An
 already-extracted `<App>.app` directory is also a first-class input; pass the
@@ -28,31 +28,38 @@ For Electron decompilation requests, do not stop after producing
 `artifact-manifest.json`. The successful path is:
 
 1. Collect the artifact manifest with this skill's script.
-2. Create or resolve a ReverTS project rooted at the Electron app directory.
-3. Call `ingest_app_manifest(..., run_discovery=true)` so source-unit
-   registration and module discovery run through the ReverTS pipeline.
-4. Validate inventory with `list_app_artifacts` and `get_artifact_manifest`.
-5. Run [decompile](../decompile/SKILL.md) until its public-surface gate passes
-   and `generate_app_decompiled_files` succeeds with strict gates enabled.
-6. Run [reverts-decompile](../reverts-decompile/SKILL.md) using the Electron
+2. Run `reverts-cli import-unpacked --input <Contents/Resources/app>
+   --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>`.
+   This single command creates the project, registers source units, and
+   discovers modules — there is no separate "create project" or "discovery
+   toggle" step.
+3. Validate inventory with `reverts-cli full-inventory --input <db>
+   --project-id <id>`.
+4. Run [decompile](../decompile/SKILL.md) — it now drives `reverts-cli` —
+   until its public-surface gate passes, then run `reverts-cli
+   generate-project-v2 --input <db> --project-id <id> --output <dir>
+   --source-root src` with strict gates enabled.
+5. Run [reverts-decompile](../reverts-decompile/SKILL.md) using the Electron
    runtime profile: install, `tsc --noEmit`, Electron startup, and renderer
    UI/console checks through Playwright/CDP when available.
 
-Use `run_discovery=false` only for inventory-only debugging. A full
-decompilation run needs discovery enabled; otherwise the later decompile phases
-have no modules to process. Large Electron apps can spend many minutes in
-discovery and variable-flow analysis; use an MCP client/tool timeout long enough
-for the run, and inspect persisted project/artifact counts before deciding that
-the operation failed.
+`import-unpacked` always discovers modules; there is no inventory-only import
+mode. A full decompilation run therefore has modules to process as soon as the
+import succeeds. Large Electron apps can spend many minutes in import discovery
+and variable-flow analysis; let the command run to completion, and inspect the
+persisted SQLite project/source-unit/module counts (via `full-inventory`)
+before deciding that the operation failed.
 
 ## Install
 
-This skill ships with the `reverts` MCP server distribution. See
+This skill drives the `reverts-cli` binary, built at
+`./target/release/reverts-cli` (rebuild with
+`cargo build --release --bin reverts-cli`). See
 [skills/README.md](../README.md#install) for the full install matrix
-(`npm install -g reverts`, local-dev `./skills/install`, MCP server
-registration). The release must contain the `reverts-mcp` binary, the
-`skills/` directory (including `electron-collector` and its `bin/`
-collector script), and the npm launcher when installed via npm.
+(`npm install -g reverts`, local-dev `./skills/install`). The working tree
+must contain the `reverts-cli` binary, the `skills/` directory (including
+`electron-collector` and its `bin/` collector script), and Python 3 for the
+collector.
 
 ## Platform Support
 
@@ -111,22 +118,29 @@ The manifest always records source units and edges. Only JS/TS-family sources pa
 
 ## ReverTS Workflow
 
-1. Resolve or create a ReverTS project for the app directory or artifact root.
-2. Run the collector script and inspect the JSON report.
-3. Call `ingest_app_manifest(project_id, manifest_path, run_discovery=true)` to register artifact inventory and discover modules.
-4. Validate inventory with `list_app_artifacts` and `get_artifact_manifest`.
-5. Run the standard [decompile](../decompile/SKILL.md) control loop for
-   semantic naming and strict output generation.
-6. Run [reverts-decompile](../reverts-decompile/SKILL.md) with the Electron
+1. Run the collector script and inspect the JSON report.
+2. Run `reverts-cli import-unpacked --input <Contents/Resources/app>
+   --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>`
+   to create the project, register artifact inventory, and discover modules in
+   one step. Note the project id assigned in the new SQLite database for the
+   following steps.
+3. Validate inventory with `reverts-cli full-inventory --input <db>
+   --project-id <id> --json <inventory.json>` and compare source-unit counts
+   against the collector manifest.
+4. Run the standard [decompile](../decompile/SKILL.md) control loop (it drives
+   `reverts-cli`) for semantic naming and strict output generation, ending with
+   `reverts-cli generate-project-v2 --input <db> --project-id <id>
+   --output <dir> --source-root src`.
+5. Run [reverts-decompile](../reverts-decompile/SKILL.md) with the Electron
    validation profile. Do not substitute browser-extension or web-app checks
    for Electron unless artifact metadata says the project has multiple
    profiles.
-7. Only after mechanical recovery is structurally valid, use semantic rename
-   worklist tools for Agent naming.
+6. Only after mechanical recovery is structurally valid, use the semantic-name
+   commands (`symbol-names`, `binding-names`, `naming-plan`) for Agent naming.
 
 For full recovery, do not use ingest filters as a degradation mechanism. Filters are only for smoke validation of collector behavior. Full recovery should inventory and ingest all JS/TS-family source units that the manifest marks as recoverable.
 
-Future recovery tools should collapse steps 3-6 into a persistent recovery job,
+Future recovery tools should collapse steps 2-5 into a persistent recovery job,
 but the boundary remains the same: collector and ReverTS code perform mechanical
 recovery; Agent naming is separate.
 
@@ -140,14 +154,15 @@ A collection run is considered successful only when **all** of the following hol
    or `js_chunk` source units.
 4. Every entry with `ingest_enabled == true` has a real path under the
    stage directory or directly inside `artifact_root` (no dangling refs).
-5. After `ingest_app_manifest(project_id, manifest_path, run_discovery=true)`,
-   `list_app_artifacts(project_id)` returns the same source-unit count as
-   the manifest. A mismatch indicates an ingestion bug — file it as a
+5. After `reverts-cli import-unpacked ...`, the source-unit count reported by
+   `reverts-cli full-inventory --input <db> --project-id <id>` matches the
+   manifest. A mismatch indicates an import bug — file it as a
    ReverTS issue, do not retry blindly.
-6. `decompile_status(project_id)` can see discovered modules. If discovery
-   fails during ingest, fix the pipeline mechanism and rerun collection +
-   ingest; do not remove source units or mutate the manifest to bypass the
-   failure.
+6. `reverts-cli naming-progress --input <db> --project-id <id>` (and
+   `coverage-ledger` for the unified ledger) can see discovered modules. If
+   discovery fails during import, fix the pipeline mechanism and rerun
+   collection + import; do not remove source units or mutate the manifest to
+   bypass the failure.
 7. Post-export validation completes through the Electron profile from
    `reverts-decompile`: dependency install succeeds, real TypeScript compile
    runs, Electron startup reaches renderer readiness, and captured
@@ -165,10 +180,10 @@ the manifest or hand-edit the stage directory to make a bad run look good.
 | `.dmg` / `.img` mounts but yields no `.app` | mount/extract succeeds, no `*.app` under extracted root | Inspect the disk image manually; the app may be inside a nested HFS/APFS/ISO image — pass that nested path explicitly |
 | ASAR header invalid / truncated | collector raises `ASAR header parse error` | Re-fetch the artifact (file likely truncated during transfer); do not "repair" the bytes |
 | Stage dir not writable | extraction fails with `EACCES` / `EROFS` | Pass `--stage-dir` to a writable path and retry |
-| `ingest_app_manifest` rejects manifest | MCP returns schema validation error | Fix the collector or ReverTS ingest mechanism with a regression test; do NOT mutate JSON to satisfy the validator |
-| `ingest_app_manifest` fails during source preparation or discovery | MCP error names source-unit IDs and parse/format reason | Reproduce with the named source, add a ReverTS regression test, fix the upstream parser/metadata/discovery path, regenerate the manifest, and ingest again |
-| MCP client times out during discovery | DB/source-unit/module counts are increasing or logs show variable-flow/signature work | Reconnect with a longer timeout and continue from persisted state; do not re-ingest blindly unless no artifact row was created |
-| Source-unit count mismatch after ingest | `list_app_artifacts.count` != `manifest.sources.length` | Stop; file as ReverTS bug. Re-ingesting will mask the defect |
+| `import-unpacked` rejects manifest | `reverts-cli` exits non-zero with a manifest coverage/evidence error | Fix the collector or ReverTS import mechanism with a regression test; do NOT mutate JSON to satisfy the validator |
+| `import-unpacked` fails during source preparation or discovery | `reverts-cli` error names source-unit IDs and parse/format reason | Reproduce with the named source, add a ReverTS regression test, fix the upstream parser/metadata/discovery path, regenerate the manifest, and import again |
+| `import-unpacked` runs long during discovery | SQLite source-unit/module counts are increasing or logs show variable-flow/signature work | Let the command finish; on interruption, inspect persisted counts with `full-inventory` and continue from the existing DB rather than re-importing blindly unless no project row was created |
+| Source-unit count mismatch after import | `full-inventory` source-unit count != `manifest.sources.length` | Stop; file as ReverTS bug. Re-importing will mask the defect |
 
 If a real DMG cannot be mounted or extracted on the current host, stop and
 report the missing platform tool. Do not fake a manifest for unavailable
@@ -179,13 +194,15 @@ files.
 | Step | Tool |
 |---|---|
 | Collect `.dmg` / `.img` / `.app` / `Resources` / `app.asar` | `python3 skills/electron-collector/bin/collect_electron_artifact ... --json-report` |
-| Project + ingest | ReverTS MCP `create_project`, `ingest_app_manifest`, `list_app_artifacts`, `get_artifact_manifest` |
-| Semantic naming + output | [decompile](../decompile/SKILL.md): `decompile_status`, `query`, `submit_module_decompilation`, `update_modules`, `generate_app_decompiled_files` |
+| Project + import + discovery | `reverts-cli import-unpacked --input <app> --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>` |
+| Inventory + progress | `reverts-cli full-inventory --input <db> --project-id <id> [--json <file>]`, `reverts-cli naming-progress --input <db> --project-id <id> [--json]`, `reverts-cli coverage-ledger --input <db> --project-id <id>` |
+| Semantic naming + output | [decompile](../decompile/SKILL.md) (drives `reverts-cli`), ending with `reverts-cli generate-project-v2 --input <db> --project-id <id> --output <dir> --source-root src` |
 | Install/compile/runtime/UI | [reverts-decompile](../reverts-decompile/SKILL.md), Electron profile in `references/runtime-validation-profiles.md` |
 
 ## Output Contract
 
-The script writes a manifest accepted by `ingest_app_manifest`:
+The script writes the collector manifest that feeds `reverts-cli
+import-unpacked --manifest`:
 
 ```json
 {
@@ -199,6 +216,17 @@ The script writes a manifest accepted by `ingest_app_manifest`:
   }
 }
 ```
+
+<!-- TODO(reverts-cli): manifest shape reconciliation — `import-unpacked
+--manifest` expects a `reverts.import_evidence.v1` manifest (every input file
+covered, with matching size/hash evidence), but this collector emits a
+`schema_version: 1`, `profile: electron` manifest. Reconcile the collector
+output with the import-evidence schema (or add a converter) before relying on a
+direct hand-off. -->
+
+The `full-inventory --manifest` flag likewise expects a
+`reverts-import-evidence.json`; the same reconciliation applies when passing the
+collector manifest there for coverage counts.
 
 Source unit roles include `main`, `preload`, `renderer`, `html_entry`, `js_chunk`, `vendor_chunk`, `worker`, `source_map`, `native_addon`, `package_manifest`, and `asset`.
 

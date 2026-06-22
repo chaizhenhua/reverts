@@ -7,17 +7,21 @@ description: Collect browser-extension artifacts into ReverTS manifests for CRX,
 
 Use this skill to turn a browser-extension artifact (`.crx`, `.xpi`, or
 unpacked directory) into the standard ReverTS app artifact manifest, then
-ingest it through the MCP server. Output schema is identical to
+import it with the `reverts-cli` binary. Output schema is identical to
 [electron-collector](../electron-collector/SKILL.md); only the `profile`
 field and the role namespace differ.
 
 ## Install
 
-Bundled with the `reverts` MCP server distribution. See
+Bundled with the `reverts` distribution. See
 [skills/README.md](../README.md#install) for end-user install
 (`npm install -g reverts`) and local-dev symlink installation
 (`./skills/install`). Restart your Claude/Codex session after the first
 install so the skill registry rebinds.
+
+The pipeline mechanism is the `reverts-cli` binary — build it with
+`cargo build --release --bin reverts-cli` and make sure it is on `PATH`
+(or invoke it by its built path, e.g. `./target/release/reverts-cli`).
 
 ## Agent Boundary
 
@@ -108,17 +112,22 @@ The manifest always records source units and edges; `--ingest-include` /
 
 ## ReverTS Workflow
 
-1. Resolve or create a ReverTS project for the extension (`name`/`version`
+1. Run the collector script and inspect the JSON report (`name`/`version`
    from the parsed `manifest.json` are written to manifest metadata).
-2. Run the collector script and inspect the JSON report.
-3. Call `ingest_app_manifest(project_id, manifest_path, run_discovery=false)`
-   to register artifact inventory.
-4. Validate inventory with `list_app_artifacts` and `get_artifact_manifest`.
-5. Run the standard ReverTS recovery phases (discovery, generation,
-   validation, quality reporting).
-6. After mechanical recovery is structurally valid, use
-   [decompile](../decompile/SKILL.md) for the rename worklist and
-   [reverts-decompile](../reverts-decompile/SKILL.md) for export validation.
+2. Import the artifact with
+   `reverts-cli import-unpacked --input <artifact_root> --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>`.
+   This creates the project, registers source units, and discovers modules
+   in one step (import always discovers). Note the printed `project-id`.
+3. Validate inventory with
+   `reverts-cli full-inventory --input <db.sqlite> --project-id <id>`
+   (add `--json <file>` to capture the report).
+4. Run the standard ReverTS recovery phases (generation, validation,
+   quality reporting).
+5. After mechanical recovery is structurally valid, use
+   [decompile](../decompile/SKILL.md) for the rename worklist
+   (`reverts-cli naming-progress` / `naming-plan` / `generate-project-v2`)
+   and [reverts-decompile](../reverts-decompile/SKILL.md) for export
+   validation.
 
 ## Completion Criteria
 
@@ -136,10 +145,11 @@ following hold:
 5. If the manifest declares `content_scripts`, every entry's `js[*]` and
    `css[*]` paths resolve to source units with role `content_script` /
    `content_style`.
-6. After `ingest_app_manifest(project_id, manifest_path, run_discovery=false)`,
-   `list_app_artifacts(project_id)` returns the same source-unit count as
-   the manifest. Mismatch indicates an ingestion bug — file as a ReverTS
-   issue, do not retry blindly.
+6. After
+   `reverts-cli import-unpacked --input <artifact_root> --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>`,
+   `reverts-cli full-inventory --input <db.sqlite> --project-id <id>` reports
+   the same source-unit count as the manifest. Mismatch indicates an import
+   bug — file as a ReverTS issue, do not retry blindly.
 
 Stop the workflow and report failure if any of these fails. Do not patch
 the manifest or hand-edit the stage directory to make a bad run look good.
@@ -157,7 +167,8 @@ the manifest or hand-edit the stage directory to make a bad run look good.
 | `manifest_version` outside {2, 3} | manifest field is missing or odd | warn and continue with role `manifest` (no version suffix); MV1 is unsupported, MV4 is forward-incompatible |
 | Manifest references a missing file | e.g. `background.service_worker: "missing.js"` | record it in manifest `metadata.unresolved_manifest_references`; do NOT fabricate the file and do NOT emit a source-unit edge without a real target |
 | Stage dir not writable | extraction fails with `EACCES` / `EROFS` | pass `--stage-dir` to a writable path and retry |
-| `ingest_app_manifest` rejects manifest | MCP returns schema validation error | file as a ReverTS bug with the manifest attached; do NOT mutate JSON to satisfy validator |
+| `import-unpacked` rejects manifest | command exits non-zero with a manifest/coverage validation error | file as a ReverTS bug with the manifest attached; do NOT mutate JSON to satisfy validator |
+| `reverts-cli` not built / not on PATH | command not found, or stale binary missing a subcommand/flag | run `cargo build --release --bin reverts-cli` and put it on `PATH` (or invoke `./target/release/reverts-cli`) |
 
 If extraction succeeds but no JS/TS source units have `ingest=true`, the
 extension contains only HTML/CSS/JSON/assets (rare but legal). The
@@ -166,7 +177,7 @@ user; ReverTS has nothing to decompile.
 
 ## Output Contract
 
-The script writes a manifest accepted by `ingest_app_manifest`:
+The script writes a manifest accepted by `reverts-cli import-unpacked --manifest`:
 
 ```json
 {

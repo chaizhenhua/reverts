@@ -7,8 +7,9 @@ description: Collect a website frontend (live URL, HAR capture, or downloaded as
 
 Use this skill to turn a website's shipped frontend — the HTML entry plus its
 minified JavaScript chunks, CSS, source maps, and WASM — into the standard
-ReverTS app artifact manifest, ingest it through the MCP server, and hand off to
-the decompile + web-app runtime validation skills. Output schema is identical to
+ReverTS app artifact manifest, import it with the `reverts-cli` binary, and hand
+off to the decompile + web-app runtime validation skills. Output schema is
+identical to
 [electron-collector](../electron-collector/SKILL.md) and
 [browser-extension-collector](../browser-extension-collector/SKILL.md); only the
 `profile` (`web-app`) and the role namespace differ.
@@ -89,11 +90,15 @@ path → language → role resolution and the URL → logical-path mapping rules
 
 ## Install
 
-Bundled with the `reverts` MCP server distribution. See
+Bundled with the `reverts` distribution. See
 [skills/README.md](../README.md#install) for the full install matrix
-(`npm install -g reverts`, local-dev `./skills/install`, MCP registration). The
-release must contain the `reverts-mcp` binary, the `skills/` directory (including
+(`npm install -g reverts`, local-dev `./skills/install`). The release must
+contain the `reverts-cli` binary, the `skills/` directory (including
 `website-collector` and its `bin/` collector script), and the npm launcher.
+
+The pipeline mechanism is the `reverts-cli` binary — build it with
+`cargo build --release --bin reverts-cli` and make sure it is on `PATH`
+(or invoke it by its built path, e.g. `./target/release/reverts-cli`).
 
 The collector script is cross-platform Python 3 with no third-party dependency;
 HTTP fetching uses the standard library. HAR/directory modes need no network.

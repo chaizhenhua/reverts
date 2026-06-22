@@ -30,25 +30,28 @@ Each skill directory contains:
 
 ## Install
 
-### End users (npm release)
+The skills shell out to the `reverts-cli` binary; they are not MCP tools.
+Installing therefore has two parts: put `reverts-cli` on `PATH`, then register
+the skill directories with your host skill loader.
 
-The `reverts` npm package bundles this directory at publish time
-(`npm/prepare-package.js` copies `skills/` → `npm/skills/`, and
-`npm/package.json` lists `skills/` in its `files` field). Installing the
-package therefore installs the skills:
+### 1. Build and install the CLI
+
+Build the release binary and put it on `PATH` so the skills can invoke it:
 
 ```bash
-npm install -g reverts
-codex mcp add reverts -- npx -y reverts
-claude mcp add reverts -- npx -y reverts
+cargo build --release --bin reverts-cli
+# then either symlink it onto PATH ...
+ln -sf "$(pwd)/target/release/reverts-cli" ~/.local/bin/reverts-cli
+# ... or install it via cargo:
+cargo install --path crates/reverts-cli
 ```
 
-The MCP server announces the bundled skills under the `reverts:` namespace:
-`reverts:decompile`, `reverts:browser-extension-collector`,
-`reverts:electron-collector`, `reverts:website-collector`, and
-`reverts:reverts-decompile`.
+<!-- TODO(reverts-cli): confirm npm distribution path -->
+There is currently no npm package in this repository, so `npm install -g reverts`
+is not a supported install path. Use the cargo build above until a published
+distribution exists.
 
-### Local development (this worktree)
+### 2. Install the skills (this worktree)
 
 Run the bundled installer once. It creates symlinks from
 `~/.claude/skills/<name>` to each subdirectory under `skills/`, so edits in
@@ -60,17 +63,9 @@ the worktree show up in Claude Code immediately:
 ./skills/install --uninstall          # remove all symlinks
 ```
 
-Restart your Claude/Codex session (or use `/mcp` to reconnect) after the
-first install so the skill registry picks them up. Subsequent edits to
-`SKILL.md` or `references/*.md` are picked up live (next skill invocation).
-
-When working on the MCP server itself, also rebuild the binary and re-point
-the MCP registration:
-
-```bash
-cargo build --release --bin reverts-mcp
-claude mcp add reverts -- "$(pwd)/target/release/reverts-mcp"
-```
+Restart your Claude/Codex session after the first install so the skill registry
+picks them up. Subsequent edits to `SKILL.md` or `references/*.md` are picked
+up live (next skill invocation).
 
 ## Authoring conventions
 
@@ -100,7 +95,7 @@ Every `SKILL.md` should provide, in this order:
    them in a table mapping condition → action.
 5. **Completion criteria** — quantitative gate (counters, ratios, exit codes).
 6. **Failure recovery** — what to do when a hard blocker is hit.
-7. **Tool summary** — the MCP tools / CLI commands the skill calls.
+7. **Tool summary** — the `reverts-cli` commands the skill calls.
 8. **References** — links to `references/*.md` for templates and deep dives.
 
 ### Style rules
@@ -111,8 +106,9 @@ Every `SKILL.md` should provide, in this order:
   fields, log lines, file states), not psychological "red flags".
 - Do not adopt coercive language ("you MUST", "1% chance"). State the cost of
   skipping a step instead.
-- Define hard blockers explicitly: missing input, permission denied, MCP server
-  unreachable, same operation failing N×, schema version mismatch.
+- Define hard blockers explicitly: missing input, permission denied,
+  `reverts-cli` not found on `PATH`, same operation failing N×, schema version
+  mismatch.
 - Keep `SKILL.md` under ~350 lines. Push templates, profile-specific checklists,
   and worked examples into `references/`.
 - Keep `agents/openai.yaml` present for every committed skill, with UI metadata
@@ -159,11 +155,8 @@ for p in pathlib.Path('skills').rglob('*.md'):
 sys.exit(0 if broken == 0 else 1)
 PY
 
-# 3. npm packaging picks them up
-node npm/prepare-package.js && ls npm/skills/
-
-# 4. Server still builds
-cargo build --release --bin reverts-mcp
+# 3. The CLI the skills shell out to still builds
+cargo build --release --bin reverts-cli
 ```
 
 ## File layout invariants
