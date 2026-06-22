@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Expression, ObjectPropertyKind, Statement};
+use oxc_ast::ast::{Expression, ModuleExportName, ObjectPropertyKind, Statement};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
@@ -111,35 +111,76 @@ pub fn parse_index_reexports(index_source: &str) -> PackageIndexReexports {
         }
     }
 
-    // Find `module.exports = { … }` (or `exports = { … }`) and read each property.
     let mut reexports = Vec::new();
     for statement in &program.body {
-        let Statement::ExpressionStatement(expression_statement) = statement else {
-            continue;
-        };
-        let Expression::AssignmentExpression(assignment) = &expression_statement.expression else {
-            continue;
-        };
-        if !commonjs_module_exports_target(&assignment.left) {
-            continue;
-        }
-        let Expression::ObjectExpression(object) = &assignment.right else {
-            continue;
-        };
-        for property in &object.properties {
-            let ObjectPropertyKind::ObjectProperty(property) = property else {
-                continue;
-            };
-            let Some(export_name) = static_property_key_name(&property.key) else {
-                continue;
-            };
-            if let Some(reexport) = resolve_property_value(&export_name, &property.value, &requires)
-            {
-                reexports.push(reexport);
+        match statement {
+            // CJS: `module.exports = { … }` / `exports = { … }`.
+            Statement::ExpressionStatement(expression_statement) => {
+                let Expression::AssignmentExpression(assignment) =
+                    &expression_statement.expression
+                else {
+                    continue;
+                };
+                if !commonjs_module_exports_target(&assignment.left) {
+                    continue;
+                }
+                let Expression::ObjectExpression(object) = &assignment.right else {
+                    continue;
+                };
+                for property in &object.properties {
+                    let ObjectPropertyKind::ObjectProperty(property) = property else {
+                        continue;
+                    };
+                    let Some(export_name) = static_property_key_name(&property.key) else {
+                        continue;
+                    };
+                    if let Some(reexport) =
+                        resolve_property_value(&export_name, &property.value, &requires)
+                    {
+                        reexports.push(reexport);
+                    }
+                }
             }
+            // ESM named re-export: `export { Y as X } from './x'`. The package
+            // member `X` is the submodule's `Y` (member-pick on submodule `x`);
+            // a bare `export { X } from './x'` is `Y == X`.
+            Statement::ExportNamedDeclaration(export) => {
+                let Some(source) = &export.source else {
+                    continue; // local `export { … }` (no `from`) names no submodule
+                };
+                let raw = source.value.as_str();
+                if !raw.starts_with('.') {
+                    continue; // re-export from ANOTHER package — not a submodule
+                }
+                let relpath = normalize_submodule_relpath(raw);
+                for specifier in &export.specifiers {
+                    let (Some(local), Some(exported)) = (
+                        module_export_name_text(&specifier.local),
+                        module_export_name_text(&specifier.exported),
+                    ) else {
+                        continue;
+                    };
+                    reexports.push(IndexReexport {
+                        submodule_relpath: relpath.clone(),
+                        export_name: exported.to_string(),
+                        member: Some(local.to_string()),
+                    });
+                }
+            }
+            _ => {}
         }
     }
     PackageIndexReexports { reexports }
+}
+
+/// The identifier text of a `ModuleExportName`, or `None` for a string-literal
+/// export name (`export { x as "a-b" }` — not a usable submodule member).
+fn module_export_name_text<'a>(name: &'a ModuleExportName<'a>) -> Option<&'a str> {
+    match name {
+        ModuleExportName::IdentifierName(identifier) => Some(identifier.name.as_str()),
+        ModuleExportName::IdentifierReference(identifier) => Some(identifier.name.as_str()),
+        ModuleExportName::StringLiteral(_) => None,
+    }
 }
 
 /// The normalized relpath of a `require('./x')` call expression, else `None`.
@@ -255,6 +296,35 @@ mod tests {
                 ("tokens".to_string(), Some("t".to_string())),
             ]
         );
+    }
+
+    #[test]
+    fn esm_named_reexport_from_submodule() {
+        // ESM barrel: `export { X } from './x'` and `export { Y as Z } from './y'`.
+        let map = parse_index_reexports(
+            "export { Range } from './classes/range.js';\n\
+             export { compareBuild as compare } from './functions/compare.js';\n",
+        );
+        assert_eq!(
+            names(&map, "classes/range"),
+            vec![("Range".to_string(), Some("Range".to_string()))]
+        );
+        // `compareBuild as compare`: package exposes `compare`, picked off the
+        // submodule's `compareBuild`.
+        assert_eq!(
+            names(&map, "functions/compare"),
+            vec![("compare".to_string(), Some("compareBuild".to_string()))]
+        );
+    }
+
+    #[test]
+    fn esm_local_export_and_foreign_reexport_are_ignored() {
+        // `export { X }` (no `from`) names no submodule; `export … from 'pkg'`
+        // (bare specifier) is another package, not a submodule.
+        let map = parse_index_reexports(
+            "const X = 1;\nexport { X };\nexport { y } from '@scope/other';\n",
+        );
+        assert!(map.is_empty(), "{map:?}");
     }
 
     #[test]
