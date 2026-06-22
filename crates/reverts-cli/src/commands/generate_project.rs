@@ -884,6 +884,45 @@ fn write_recognized_package_sources(
             source,
         },
     )?;
+
+    // Most recognized modules are island-inlined with NO per-module subpath (e.g.
+    // 469 @opentelemetry/api attributions all NULL subpath), so a per-module
+    // restore reaches almost none. Instead dump each recognized package's COMPLETE
+    // real source tree from the cache — so every identified package's full readable
+    // npm source sits under `.reverts/restored-sources/<pkg>@<ver>/…`, regardless
+    // of whether its code was inlined into the scope-hoisted island.
+    let packages: std::collections::BTreeSet<(String, String)> = recognized
+        .iter()
+        .map(|((_, package, _), (version, _, _))| (package.clone(), version.clone()))
+        .collect();
+    let mut tree_statement = connection
+        .prepare(
+            "SELECT entry_path, source_content FROM package_source_cache \
+             WHERE package_name = ?1 AND package_version = ?2",
+        )
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    for (package, version) in packages {
+        let files = tree_statement
+            .query_map(params![package, version], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+        for file in files {
+            let (entry_path, source) =
+                file.map_err(|err| CliRunError::GenerateProject(err.to_string()))?;
+            let safe = sanitize_restored_path(&package, &version, &entry_path);
+            if !wrote_paths.insert(safe.clone()) {
+                continue;
+            }
+            let dest = restored_dir.join(&safe);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            if std::fs::write(&dest, source).is_ok() {
+                written_sources += 1;
+            }
+        }
+    }
     Ok(written_sources)
 }
 
