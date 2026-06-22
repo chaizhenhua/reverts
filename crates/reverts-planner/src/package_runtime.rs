@@ -768,6 +768,16 @@ pub(crate) fn push_packed_runtime_helper_imports(
         let Some(module_path) = module_output_path(program, *module_id) else {
             continue;
         };
+        // Carry the owner module's semantic names onto this importer just like
+        // `emit_direct_owner_imports` does. Without this, a wire-renamed export
+        // (the owner emits `export { Semantic }`, dropping the minified wire
+        // name) leaves this file importing the stale wire name — `No matching
+        // export` at bundle/load time. The entry island reaches its packed
+        // source-module imports through here, so this is what keeps a named
+        // island consistent with its owners.
+        for binding in bindings {
+            crate::propagate_imported_binding_semantic_name(program, *module_id, binding, file);
+        }
         imports.push((
             relative_import_specifier(helper_path, module_path.as_str()),
             bindings.clone(),

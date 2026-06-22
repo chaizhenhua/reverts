@@ -4283,6 +4283,53 @@ fn imported_binding_semantic_name_propagates_as_all_scope_readability_rename() {
 }
 
 #[test]
+fn packed_runtime_helper_imports_propagate_owner_semantic_names() {
+    // The entry island reaches its source-module imports through
+    // `push_packed_runtime_helper_imports`. That path must carry the owner's
+    // semantic name onto the importer exactly like `emit_direct_owner_imports`,
+    // or a wire-renamed export (owner emits `export { parseDocument }`, dropping
+    // the wire name `Cb`) leaves the island importing the stale `Cb` — a
+    // `No matching export` break at bundle/load time.
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::application(
+        ModuleId(1),
+        "producer",
+        "modules/producer.ts",
+    ));
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let mut semantic_names = reverts_model::SemanticNameMap::default();
+    semantic_names.insert_binding(ModuleId(1), "Cb", "parseDocument");
+    let program = reverts_model::EnrichedProgram::new(
+        model,
+        semantic_names,
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+
+    let mut plan = EmitPlan::default();
+    let mut island = PlannedFile::new(super::cli_entrypoint::ENTRYPOINT_ISLAND_PATH);
+    let helper_imports = BTreeMap::from([(ModuleId(1), BTreeSet::from([BindingName::new("Cb")]))]);
+    super::package_runtime::push_packed_runtime_helper_imports(
+        &program,
+        &mut plan,
+        &mut island,
+        super::cli_entrypoint::ENTRYPOINT_ISLAND_PATH,
+        &helper_imports,
+    );
+
+    assert_eq!(
+        island.readability_renames.len(),
+        1,
+        "owner name must propagate"
+    );
+    let rename = &island.readability_renames[0];
+    assert_eq!(rename.original.as_str(), "Cb");
+    assert_eq!(rename.renamed.as_str(), "parseDocument");
+    assert_eq!(rename.scope, super::PlannedRenameScope::All);
+}
+
+#[test]
 fn cross_module_eager_safe_analysis_keeps_lazy_when_consumer_uses_thunk_as_value() {
     let planner = ImportExportPlanner;
     // Same shape as above, but the consumer passes the thunk as a
