@@ -60,15 +60,34 @@ pub(crate) fn complete_init_thunk_imports(plan: &mut EmitPlan) -> usize {
         return 0;
     }
 
+    // The eager entrypoint island and the cluster/chunk files split out of it are
+    // ONE esbuild bundle, but only the island file keeps the bundle's shared
+    // runtime-helpers import — the split moves an init-thunk CALL (`cdA()`) into a
+    // cluster without that helper import, so the per-file `same_bundle` gate below
+    // would wrongly reject wiring the call to its definer. Union the helper imports
+    // of every island-derived file (`unmodularized_recovered_code`) so each such
+    // file is treated as carrying the whole island bundle's helpers.
+    let island_helpers: BTreeSet<String> = plan
+        .files
+        .iter()
+        .filter(|file| file.unmodularized_recovered_code)
+        .filter_map(|file| runtime_helper_imports.get(&file.path))
+        .flatten()
+        .cloned()
+        .collect();
+
     let mut added = 0usize;
     for file in &mut plan.files {
         let body = file.body.join("\n");
         let local = local_bindings_in_source(body.as_str());
         let imported = imported_local_names(body.as_str());
-        let consumer_helpers = runtime_helper_imports
+        let mut consumer_helpers = runtime_helper_imports
             .get(&file.path)
             .cloned()
             .unwrap_or_default();
+        if file.unmodularized_recovered_code {
+            consumer_helpers.extend(island_helpers.iter().cloned());
+        }
 
         let mut imports_by_specifier = BTreeMap::<String, BTreeSet<String>>::new();
         for name in value_identifiers_in_source(body.as_str()) {
@@ -196,6 +215,43 @@ mod tests {
         plan.push_file(def);
 
         assert_eq!(complete_init_thunk_imports(&mut plan), 0);
+    }
+
+    #[test]
+    fn wires_init_thunk_call_that_split_into_a_cluster_without_the_helper_import() {
+        // The eager entrypoint island and a cluster split out of it are ONE
+        // bundle, but only the island file kept the shared runtime-helpers import.
+        // A `cdA()` call that moved into the cluster must still be wired to its
+        // definer (module 461), even though the cluster imports no runtime helper.
+        let mut plan = EmitPlan::default();
+        let mut entry = PlannedFile::new("modules/entrypoint.ts");
+        entry.push_source("import { nt } from './runtime/source-6-helpers.js';\nnt();");
+        entry.unmodularized_recovered_code = true;
+        plan.push_file(entry);
+        let mut cluster = PlannedFile::new("modules/island/cluster-2964.ts");
+        // No runtime-helpers import of its own — the split left it behind.
+        cluster.push_source("function run() { return cdA(); }\nexport { run };");
+        cluster.unmodularized_recovered_code = true;
+        plan.push_file(cluster);
+        let mut def = PlannedFile::new("modules/461-esbuild-cdA.ts");
+        def.push_source(
+            "import { nt } from './runtime/source-6-helpers.js';\nvar PDt, cdA = nt(() => { PDt = 1; });\nexport { cdA };",
+        );
+        plan.push_file(def);
+
+        let added = complete_init_thunk_imports(&mut plan);
+        assert_eq!(
+            added,
+            1,
+            "{}",
+            body_of(&plan, "modules/island/cluster-2964.ts")
+        );
+        assert!(
+            body_of(&plan, "modules/island/cluster-2964.ts")
+                .contains("import { cdA } from '../461-esbuild-cdA.js';"),
+            "{}",
+            body_of(&plan, "modules/island/cluster-2964.ts")
+        );
     }
 
     #[test]
