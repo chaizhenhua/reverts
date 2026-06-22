@@ -347,6 +347,11 @@ fn island_cluster_path(cluster_id: usize) -> String {
 /// overhead and balloons the import graph for no readability gain.
 const MIN_ISLAND_CLUSTER_SIZE: usize = 24;
 
+/// Per-file line budget for emitted island cluster files. A cluster whose body
+/// exceeds this is split into size-bounded sub-cluster files so no generated
+/// file is unwieldy to read or load.
+const MAX_ISLAND_CLUSTER_LINES: usize = 5000;
+
 /// A recognized inlined CommonJS module unit cleared for relocation into its own
 /// file: the memoized init thunk plus the exports object and (optional) guard
 /// variable it owns. Moving all three together keeps the writer co-located with
@@ -445,15 +450,18 @@ fn recognize_relocatable_cjs_modules(island_source: &str) -> Vec<RelocatableCjsM
 /// `var`/`const`/`let`/`class`. Hoisted functions and imports are excluded from
 /// the eager set: both are available before the entry body runs, so referencing
 /// them at class-definition time across the cluster boundary is safe.
-fn eval_order_safe_island_classes(island_source: &str) -> BTreeSet<BindingName> {
+/// Top-level island bindings that initialize EAGERLY when the entry body runs —
+/// `var`/`const`/`let`/`class` (everything except hoisted functions and imports,
+/// which are available before any module body executes). Referencing one of these
+/// at a moved cluster's load time (which precedes the entry body) is unsafe.
+fn eager_island_bindings(island_source: &str) -> BTreeSet<BindingName> {
     use reverts_js::{ParseGoal, TopLevelStatementKind};
-
     let Ok(facts) =
         reverts_js::collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript)
     else {
         return BTreeSet::new();
     };
-    let eager_island_bindings: BTreeSet<BindingName> = facts
+    facts
         .into_iter()
         .filter(|fact| {
             !matches!(
@@ -466,8 +474,35 @@ fn eval_order_safe_island_classes(island_source: &str) -> BTreeSet<BindingName> 
                 .into_iter()
                 .map(|name| BindingName::new(name.as_str()))
         })
-        .collect();
+        .collect()
+}
 
+/// Top-level eager `var`/`const`/`let` bindings that are SELF-CONTAINED constants:
+/// a side-effect-free initializer that reads nothing external at evaluation time
+/// (only literals and inert function/arrow bodies). Such a value is computed from
+/// nothing but itself, so it is identical no matter when it evaluates — relocating
+/// it ahead of the entry is provably eval-order-independent. This is stricter than
+/// "reads no eager island binding": a const reading global mutable state
+/// (`globalThis.foo.add`) is excluded, because an eager STATEMENT in the entry may
+/// set that state only later. Pure data literals and function-expression constants
+/// dominate this set.
+fn eval_order_safe_island_eager_bindings(island_source: &str) -> BTreeSet<BindingName> {
+    use reverts_js::ParseGoal;
+    let Ok(bindings) =
+        reverts_js::collect_top_level_eager_bindings(island_source, None, ParseGoal::TypeScript)
+    else {
+        return BTreeSet::new();
+    };
+    bindings
+        .into_iter()
+        .filter(|binding| binding.pure && binding.eager_references.is_empty())
+        .map(|binding| BindingName::new(binding.name.as_str()))
+        .collect()
+}
+
+fn eval_order_safe_island_classes(island_source: &str) -> BTreeSet<BindingName> {
+    use reverts_js::ParseGoal;
+    let eager = eager_island_bindings(island_source);
     let Ok(classes) = reverts_js::collect_top_level_class_eager_references(
         island_source,
         None,
@@ -478,9 +513,10 @@ fn eval_order_safe_island_classes(island_source: &str) -> BTreeSet<BindingName> 
     classes
         .into_iter()
         .filter(|class| {
-            class.references.iter().all(|reference| {
-                !eager_island_bindings.contains(&BindingName::new(reference.as_str()))
-            })
+            class
+                .references
+                .iter()
+                .all(|reference| !eager.contains(&BindingName::new(reference.as_str())))
         })
         .map(|class| BindingName::new(class.class_name.as_str()))
         .collect()
@@ -566,6 +602,26 @@ fn emit_island_clusters(
         }
     }
 
+    // Pin every binding reassigned (`x = …`, `x += …`, `x++`) anywhere in the
+    // island: relocating it would make it a read-only import that its reassignment
+    // can no longer write. `implicit_global_writes_in_source` only catches writes
+    // to undeclared globals, so module-scope mutable counters slip through without
+    // this. CJS guard vars are exempt — they are reassigned only inside the init
+    // that co-moves with them, so they were already added to `force_move_variables`
+    // above and the partitioner moves them regardless of this pin.
+    if let Ok(reassigned) = reverts_js::collect_reassigned_binding_names(
+        island_source,
+        None,
+        reverts_js::ParseGoal::TypeScript,
+    ) {
+        pinned.extend(
+            reassigned
+                .into_iter()
+                .map(|name| BindingName::new(name.as_str()))
+                .filter(|binding| !force_move_variables.contains(binding)),
+        );
+    }
+
     // Determine which top-level classes are eval-order-safe to relocate. A moved
     // cluster loads BEFORE the entry, so a `class X extends base {}` (and any
     // static initializer/decorator/computed key) that references an EAGER island
@@ -585,6 +641,52 @@ fn emit_island_clusters(
         }
     }
 
+    // Drain EVERY remaining movable function out of the entry, not just those in
+    // community clusters large enough to earn their own file. A hoisted function
+    // is always eval-order-safe to relocate; leaving the sub-threshold ones inline
+    // is what keeps the entry huge. Functions already in a surviving semantic
+    // cluster keep it (cohesive grouping); the rest join one shared overflow
+    // cluster that the size cap then splits into budget-bounded files. Pinned
+    // functions (entrypoint, reassigned, shared-state writers) are never drained.
+    let function_overflow_cluster_id = next_forced_cluster_id;
+    next_forced_cluster_id += 1;
+    if let Ok(facts) = reverts_js::collect_top_level_statement_facts(
+        island_source,
+        None,
+        reverts_js::ParseGoal::TypeScript,
+    ) {
+        for fact in facts {
+            if !matches!(fact.kind, reverts_js::TopLevelStatementKind::Function) {
+                continue;
+            }
+            for name in fact.bindings {
+                let binding = BindingName::new(name.as_str());
+                if pinned.contains(&binding) {
+                    continue;
+                }
+                binding_to_cluster
+                    .entry(binding)
+                    .or_insert(function_overflow_cluster_id);
+            }
+        }
+    }
+
+    // Drain self-contained eager constants (pure data literals, function-expression
+    // constants) out of the entry. Their `var`/`const` statements move only because
+    // they are listed in `force_move_variables`; reassigned bindings stay pinned (an
+    // ES import is read-only). They share one overflow cluster the size cap bounds.
+    let eager_overflow_cluster_id = next_forced_cluster_id;
+    next_forced_cluster_id += 1;
+    for binding in eval_order_safe_island_eager_bindings(island_source) {
+        if pinned.contains(&binding) {
+            continue;
+        }
+        force_move_variables.insert(binding.clone());
+        binding_to_cluster
+            .entry(binding)
+            .or_insert(eager_overflow_cluster_id);
+    }
+
     let Some(partition) = crate::island_split::partition_island_into_clusters(
         island_source,
         &binding_to_cluster,
@@ -597,6 +699,22 @@ fn emit_island_clusters(
     if partition.clusters.is_empty() {
         return false;
     }
+
+    // Cap every emitted cluster file at the per-file line budget. A semantic
+    // (community-detected) cluster can still be far larger than the budget; since
+    // everything it holds is eval-order-independent, splitting it into
+    // size-bounded sub-clusters keeps behavior identical while no file exceeds the
+    // budget. Sub-cluster cross-references resolve through the same binding-owner
+    // wiring below.
+    let crate::island_split::IslandPartition {
+        remaining_source,
+        clusters,
+    } = partition;
+    let clusters = crate::island_split::split_oversized_clusters(
+        clusters,
+        MAX_ISLAND_CLUSTER_LINES,
+        &mut next_forced_cluster_id,
+    );
 
     // Names reachable from the entry namespace: every island binding (moved ones
     // are imported back) plus what the entry already imports.
@@ -611,8 +729,7 @@ fn emit_island_clusters(
     // module-to-module `import`/`export` — instead of routing through the entry
     // hub. Only bindings that stay in the entry (eager statements, pinned
     // shared-state writers, module-owned imports) are imported from the entry.
-    let binding_owner: BTreeMap<BindingName, usize> = partition
-        .clusters
+    let binding_owner: BTreeMap<BindingName, usize> = clusters
         .iter()
         .flat_map(|group| {
             group
@@ -625,7 +742,7 @@ fn emit_island_clusters(
     let mut entry_imports = String::new();
     let mut entry_reexports: BTreeSet<BindingName> = BTreeSet::new();
     let mut moved_all: BTreeSet<BindingName> = BTreeSet::new();
-    for group in &partition.clusters {
+    for group in &clusters {
         let cluster_path = island_cluster_path(group.cluster_id);
         let entry_imports_from_cluster =
             relative_import_specifier(ENTRYPOINT_ISLAND_PATH, cluster_path.as_str());
@@ -712,7 +829,7 @@ fn emit_island_clusters(
     // Entry body: import the moved declarations back, then the original eager
     // statements in their original order (preserving side effects).
     entry_file.push_source(entry_imports);
-    entry_file.push_source(partition.remaining_source);
+    entry_file.push_source(remaining_source);
     for binding in &moved_all {
         entry_file.add_binding(PlannedBinding::new(
             binding.clone(),

@@ -272,6 +272,237 @@ pub(crate) fn partition_island_into_clusters(
     })
 }
 
+/// Estimate how many lines `source` occupies AFTER the emitter pretty-prints it.
+/// Cluster bodies arrive minified — many statements per physical line — so a raw
+/// newline count under-measures the emitted file by an order of magnitude. The
+/// formatter emits roughly one statement terminator or brace per line, so those
+/// tokens predict the emitted line count far better. (Tokens inside string/regex
+/// literals are counted too; that only over-estimates, which errs toward smaller
+/// files — the safe direction for a budget.)
+fn estimated_emitted_lines(source: &str) -> usize {
+    // `;{}` track statement/block lines; `,` and brackets track the one-element-
+    // per-line expansion of large object/array data literals, which otherwise read
+    // as a handful of physical lines but format into thousands.
+    source
+        .bytes()
+        .filter(|&byte| matches!(byte, b';' | b'{' | b'}' | b',' | b'[' | b']'))
+        .count()
+}
+
+/// Split any cluster whose body exceeds `max_body_lines` into size-bounded
+/// sub-clusters, so no emitted file blows past the per-file line budget. Every
+/// declaration a cluster holds is eval-order-independent (hoisted functions,
+/// inert function-expression bindings, eval-safe classes — never an interdependent
+/// init triple, which always forms its own dedicated cluster), so distributing
+/// them across files only changes which file each lives in; cross-references
+/// between the pieces resolve to direct imports through the normal binding-owner
+/// wiring. A single declaration larger than the budget is left whole (it cannot
+/// be split). Greedy bin-packing in source order keeps the result deterministic.
+///
+/// Re-parses each oversized cluster's already-extracted body (cheap: bodies are
+/// a fraction of the island) to recover statement boundaries. The first sub-bin
+/// keeps the original `cluster_id`; the rest take ids from `next_cluster_id`.
+pub(crate) fn split_oversized_clusters(
+    clusters: Vec<ClusterGroup>,
+    max_body_lines: usize,
+    next_cluster_id: &mut usize,
+) -> Vec<ClusterGroup> {
+    // The estimator predicts emitted lines from statement-terminator/brace tokens;
+    // formatted code also has brace-less continuation lines it cannot see, so it
+    // can under-count. Pack to 80% of the budget so even a ~25% under-count stays
+    // within it.
+    let target = max_body_lines * 4 / 5;
+    let mut out = Vec::new();
+    for group in clusters {
+        split_cluster(group, target, 0, next_cluster_id, &mut out);
+    }
+    out
+}
+
+/// Guards the recursion: even a pathological reference graph collapses to size
+/// bin-packing after this many levels of community subdivision.
+const MAX_SPLIT_DEPTH: usize = 8;
+
+/// Bring `group` within the budget. PRIMARY mechanism: recover cohesive
+/// sub-modules by community detection over the declarations' own reference graph
+/// (recursively, so a still-oversized sub-module subdivides again). FALLBACK
+/// (size bin-packing in source order) only when the declarations form a single
+/// indivisible community — a flat blob with no internal module structure — or the
+/// recursion budget is spent. A lone declaration larger than the budget is left
+/// whole (it cannot be divided). Everything a size-cap cluster holds is
+/// eval-order-independent, so regrouping across files is behavior-preserving.
+fn split_cluster(
+    group: ClusterGroup,
+    target: usize,
+    depth: usize,
+    next_cluster_id: &mut usize,
+    out: &mut Vec<ClusterGroup>,
+) {
+    if estimated_emitted_lines(&group.cluster_source) <= target {
+        out.push(group);
+        return;
+    }
+    let Ok(facts) =
+        collect_top_level_statement_facts(&group.cluster_source, None, ParseGoal::TypeScript)
+    else {
+        out.push(group); // cannot re-parse → keep whole rather than risk a bad split
+        return;
+    };
+    let decls: Vec<(&str, Vec<BindingName>)> = facts
+        .iter()
+        .filter(|fact| !fact.bindings.is_empty())
+        .map(|fact| {
+            let slice = group
+                .cluster_source
+                .get(fact.byte_start as usize..fact.byte_end as usize)
+                .unwrap_or_default();
+            let bindings = fact
+                .bindings
+                .iter()
+                .map(|name| BindingName::new(name.as_str()))
+                .collect();
+            (slice, bindings)
+        })
+        .collect();
+    if decls.len() <= 1 {
+        out.push(group); // a single declaration cannot be divided
+        return;
+    }
+
+    let subgroups = if depth < MAX_SPLIT_DEPTH {
+        semantic_subgroups(&decls)
+    } else {
+        Vec::new()
+    };
+    let bins = if subgroups.len() > 1 {
+        // Pack whole communities into budget-sized bins: combine small cohesive
+        // communities into one file rather than emitting thousands of singletons,
+        // while a community that alone exceeds the budget becomes its own bin and
+        // recurses (subdividing or, ultimately, bin-packing).
+        pack_groups_by_size(subgroups, target)
+    } else {
+        bin_pack_by_size(&decls, target)
+    };
+
+    for (index, (slices, bindings)) in bins.into_iter().enumerate() {
+        let cluster_id = if index == 0 {
+            group.cluster_id
+        } else {
+            let id = *next_cluster_id;
+            *next_cluster_id += 1;
+            id
+        };
+        let subgroup = ClusterGroup {
+            cluster_id,
+            moved_bindings: bindings,
+            cluster_source: slices.join("\n"),
+        };
+        split_cluster(subgroup, target, depth + 1, next_cluster_id, out);
+    }
+}
+
+/// Partition declarations into cohesive sub-modules by one level of community
+/// detection over the reference graph they form among themselves. Returns the
+/// groups (slices + bindings) in community order; a result of length ≤ 1 means
+/// the declarations are one indivisible community.
+fn semantic_subgroups<'a>(
+    decls: &[(&'a str, Vec<BindingName>)],
+) -> Vec<(Vec<&'a str>, BTreeSet<BindingName>)> {
+    let own: BTreeSet<BindingName> = decls
+        .iter()
+        .flat_map(|(_, bindings)| bindings.iter().cloned())
+        .collect();
+    let mut references: BTreeMap<BindingName, BTreeSet<BindingName>> = BTreeMap::new();
+    for (slice, bindings) in decls {
+        let refs: BTreeSet<BindingName> =
+            crate::runtime_source_scan::value_identifiers_in_source(slice)
+                .into_iter()
+                .map(BindingName::new)
+                .filter(|reference| own.contains(reference))
+                .collect();
+        for binding in bindings {
+            let mut binding_refs = refs.clone();
+            binding_refs.remove(binding);
+            references
+                .entry(binding.clone())
+                .or_default()
+                .extend(binding_refs);
+        }
+    }
+    let community = crate::island_clustering::cluster_bindings_by_references(&references);
+
+    let mut by_community: BTreeMap<usize, (Vec<&str>, BTreeSet<BindingName>)> = BTreeMap::new();
+    for (slice, bindings) in decls {
+        let id = bindings
+            .first()
+            .and_then(|binding| community.get(binding))
+            .copied()
+            .unwrap_or(usize::MAX);
+        let entry = by_community.entry(id).or_default();
+        entry.0.push(slice);
+        entry.1.extend(bindings.iter().cloned());
+    }
+    by_community.into_values().collect()
+}
+
+/// Greedy-pack whole groups (cohesive communities) into budget-sized bins,
+/// keeping each community intact. Small sibling communities combine into one
+/// file; a community that alone exceeds the budget becomes its own bin (the
+/// caller then recurses to subdivide it). Avoids the thousand-singleton-file
+/// explosion of emitting one file per community.
+fn pack_groups_by_size(
+    groups: Vec<(Vec<&str>, BTreeSet<BindingName>)>,
+    target: usize,
+) -> Vec<(Vec<&str>, BTreeSet<BindingName>)> {
+    let mut bins: Vec<(Vec<&str>, BTreeSet<BindingName>)> = Vec::new();
+    let mut slices: Vec<&str> = Vec::new();
+    let mut bindings: BTreeSet<BindingName> = BTreeSet::new();
+    let mut lines = 0;
+    for (group_slices, group_bindings) in groups {
+        let group_lines: usize = group_slices
+            .iter()
+            .map(|slice| estimated_emitted_lines(slice).max(1))
+            .sum();
+        if !slices.is_empty() && lines + group_lines > target {
+            bins.push((std::mem::take(&mut slices), std::mem::take(&mut bindings)));
+            lines = 0;
+        }
+        slices.extend(group_slices);
+        bindings.extend(group_bindings);
+        lines += group_lines;
+    }
+    if !slices.is_empty() {
+        bins.push((slices, bindings));
+    }
+    bins
+}
+
+/// Greedy size bin-packing of declarations in source order — the fallback for a
+/// flat blob with no recoverable internal module structure.
+fn bin_pack_by_size<'a>(
+    decls: &[(&'a str, Vec<BindingName>)],
+    target: usize,
+) -> Vec<(Vec<&'a str>, BTreeSet<BindingName>)> {
+    let mut bins: Vec<(Vec<&str>, BTreeSet<BindingName>)> = Vec::new();
+    let mut slices: Vec<&str> = Vec::new();
+    let mut bindings: BTreeSet<BindingName> = BTreeSet::new();
+    let mut lines = 0;
+    for (slice, decl_bindings) in decls {
+        let slice_lines = estimated_emitted_lines(slice).max(1);
+        if !slices.is_empty() && lines + slice_lines > target {
+            bins.push((std::mem::take(&mut slices), std::mem::take(&mut bindings)));
+            lines = 0;
+        }
+        slices.push(slice);
+        bindings.extend(decl_bindings.iter().cloned());
+        lines += slice_lines;
+    }
+    if !slices.is_empty() {
+        bins.push((slices, bindings));
+    }
+    bins
+}
+
 /// Assemble the source of an extracted cluster file: an import per source
 /// specifier for the external bindings the moved declarations reference, then
 /// the declarations, then a single re-export of every moved binding.
@@ -861,6 +1092,79 @@ var theApi = apiInit();
                 .remaining_source
                 .contains("class Unsafe extends IslandBase")
         );
+    }
+
+    #[test]
+    fn splits_oversized_cluster_into_size_bounded_subclusters() {
+        // Three 3-line functions with a 3-line budget: greedy packing yields one
+        // function per sub-cluster, fresh ids after the first, bindings preserved.
+        let group = ClusterGroup {
+            cluster_id: 0,
+            moved_bindings: bindings(&["a", "b", "c"]),
+            cluster_source:
+                "function a() {\n\treturn 1;\n}\nfunction b() {\n\treturn 2;\n}\nfunction c() {\n\treturn 3;\n}"
+                    .to_string(),
+        };
+        let mut next_id = 100;
+        let out = split_oversized_clusters(vec![group], 3, &mut next_id);
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert!(out.iter().all(|g| g.cluster_source.lines().count() <= 3));
+        assert_eq!(
+            out[0].cluster_id, 0,
+            "first sub-cluster keeps the original id"
+        );
+        assert_eq!(out[1].cluster_id, 100);
+        assert_eq!(out[2].cluster_id, 101);
+        let all: BTreeSet<BindingName> = out
+            .iter()
+            .flat_map(|g| g.moved_bindings.iter().cloned())
+            .collect();
+        assert_eq!(all, bindings(&["a", "b", "c"]), "every binding preserved");
+    }
+
+    #[test]
+    fn splits_oversized_cluster_along_semantic_communities() {
+        // Two reference-disjoint pairs: {a1↔a2} and {b1↔b2}. Community detection
+        // recovers the two cohesive groups, so the oversized cluster splits along
+        // them rather than by arbitrary source order.
+        let island = "function a1() { return a2(); }\n\
+                      function b1() { return b2(); }\n\
+                      function a2() { return a1; }\n\
+                      function b2() { return b1; }\n";
+        let group = ClusterGroup {
+            cluster_id: 0,
+            moved_bindings: bindings(&["a1", "a2", "b1", "b2"]),
+            cluster_source: island.to_string(),
+        };
+        let mut next_id = 100;
+        // Budget (target = 8*4/5 = 6) holds one pair (6 tokens) but not both (12).
+        let out = split_oversized_clusters(vec![group], 8, &mut next_id);
+        assert_eq!(out.len(), 2, "splits into the two communities: {out:?}");
+        // Each output file holds a cohesive pair, never a mix across communities.
+        for group in &out {
+            let has_a = group.moved_bindings.contains(&BindingName::new("a1"));
+            let has_b = group.moved_bindings.contains(&BindingName::new("b1"));
+            assert!(has_a != has_b, "community kept intact: {group:?}");
+            if has_a {
+                assert!(group.moved_bindings.contains(&BindingName::new("a2")));
+            } else {
+                assert!(group.moved_bindings.contains(&BindingName::new("b2")));
+            }
+        }
+    }
+
+    #[test]
+    fn keeps_within_budget_cluster_unsplit() {
+        let group = ClusterGroup {
+            cluster_id: 5,
+            moved_bindings: bindings(&["a"]),
+            cluster_source: "function a() { return 1; }".to_string(),
+        };
+        let mut next_id = 100;
+        let out = split_oversized_clusters(vec![group], 5000, &mut next_id);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].cluster_id, 5);
+        assert_eq!(next_id, 100, "no new ids consumed for an in-budget cluster");
     }
 
     #[test]

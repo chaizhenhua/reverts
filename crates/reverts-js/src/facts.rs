@@ -5,17 +5,19 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     Visit,
     ast::{
-        Argument, ArrowFunctionExpression, BindingPatternKind, BlockStatement, CallExpression,
-        ClassElement, Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind,
-        ExportNamedDeclaration, Expression, Function, FunctionBody, IdentifierReference,
-        ImportDeclaration, ImportExpression, ModuleExportName, NewExpression, Program, Statement,
-        StringLiteral,
+        Argument, ArrowFunctionExpression, AssignmentExpression, AssignmentTarget,
+        BindingPatternKind, BlockStatement, CallExpression, ClassElement, Declaration,
+        ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
+        Function, FunctionBody, IdentifierReference, ImportDeclaration, ImportExpression,
+        ModuleExportName, NewExpression, Program, SimpleAssignmentTarget, Statement, StringLiteral,
+        UpdateExpression,
     },
     visit::walk::{
-        walk_arrow_function_expression, walk_block_statement, walk_call_expression,
-        walk_export_all_declaration, walk_export_named_declaration, walk_expression, walk_function,
-        walk_function_body, walk_import_declaration, walk_import_expression, walk_new_expression,
-        walk_program, walk_string_literal,
+        walk_arrow_function_expression, walk_assignment_expression, walk_block_statement,
+        walk_call_expression, walk_export_all_declaration, walk_export_named_declaration,
+        walk_expression, walk_function, walk_function_body, walk_import_declaration,
+        walk_import_expression, walk_new_expression, walk_program, walk_string_literal,
+        walk_update_expression,
     },
 };
 use oxc_parser::Parser;
@@ -859,6 +861,166 @@ pub fn collect_top_level_class_eager_references(
     }
 
     Err(JsError::ParseFailed(errors))
+}
+
+/// Names assigned or updated anywhere in `source` as a plain identifier target
+/// (`x = …`, `x += …`, `x++`, `[x] = …` are covered via the identifier target;
+/// member writes like `x.y = …` are not — those mutate, they do not rebind). A
+/// binding that appears here cannot be relocated into an imported module, since
+/// ES imports are read-only.
+pub fn collect_reassigned_binding_names(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<BTreeSet<String>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+        let mut collector = ReassignedBindingCollector::default();
+        collector.visit_program(&parsed.program);
+        return Ok(collector.names);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+#[derive(Debug, Default)]
+struct ReassignedBindingCollector {
+    names: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for ReassignedBindingCollector {
+    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
+        if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &expression.left {
+            self.names.insert(identifier.name.as_str().to_string());
+        }
+        walk_assignment_expression(self, expression);
+    }
+    fn visit_update_expression(&mut self, expression: &UpdateExpression<'a>) {
+        if let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) = &expression.argument
+        {
+            self.names.insert(identifier.name.as_str().to_string());
+        }
+        walk_update_expression(self, expression);
+    }
+}
+
+/// A top-level `var`/`const`/`let` binding and what its initializer does AT
+/// EVALUATION time (when the declaration statement runs). `pure` is false if the
+/// eagerly-evaluated part performs an observable operation (call, `new`, `await`,
+/// assignment, update, tagged template) — such an initializer cannot be hoisted
+/// to a before-entry module without risking changed behavior. `eager_references`
+/// are the identifiers read at evaluation time; references inside the
+/// initializer's own function/arrow bodies are excluded (inert until called).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EagerBindingFact {
+    pub name: String,
+    pub pure: bool,
+    pub eager_references: BTreeSet<String>,
+}
+
+/// For each top-level single-identifier `var`/`const`/`let` declarator with an
+/// initializer, report its evaluation-time purity and references (see
+/// [`EagerBindingFact`]). Destructuring and initializer-less declarators are
+/// skipped (the relocation gate treats anything absent here as immovable).
+pub fn collect_top_level_eager_bindings(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<EagerBindingFact>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut out = Vec::new();
+        for statement in &parsed.program.body {
+            let Statement::VariableDeclaration(declaration) = statement else {
+                continue;
+            };
+            for declarator in &declaration.declarations {
+                let Some(name) = declarator.id.get_identifier() else {
+                    continue; // destructuring pattern → not handled
+                };
+                let Some(init) = &declarator.init else {
+                    continue; // no initializer → nothing to evaluate
+                };
+                let mut collector = EagerInitCollector::default();
+                collector.visit_expression(init);
+                out.push(EagerBindingFact {
+                    name: name.as_str().to_string(),
+                    pure: !collector.impure,
+                    eager_references: collector.references,
+                });
+            }
+        }
+        return Ok(out);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+/// Walks an initializer's EAGERLY-evaluated part: never descends into
+/// function/arrow bodies (inert until called) and flags any observable operation
+/// as impure, collecting the identifier references evaluated at declaration time.
+#[derive(Debug, Default)]
+struct EagerInitCollector {
+    references: BTreeSet<String>,
+    impure: bool,
+}
+
+impl<'a> Visit<'a> for EagerInitCollector {
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        self.references.insert(identifier.name.to_string());
+    }
+    fn visit_call_expression(&mut self, _call: &CallExpression<'a>) {
+        self.impure = true; // eager call: side effect / order dependence
+    }
+    fn visit_new_expression(&mut self, _expression: &NewExpression<'a>) {
+        self.impure = true;
+    }
+    fn visit_await_expression(&mut self, _expression: &oxc_ast::ast::AwaitExpression<'a>) {
+        self.impure = true;
+    }
+    fn visit_assignment_expression(
+        &mut self,
+        _expression: &oxc_ast::ast::AssignmentExpression<'a>,
+    ) {
+        self.impure = true;
+    }
+    fn visit_update_expression(&mut self, _expression: &oxc_ast::ast::UpdateExpression<'a>) {
+        self.impure = true;
+    }
+    fn visit_tagged_template_expression(
+        &mut self,
+        _expression: &oxc_ast::ast::TaggedTemplateExpression<'a>,
+    ) {
+        self.impure = true; // the tag is called eagerly
+    }
+    // Function and arrow bodies are inert until called — do not descend.
+    fn visit_function(&mut self, _function: &Function<'a>, _flags: ScopeFlags) {}
+    fn visit_arrow_function_expression(&mut self, _arrow: &ArrowFunctionExpression<'a>) {}
 }
 
 /// Collects the names of every identifier REFERENCE reached while visiting,

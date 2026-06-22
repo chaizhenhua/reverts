@@ -42,16 +42,16 @@ pub use rename_apply::FunctionParamRename;
 
 pub use errors::{JsError, ParseError, ParseGoal, Result, parse_error_message};
 pub use facts::{
-    ClassEagerReferences, IdentifierReadFact, LazyValueSubSnippet, PathBuilderCallFact,
-    SourceLocationRewriteFact, StatementSpanFact, StaticModuleSpecifierFact,
+    ClassEagerReferences, EagerBindingFact, IdentifierReadFact, LazyValueSubSnippet,
+    PathBuilderCallFact, SourceLocationRewriteFact, StatementSpanFact, StaticModuleSpecifierFact,
     StaticTemplateLiteralFact, StringLiteralFact, TopLevelStatementFact, TopLevelStatementKind,
     collect_dead_top_level_bindings, collect_exported_top_level_bindings,
     collect_file_url_source_location_rewrites, collect_identifier_read_facts,
-    collect_path_builder_calls, collect_static_module_specifiers,
+    collect_path_builder_calls, collect_reassigned_binding_names, collect_static_module_specifiers,
     collect_static_resource_specifiers, collect_static_template_literals, collect_string_literals,
-    collect_top_level_class_eager_references, collect_top_level_statement_facts,
-    collect_void_zero_expression_statements, free_identifiers_in_source, lazy_value_sub_snippets,
-    top_level_functions_writing_module_state,
+    collect_top_level_class_eager_references, collect_top_level_eager_bindings,
+    collect_top_level_statement_facts, collect_void_zero_expression_statements,
+    free_identifiers_in_source, lazy_value_sub_snippets, top_level_functions_writing_module_state,
 };
 pub use identifier::{
     is_ascii_identifier_continue, is_ascii_identifier_start, is_generated_placeholder_identifier,
