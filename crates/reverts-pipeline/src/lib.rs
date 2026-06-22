@@ -13,7 +13,8 @@ use std::fmt;
 use assets::{audit_required_assets, collect_emitted_assets};
 pub use assets::{collect_required_asset_references, collect_required_asset_references_from_rows};
 use audit::{
-    audit_binding_shape_consistency, audit_emit_plan_synthesis, audit_emitted_project_parse,
+    audit_binding_shape_consistency, audit_emit_plan_synthesis,
+    audit_emitted_named_export_consistency, audit_emitted_project_parse,
     audit_emitted_relative_import_targets, audit_module_file_sizes,
     audit_namespace_object_member_consistency, audit_required_sources,
 };
@@ -621,6 +622,8 @@ pub fn generate_project_from_prepared_with_options(
         &module_output_paths,
     ));
     mark_timing!("relative_import_audit");
+    audit.extend(audit_emitted_named_export_consistency(&emitted_project));
+    mark_timing!("named_export_audit");
     audit.extend(audit_binding_shape_consistency(&plan, &emitted_project));
     mark_timing!("binding_shape_audit");
     audit.extend(audit_namespace_object_member_consistency(

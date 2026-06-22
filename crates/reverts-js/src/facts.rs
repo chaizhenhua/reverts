@@ -8,9 +8,9 @@ use oxc_ast::{
         Argument, ArrowFunctionExpression, AssignmentExpression, AssignmentTarget,
         BindingPatternKind, BlockStatement, CallExpression, ClassElement, Declaration,
         ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
-        Function, FunctionBody, IdentifierReference, ImportDeclaration, ImportExpression,
-        ModuleExportName, NewExpression, Program, SimpleAssignmentTarget, Statement, StringLiteral,
-        UpdateExpression,
+        Function, FunctionBody, IdentifierReference, ImportDeclaration, ImportDeclarationSpecifier,
+        ImportExpression, ImportOrExportKind, ModuleExportName, NewExpression, Program,
+        SimpleAssignmentTarget, Statement, StringLiteral, UpdateExpression,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_assignment_expression, walk_block_statement,
@@ -560,6 +560,133 @@ fn collect_exported_local_names(program: &Program<'_>) -> BTreeSet<String> {
         }
     }
     exported
+}
+
+/// One `import { a, b as c } from '<specifier>'` edge: the source specifier and
+/// the PUBLIC (target-side) names it pulls — `a`/`b`, the wire names the target
+/// module must export. The importer's own locals (`c`) are irrelevant to export
+/// matching, so only the `imported` side is recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedImportEdge {
+    pub specifier: String,
+    pub imported_names: Vec<String>,
+}
+
+/// A module's cross-module named-import edges plus the public surface it
+/// exports, parsed from one emitted file. The audit pairs each importer's
+/// `imported_names` against the resolved target's `exported_names` to catch a
+/// dangling wire name (`No matching export`) before esbuild does.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ModuleImportExportSurface {
+    /// Every `import { … } from '…'` carrying at least one value named import.
+    pub named_imports: Vec<NamedImportEdge>,
+    /// Public names a consumer may import: declaration names, `export { … }`
+    /// (and `export { x as y } from '…'`) exported names, `export default`
+    /// (as `"default"`), and `export * as ns from '…'` (as `ns`).
+    pub exported_names: BTreeSet<String>,
+    /// A bare `export * from '…'` re-exports an opaque set, so an unlisted
+    /// imported name may still resolve through it. Verification is unsound for
+    /// such a target, so the audit treats it as exporting anything.
+    pub has_export_star: bool,
+}
+
+/// Parse `source` and collect its named-import edges and public export surface
+/// (see [`ModuleImportExportSurface`]). Only top-level statements are scanned —
+/// emitted modules carry imports/exports at module scope. Type-only imports and
+/// exports are ignored: they bind no runtime value, so they neither demand nor
+/// satisfy a runtime wire name.
+pub fn collect_module_import_export_surface(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<ModuleImportExportSurface> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+        return Ok(collect_import_export_surface(&parsed.program));
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+fn collect_import_export_surface(program: &Program<'_>) -> ModuleImportExportSurface {
+    let mut surface = ModuleImportExportSurface::default();
+    for statement in &program.body {
+        match statement {
+            Statement::ImportDeclaration(import) => {
+                // A type-only `import type { … }` binds nothing at runtime.
+                if import.import_kind == ImportOrExportKind::Type {
+                    continue;
+                }
+                let Some(specifiers) = &import.specifiers else {
+                    continue;
+                };
+                let mut imported_names = Vec::new();
+                for specifier in specifiers {
+                    // Only `{ name }` / `{ name as local }`; namespace and
+                    // default specifiers don't demand a specific wire name.
+                    if let ImportDeclarationSpecifier::ImportSpecifier(named) = specifier {
+                        if named.import_kind == ImportOrExportKind::Type {
+                            continue;
+                        }
+                        if let Some(name) = module_export_local_name(&named.imported) {
+                            imported_names.push(name.to_string());
+                        }
+                    }
+                }
+                if !imported_names.is_empty() {
+                    surface.named_imports.push(NamedImportEdge {
+                        specifier: import.source.value.as_str().to_string(),
+                        imported_names,
+                    });
+                }
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if export.export_kind == ImportOrExportKind::Type {
+                    continue;
+                }
+                if let Some(declaration) = &export.declaration {
+                    surface
+                        .exported_names
+                        .extend(export_declaration_binding_names(declaration));
+                }
+                for specifier in &export.specifiers {
+                    if specifier.export_kind == ImportOrExportKind::Type {
+                        continue;
+                    }
+                    // The PUBLIC name is the `exported` side, for both
+                    // `export { x }` and `export { local as Public } [from '…']`.
+                    if let Some(name) = module_export_local_name(&specifier.exported) {
+                        surface.exported_names.insert(name.to_string());
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(_) => {
+                surface.exported_names.insert("default".to_string());
+            }
+            Statement::ExportAllDeclaration(export) => match &export.exported {
+                Some(name) => {
+                    if let Some(text) = module_export_local_name(name) {
+                        surface.exported_names.insert(text.to_string());
+                    }
+                }
+                None => surface.has_export_star = true,
+            },
+            _ => {}
+        }
+    }
+    surface
 }
 
 fn module_export_local_name<'a>(name: &'a ModuleExportName<'a>) -> Option<&'a str> {
@@ -1746,5 +1873,84 @@ mod void_zero_collector_tests {
             .map(|fact| fact.value)
             .collect::<Vec<_>>();
         assert_eq!(values, vec!["./a.js", "./b.js", "./c", "./d.mjs"]);
+    }
+}
+
+#[cfg(test)]
+mod import_export_surface_tests {
+    use super::collect_module_import_export_surface;
+    use crate::errors::ParseGoal;
+
+    fn surface(source: &str) -> super::ModuleImportExportSurface {
+        collect_module_import_export_surface(source, None, ParseGoal::TypeScript).expect("parseable")
+    }
+
+    #[test]
+    fn named_imports_record_the_target_side_wire_name() {
+        let s = surface(
+            "import { a, b as local } from './m.js';\n\
+             import Default from './d.js';\n\
+             import * as ns from './n.js';\n\
+             import 'side-effect';\n",
+        );
+        assert_eq!(s.named_imports.len(), 1, "only the `{{ … }}` import is named");
+        let edge = &s.named_imports[0];
+        assert_eq!(edge.specifier, "./m.js");
+        // The PUBLIC (target) names — not the importer's local `local`.
+        assert_eq!(edge.imported_names, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn exported_surface_uses_public_names_and_flags_star() {
+        let s = surface(
+            "export const value = 1;\n\
+             export function fn() {}\n\
+             const local = 2;\n\
+             export { local as publicName };\n\
+             export { reexported } from './r.js';\n\
+             export * as nsExport from './ns.js';\n\
+             export default 3;\n",
+        );
+        for expected in [
+            "value",
+            "fn",
+            "publicName",
+            "reexported",
+            "nsExport",
+            "default",
+        ] {
+            assert!(
+                s.exported_names.contains(expected),
+                "missing {expected}: {:?}",
+                s.exported_names
+            );
+        }
+        // A bare `export * from` was absent here.
+        assert!(!s.has_export_star);
+        // The aliased export's LOCAL name is not the public surface.
+        assert!(!s.exported_names.contains("local"));
+    }
+
+    #[test]
+    fn bare_export_star_sets_the_opaque_flag() {
+        let s = surface("export * from './all.js';\nexport const named = 1;\n");
+        assert!(s.has_export_star);
+        assert!(s.exported_names.contains("named"));
+    }
+
+    #[test]
+    fn type_only_imports_and_exports_are_ignored() {
+        let s = surface(
+            "import type { T } from './t.js';\n\
+             import { value, type U } from './m.js';\n\
+             export type { Exported } from './e.js';\n\
+             export const runtime = 1;\n",
+        );
+        // The type-only import binds nothing at runtime; only the value import survives.
+        assert_eq!(s.named_imports.len(), 1);
+        assert_eq!(s.named_imports[0].imported_names, vec!["value".to_string()]);
+        // `Exported` is a type re-export — not part of the runtime surface.
+        assert!(!s.exported_names.contains("Exported"));
+        assert!(s.exported_names.contains("runtime"));
     }
 }

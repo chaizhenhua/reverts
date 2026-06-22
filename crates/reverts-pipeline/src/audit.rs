@@ -20,8 +20,9 @@ use reverts_emitter::EmittedProject;
 use reverts_input::InputBundle;
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
-    DeclarationCallability, ParseGoal, classify_top_level_bindings,
-    collect_static_module_specifiers, parse_error_message, parse_source,
+    DeclarationCallability, ModuleImportExportSurface, ParseGoal, classify_top_level_bindings,
+    collect_module_import_export_surface, collect_static_module_specifiers, parse_error_message,
+    parse_source,
 };
 use reverts_model::EnrichedProgram;
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
@@ -519,6 +520,85 @@ pub(crate) fn audit_emitted_relative_import_targets(
     audit
 }
 
+/// Verify every first-party NAMED import resolves to a matching export in its
+/// target module — esbuild's `No matching export`, caught deterministically
+/// in-pipeline. `audit_emitted_relative_import_targets` already proves the
+/// target FILE exists; this proves the imported wire NAME is actually exported
+/// there. A dangling name is our decompiler's defect (a wire rename collapsed an
+/// export without every importer following), so it blocks output (Error) with
+/// the exact importer / name / target rather than failing cryptically at bundle.
+///
+/// Conservative by construction — it never flags what it cannot prove dangling:
+///   * a target with a bare `export * from '…'` re-exports an opaque set, so it
+///     is treated as exporting anything;
+///   * a target that failed to parse yields no surface and is skipped;
+///   * a specifier that resolves to no emitted file is left to the file-target
+///     audit;
+///   * type-only imports/exports bind no runtime value and are ignored.
+pub(crate) fn audit_emitted_named_export_consistency(project: &EmittedProject) -> AuditReport {
+    let mut audit = AuditReport::default();
+    // Parse each emitted file once into its import/export surface.
+    let mut surfaces: BTreeMap<&str, ModuleImportExportSurface> = BTreeMap::new();
+    for file in &project.files {
+        if let Ok(surface) = collect_module_import_export_surface(
+            file.source.as_str(),
+            Some(Path::new(file.path.as_str())),
+            parse_goal_for_emitted_path(file.path.as_str()),
+        ) {
+            surfaces.insert(file.path.as_str(), surface);
+        }
+    }
+    let emitted_paths = project
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<BTreeSet<_>>();
+    for file in &project.files {
+        let Some(surface) = surfaces.get(file.path.as_str()) else {
+            continue;
+        };
+        for edge in &surface.named_imports {
+            let specifier = strip_query_and_fragment(edge.specifier.as_str());
+            if !specifier.starts_with('.') {
+                continue; // bare/package import — not a first-party module
+            }
+            if !specifier_requires_emitted_module_target(specifier) {
+                continue;
+            }
+            let candidates =
+                emitted_relative_import_target_candidates(file.path.as_str(), specifier);
+            let Some(target_path) = candidates
+                .iter()
+                .find(|candidate| emitted_paths.contains(candidate.as_str()))
+            else {
+                continue; // unresolved file target — the file-target audit owns it
+            };
+            let Some(target_surface) = surfaces.get(target_path.as_str()) else {
+                continue; // target failed to parse — cannot prove anything
+            };
+            if target_surface.has_export_star {
+                continue; // opaque re-export — an unlisted name may still resolve
+            }
+            for name in &edge.imported_names {
+                if !target_surface.exported_names.contains(name) {
+                    audit.push(
+                        AuditFinding::error(
+                            FindingCode::DanglingNamedImport,
+                            format!(
+                                "import {{ {name} }} from '{specifier}' has no matching export in \
+                                 target module '{target_path}'"
+                            ),
+                        )
+                        .with_module(file.path.clone())
+                        .with_binding(name.clone()),
+                    );
+                }
+            }
+        }
+    }
+    audit
+}
+
 fn source_origin_by_output_path(
     project: &EmittedProject,
     input: &InputBundle,
@@ -837,5 +917,92 @@ mod tests {
 
         let audit = super::audit_module_file_sizes(&plan);
         assert!(!audit.has(FindingCode::OversizedModuleFile));
+    }
+
+    fn project(files: &[(&str, &str)]) -> EmittedProject {
+        EmittedProject {
+            files: files
+                .iter()
+                .map(|(path, source)| EmittedFile {
+                    path: (*path).into(),
+                    source: (*source).into(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn named_import_with_matching_export_is_clean() {
+        // Shorthand, aliased export, and re-export-chain forms all resolve.
+        let project = project(&[
+            (
+                "modules/a.ts",
+                "import { b } from './b.js';\nimport { renamed } from './c.js';\nexport const a = b + renamed;",
+            ),
+            ("modules/b.ts", "export const b = 1;"),
+            // `export { local as renamed }` — the PUBLIC name is `renamed`.
+            ("modules/c.ts", "const local = 2;\nexport { local as renamed };"),
+        ]);
+
+        let audit = super::audit_emitted_named_export_consistency(&project);
+        assert!(!audit.has(FindingCode::DanglingNamedImport));
+    }
+
+    #[test]
+    fn named_import_without_matching_export_is_an_error() {
+        // `gone` is not exported by the target — esbuild's `No matching export`.
+        let project = project(&[
+            ("modules/a.ts", "import { gone } from './b.js';\nexport const a = gone;"),
+            ("modules/b.ts", "export const present = 1;"),
+        ]);
+
+        let audit = super::audit_emitted_named_export_consistency(&project);
+        assert!(audit.has(FindingCode::DanglingNamedImport));
+        assert!(audit.has_errors());
+        assert_eq!(audit.error_count(), 1);
+        let finding = &audit.findings()[0];
+        assert_eq!(finding.binding.as_deref(), Some("gone"));
+        assert_eq!(finding.module.as_deref(), Some("modules/a.ts"));
+    }
+
+    #[test]
+    fn export_star_target_suppresses_the_check() {
+        // A bare `export *` re-exports an opaque set, so an unlisted name may
+        // still resolve through it — never flag it.
+        let project = project(&[
+            ("modules/a.ts", "import { anything } from './b.js';\nexport const a = anything;"),
+            ("modules/b.ts", "export * from './deep.js';"),
+        ]);
+
+        let audit = super::audit_emitted_named_export_consistency(&project);
+        assert!(!audit.has(FindingCode::DanglingNamedImport));
+    }
+
+    #[test]
+    fn unresolved_file_target_is_left_to_the_file_audit() {
+        // The target file is not emitted at all — `audit_emitted_relative_import_targets`
+        // owns that, so this audit stays quiet (no double report).
+        let project = project(&[(
+            "modules/a.ts",
+            "import { x } from './missing.js';\nexport const a = x;",
+        )]);
+
+        let audit = super::audit_emitted_named_export_consistency(&project);
+        assert!(!audit.has(FindingCode::DanglingNamedImport));
+    }
+
+    #[test]
+    fn namespace_and_bare_imports_are_not_checked() {
+        // `import * as ns` and bare/package imports demand no specific wire name.
+        let project = project(&[
+            (
+                "modules/a.ts",
+                "import * as ns from './b.js';\nimport { readFile } from 'node:fs';\nexport const a = ns;",
+            ),
+            ("modules/b.ts", "export const only = 1;"),
+        ]);
+
+        let audit = super::audit_emitted_named_export_consistency(&project);
+        assert!(!audit.has(FindingCode::DanglingNamedImport));
     }
 }

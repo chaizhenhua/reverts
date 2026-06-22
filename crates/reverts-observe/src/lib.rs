@@ -70,6 +70,15 @@ pub enum FindingCode {
     /// unsplit. Surfaced as a Warning (the output still compiles and runs) so
     /// the cause can be analyzed and a further split implemented in-pipeline.
     OversizedModuleFile,
+    /// An emitted module imports a NAMED binding from a first-party sibling
+    /// module that does not export that name — esbuild's `No matching export`.
+    /// The target file resolves (so `UnresolvableBareImport` stays quiet), but
+    /// the wire name is dangling: typically a semantic-name wire rename
+    /// collapsed an export without every importer following in lockstep. The
+    /// bundle would fail to build, so this blocks output (Error) with the exact
+    /// importer / name / target instead of leaving it for esbuild to surface
+    /// cryptically.
+    DanglingNamedImport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

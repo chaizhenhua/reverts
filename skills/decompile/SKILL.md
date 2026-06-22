@@ -322,7 +322,13 @@ Renaming a module export's **wire** name (the all-or-nothing collapse of
 including the entry island's own direct and packed source-module imports. If a
 named build ever fails to bundle with `No matching export … for import 'Orig'`,
 that is a propagation bug in the pipeline (an importer kept the stale wire name),
-not something to hand-fix in the output — file it and fix the mechanism.
+not something to hand-fix in the output — file it and fix the mechanism. The
+pipeline now guards this class deterministically: `audit_emitted_named_export_consistency`
+(`DanglingNamedImport`, **Error**) resolves every first-party named import to its
+target module and blocks output if the imported wire name is not actually
+exported there — so a propagation regression fails in-pipeline with the exact
+importer / name / target instead of cryptically at esbuild. Targets with a bare
+`export *` are treated as opaque (never falsely flagged).
 
 ## Package matching & externalization (third-party)
 
@@ -647,6 +653,7 @@ regeneration, not a generated-output hand edit. Full procedures live in
 | Runtime-context isolation | Multi-context profiles such as browser-extension/electron | Generated file imports from a source unit in another runtime isolate |
 | Package misclassification scan | Every generated output with package imports | App-owned symbol appears as a property of `__reverts_pkg_*` |
 | Oversized module file | Every generated output | A generated file exceeds the line budget (`OversizedModuleFile` audit warning, budget 10k lines) |
+| Dangling named import | Every generated output | A first-party `import { Orig }` has no matching export in its target module (`DanglingNamedImport` audit **error**, blocks output) — esbuild's `No matching export`, caught in-pipeline |
 
 Use MCP/DB-backed metadata and AST or structured parsing for these audits.
 Do not replace them with grep over generated `.ts` files.
