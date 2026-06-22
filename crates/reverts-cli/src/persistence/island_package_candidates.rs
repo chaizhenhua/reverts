@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn accepted_candidates_round_trip_and_rejected_are_excluded() {
-        let mut connection = Connection::open_in_memory().unwrap();
+        let mut connection = Connection::open_in_memory().expect("open db");
         persist_island_package_candidate(
             &mut connection,
             7,
@@ -161,7 +161,7 @@ mod tests {
             },
             IslandPackageCandidateStatus::Accepted,
         )
-        .unwrap();
+        .expect("persist");
         persist_island_package_candidate(
             &mut connection,
             7,
@@ -172,23 +172,23 @@ mod tests {
             },
             IslandPackageCandidateStatus::Rejected,
         )
-        .unwrap();
+        .expect("persist");
 
-        let accepted = load_accepted_island_package_candidates(&connection, 7).unwrap();
+        let accepted = load_accepted_island_package_candidates(&connection, 7).expect("load");
         assert_eq!(accepted.len(), 1, "only accepted: {accepted:?}");
         assert_eq!(accepted[0].package_name, "zod");
         assert_eq!(accepted[0].version_hint.as_deref(), Some("^3.25.64"));
         // Other projects see nothing.
         assert!(
             load_accepted_island_package_candidates(&connection, 8)
-                .unwrap()
+                .expect("load")
                 .is_empty()
         );
     }
 
     #[test]
     fn re_accepting_updates_version_and_status() {
-        let mut connection = Connection::open_in_memory().unwrap();
+        let mut connection = Connection::open_in_memory().expect("open db");
         let mut candidate = IslandPackageCandidate {
             package_name: "react".to_string(),
             version_hint: None,
@@ -200,10 +200,10 @@ mod tests {
             &candidate,
             IslandPackageCandidateStatus::Rejected,
         )
-        .unwrap();
+        .expect("persist");
         assert!(
             load_accepted_island_package_candidates(&connection, 1)
-                .unwrap()
+                .expect("load")
                 .is_empty()
         );
 
@@ -214,18 +214,18 @@ mod tests {
             &candidate,
             IslandPackageCandidateStatus::Accepted,
         )
-        .unwrap();
-        let accepted = load_accepted_island_package_candidates(&connection, 1).unwrap();
+        .expect("persist");
+        let accepted = load_accepted_island_package_candidates(&connection, 1).expect("load");
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].version_hint.as_deref(), Some("18.2.0"));
     }
 
     #[test]
     fn load_on_fresh_database_is_empty() {
-        let connection = Connection::open_in_memory().unwrap();
+        let connection = Connection::open_in_memory().expect("open db");
         assert!(
             load_accepted_island_package_candidates(&connection, 1)
-                .unwrap()
+                .expect("load")
                 .is_empty()
         );
     }

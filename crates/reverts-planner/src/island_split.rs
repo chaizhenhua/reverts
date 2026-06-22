@@ -325,7 +325,8 @@ pub(crate) fn externalize_island_packages(
     if packages.is_empty() {
         return None;
     }
-    let facts = collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript).ok()?;
+    let facts =
+        collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript).ok()?;
 
     // True identifier READS across the island (name + span), excluding property
     // keys, member accesses, and string contents — so the safety gate cannot be
@@ -356,8 +357,11 @@ pub(crate) fn externalize_island_packages(
             if fact.bindings.is_empty() {
                 continue;
             }
-            let names: Vec<BindingName> =
-                fact.bindings.iter().map(|n| BindingName::new(n.as_str())).collect();
+            let names: Vec<BindingName> = fact
+                .bindings
+                .iter()
+                .map(|n| BindingName::new(n.as_str()))
+                .collect();
             if names
                 .iter()
                 .all(|binding| package.member_bindings.contains(binding))
@@ -378,9 +382,11 @@ pub(crate) fn externalize_island_packages(
         // An internal member is referenced outside the package iff it has an
         // identifier READ whose span lies outside every removed statement range.
         let referenced_outside = internal.iter().any(|binding| {
-            reads_by_name
-                .get(binding.as_str())
-                .is_some_and(|spans| spans.iter().any(|span| !span_within_any(*span, &package_ranges)))
+            reads_by_name.get(binding.as_str()).is_some_and(|spans| {
+                spans
+                    .iter()
+                    .any(|span| !span_within_any(*span, &package_ranges))
+            })
         });
         if !all_covered || referenced_outside || package_ranges.is_empty() {
             continue; // leave this package inlined — not provably safe
@@ -447,7 +453,12 @@ mod tests {
         names.iter().map(|name| BindingName::new(*name)).collect()
     }
 
-    fn externalization(specifier: &str, init: &str, exports: &str, members: &[&str]) -> IslandPackageExternalization {
+    fn externalization(
+        specifier: &str,
+        init: &str,
+        exports: &str,
+        members: &[&str],
+    ) -> IslandPackageExternalization {
         IslandPackageExternalization {
             import_specifier: specifier.to_string(),
             version: "1.0.0".to_string(),
@@ -467,7 +478,12 @@ mod tests {
                       var consumer = iIdx();\n";
         let result = externalize_island_packages(
             island,
-            &[externalization("pkg-x", "iIdx", "eIdx", &["eA", "gA", "iA", "eIdx", "gIdx", "iIdx"])],
+            &[externalization(
+                "pkg-x",
+                "iIdx",
+                "eIdx",
+                &["eA", "gA", "iA", "eIdx", "gIdx", "iIdx"],
+            )],
         )
         .expect("should externalize");
 
@@ -479,12 +495,28 @@ mod tests {
             ]
         );
         // All unit declarations removed; the consumer survives.
-        assert!(!result.source.contains("function iA()"), "{}", result.source);
+        assert!(
+            !result.source.contains("function iA()"),
+            "{}",
+            result.source
+        );
         assert!(!result.source.contains("var eA = {}"), "{}", result.source);
-        assert!(result.source.contains("var consumer = iIdx();"), "{}", result.source);
+        assert!(
+            result.source.contains("var consumer = iIdx();"),
+            "{}",
+            result.source
+        );
         // Barrel init shim returns the imported namespace.
-        assert!(result.source.contains("function iIdx() { return eIdx; }"), "{}", result.source);
-        assert!(result.externalized_bindings.contains(&BindingName::new("iA")));
+        assert!(
+            result.source.contains("function iIdx() { return eIdx; }"),
+            "{}",
+            result.source
+        );
+        assert!(
+            result
+                .externalized_bindings
+                .contains(&BindingName::new("iA"))
+        );
     }
 
     #[test]
@@ -496,9 +528,17 @@ mod tests {
                       var direct = iA();\n";
         let result = externalize_island_packages(
             island,
-            &[externalization("pkg-x", "iIdx", "eIdx", &["eA", "gA", "iA", "eIdx", "gIdx", "iIdx"])],
+            &[externalization(
+                "pkg-x",
+                "iIdx",
+                "eIdx",
+                &["eA", "gA", "iA", "eIdx", "gIdx", "iIdx"],
+            )],
         );
-        assert!(result.is_none(), "internal member referenced outside -> not safe");
+        assert!(
+            result.is_none(),
+            "internal member referenced outside -> not safe"
+        );
     }
 
     #[test]
@@ -532,8 +572,15 @@ var theApi = apiInit();
                 "apiInit",
                 "apiExports",
                 &[
-                    "diagExports", "diagGuard", "diagInit", "ctxExports", "ctxGuard", "ctxInit",
-                    "apiExports", "apiGuard", "apiInit",
+                    "diagExports",
+                    "diagGuard",
+                    "diagInit",
+                    "ctxExports",
+                    "ctxGuard",
+                    "ctxInit",
+                    "apiExports",
+                    "apiGuard",
+                    "apiInit",
                 ],
             )],
         )
@@ -573,7 +620,8 @@ var theApi = apiInit();
                       var keep = f1();\n\
                       function other() { return 2; }\n";
         let extraction =
-            extract_hoistable_cluster(island, &bindings(&["f1", "C1"]), &BTreeSet::new()).unwrap();
+            extract_hoistable_cluster(island, &bindings(&["f1", "C1"]), &BTreeSet::new())
+                .expect("hoistable cluster should extract");
 
         // Only the function declaration moves; the class stays put.
         assert_eq!(extraction.moved_bindings, bindings(&["f1"]));
@@ -604,7 +652,7 @@ var theApi = apiInit();
                       function helper() { return na; }\n";
         let extraction =
             extract_hoistable_cluster(island, &bindings(&["B", "helper"]), &BTreeSet::new())
-                .unwrap();
+                .expect("hoistable cluster should extract");
         assert_eq!(extraction.moved_bindings, bindings(&["helper"]));
         assert!(extraction.cluster_source.contains("function helper()"));
         assert!(!extraction.cluster_source.contains("class B"));
@@ -643,9 +691,9 @@ var theApi = apiInit();
         assert!(file.contains("function f1()"));
         assert!(file.contains("export { f1 };"));
         // Import precedes the declaration which precedes the export.
-        let import_at = file.find("import { helper }").unwrap();
-        let decl_at = file.find("function f1").unwrap();
-        let export_at = file.find("export { f1 }").unwrap();
+        let import_at = file.find("import { helper }").expect("import line present");
+        let decl_at = file.find("function f1").expect("declaration present");
+        let export_at = file.find("export { f1 }").expect("export line present");
         assert!(import_at < decl_at && decl_at < export_at);
     }
 
@@ -668,14 +716,14 @@ var theApi = apiInit();
             &binding_to_cluster(&[("a1", 0), ("a2", 0), ("b1", 1)]),
             &BTreeSet::new(),
         )
-        .unwrap();
+        .expect("island should partition into clusters");
 
         assert_eq!(partition.clusters.len(), 2);
         let c0 = partition
             .clusters
             .iter()
             .find(|g| g.cluster_id == 0)
-            .unwrap();
+            .expect("cluster 0 present");
         assert_eq!(c0.moved_bindings, bindings(&["a1", "a2"]));
         assert!(c0.cluster_source.contains("function a1()"));
         assert!(c0.cluster_source.contains("function a2()"));
@@ -683,7 +731,7 @@ var theApi = apiInit();
             .clusters
             .iter()
             .find(|g| g.cluster_id == 1)
-            .unwrap();
+            .expect("cluster 1 present");
         assert_eq!(c1.moved_bindings, bindings(&["b1"]));
         // Side effect and order-dependent var stay; functions are gone.
         assert!(

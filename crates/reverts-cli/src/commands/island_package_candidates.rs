@@ -269,7 +269,7 @@ mod tests {
              reject\tleft-pad\t-\tweak\n\
              \n",
         )
-        .unwrap();
+        .expect("parse batch");
         assert_eq!(proposals.len(), 2);
         assert_eq!(proposals[0].candidate.package_name, "zod");
         assert_eq!(

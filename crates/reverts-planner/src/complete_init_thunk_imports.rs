@@ -147,7 +147,7 @@ mod tests {
     use super::*;
     use crate::plan::PlannedFile;
 
-    fn body_of<'a>(plan: &'a EmitPlan, path: &str) -> String {
+    fn body_of(plan: &EmitPlan, path: &str) -> String {
         plan.files
             .iter()
             .find(|file| file.path == path)

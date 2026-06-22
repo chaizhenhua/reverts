@@ -185,20 +185,20 @@ mod tests {
                 "SELECT binding_name, package_name FROM package_island_anchors \
                  WHERE project_id = ?1 ORDER BY source_file_id, binding_name",
             )
-            .unwrap();
+            .expect("prepare");
         statement
             .query_map(params![project_id], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
+            .expect("query")
             .map(Result::unwrap)
             .collect()
     }
 
     #[test]
     fn persists_island_anchors_scoped_to_their_project() {
-        let mut connection = Connection::open_in_memory().unwrap();
+        let mut connection = Connection::open_in_memory().expect("open db");
         let anchors = vec![anchor(1, "Cb", "zod"), anchor(1, "Dx", "zod")];
 
-        let written = persist_island_anchors(&mut connection, 7, &anchors).unwrap();
+        let written = persist_island_anchors(&mut connection, 7, &anchors).expect("persist");
         assert_eq!(written, 2);
 
         assert_eq!(
@@ -214,17 +214,17 @@ mod tests {
 
     #[test]
     fn re_persisting_supersedes_the_previous_set() {
-        let mut connection = Connection::open_in_memory().unwrap();
+        let mut connection = Connection::open_in_memory().expect("open db");
         persist_island_anchors(
             &mut connection,
             7,
             &[anchor(1, "Cb", "zod"), anchor(1, "Dx", "zod")],
         )
-        .unwrap();
+        .expect("persist");
 
         // A re-run with a smaller, corrected set fully replaces the prior rows.
-        let written =
-            persist_island_anchors(&mut connection, 7, &[anchor(1, "Cb", "semver")]).unwrap();
+        let written = persist_island_anchors(&mut connection, 7, &[anchor(1, "Cb", "semver")])
+            .expect("persist");
         assert_eq!(written, 1);
 
         assert_eq!(

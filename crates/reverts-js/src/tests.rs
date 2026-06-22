@@ -3013,8 +3013,8 @@ function drainLen() { const n = queue.length; queue = []; return n; }
 function pure(a) { let b = a; b = b + 1; return b; }
 function recurse(n) { if (n > 0) recurse(n - 1); }
 ";
-    let pinned =
-        top_level_functions_writing_module_state(source, None, ParseGoal::TypeScript).unwrap();
+    let pinned = top_level_functions_writing_module_state(source, None, ParseGoal::TypeScript)
+        .expect("module-state analysis should parse the fixture");
     // `enqueue` writes module-scope `count`; `drainLen` reassigns module-scope
     // `queue`. Both mutate shared state and must be pinned.
     assert!(pinned.contains("enqueue"), "enqueue writes module `count`");
