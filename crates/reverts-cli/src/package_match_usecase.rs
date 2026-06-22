@@ -196,7 +196,36 @@ pub(crate) fn match_packages_from_connection(
     // island. They never become model modules, so the per-module pipeline above
     // never sees them; this anchors them per-binding against the same package
     // corpus. Skipped when there is no corpus to match against.
-    let island_anchors = compute_island_anchors(island_rows, &island_corpus);
+    //
+    // Honor `--package-name`: like the cascade pass, restrict the island corpus to
+    // the requested packages so an incremental re-match anchors the island against
+    // ONLY those sources. The full corpus is hundreds of no-module library sources;
+    // matching every island CJS unit against all of them is the second per-run
+    // bottleneck (tens of minutes) that gates incremental externalization.
+    // Filter by the LITERAL `--package-name` request, not the expanded
+    // `package_names` scope (which pulls in the whole graph component — e.g. all
+    // already-accepted island candidates). The cascade tolerates the wide scope,
+    // but island anchoring is O(island_units × corpus) and must see only the
+    // requested package's sources for an incremental run to be fast.
+    let requested_island_packages: BTreeSet<String> =
+        args.package_names.iter().cloned().collect();
+    let scoped_island_corpus: Vec<PackageSource> = if requested_island_packages.is_empty() {
+        island_corpus
+    } else {
+        island_corpus
+            .iter()
+            .filter(|source| requested_island_packages.contains(&source.package_name))
+            .cloned()
+            .collect()
+    };
+    if std::env::var_os("REVERTS_DEBUG_ISLAND_PKG").is_some() {
+        eprintln!(
+            "match-packages: island anchoring corpus scoped {} source(s) (requested={})",
+            scoped_island_corpus.len(),
+            requested_island_packages.len()
+        );
+    }
+    let island_anchors = compute_island_anchors(island_rows, &scoped_island_corpus);
     if !island_anchors.is_empty() {
         eprintln!(
             "match-packages: anchored {} eager entry-island binding(s) to packages",
