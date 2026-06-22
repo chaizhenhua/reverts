@@ -18,12 +18,14 @@ pub(crate) fn write_accepted_project(
     assets: &[EmittedAsset],
     output: &Path,
     runtime_dependencies: &[RuntimeDependency],
+    source_root: Option<&str>,
 ) -> Result<usize, CliRunError> {
     write_project_files(
         project.files.as_slice(),
         assets,
         output,
         runtime_dependencies,
+        source_root,
     )
 }
 
@@ -34,7 +36,24 @@ pub(crate) fn write_emitted_project(
     output: &Path,
     runtime_dependencies: &[RuntimeDependency],
 ) -> Result<usize, CliRunError> {
-    write_project_files(files, assets, output, runtime_dependencies)
+    write_project_files(files, assets, output, runtime_dependencies, None)
+}
+
+#[cfg(test)]
+pub(crate) fn write_emitted_project_with_source_root(
+    files: &[EmittedFile],
+    assets: &[EmittedAsset],
+    output: &Path,
+    runtime_dependencies: &[RuntimeDependency],
+    source_root: &str,
+) -> Result<usize, CliRunError> {
+    write_project_files(
+        files,
+        assets,
+        output,
+        runtime_dependencies,
+        Some(source_root),
+    )
 }
 
 fn write_project_files(
@@ -42,16 +61,32 @@ fn write_project_files(
     assets: &[EmittedAsset],
     output: &Path,
     runtime_dependencies: &[RuntimeDependency],
+    source_root: Option<&str>,
 ) -> Result<usize, CliRunError> {
     fs::create_dir_all(output).map_err(|source| CliRunError::WriteOutput {
         path: output.to_path_buf(),
         source,
     })?;
     let has_cli_entrypoint = files.iter().any(|file| file.path == "cli.ts");
-    write_typescript_project_scaffold(output, runtime_dependencies, has_cli_entrypoint, assets)?;
+    write_typescript_project_scaffold(
+        output,
+        runtime_dependencies,
+        has_cli_entrypoint,
+        assets,
+        source_root,
+    )?;
 
+    // The modern layout relocates every generated source file under
+    // `<source_root>/`. A uniform prefix preserves the relative paths *between*
+    // source files, so the import specifiers the planner baked in stay valid;
+    // assets and scaffold (package.json/tsconfig) remain at the output root and
+    // are referenced via package resolution, not relative source paths.
     for file in files {
-        let path = checked_output_path(output, file.path.as_str())?;
+        let relative = match source_root {
+            Some(root) => format!("{root}/{}", file.path),
+            None => file.path.clone(),
+        };
+        let path = checked_output_path(output, relative.as_str())?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| CliRunError::WriteOutput {
                 path: parent.to_path_buf(),
@@ -86,29 +121,138 @@ fn write_typescript_project_scaffold(
     runtime_dependencies: &[RuntimeDependency],
     has_cli_entrypoint: bool,
     assets: &[EmittedAsset],
+    source_root: Option<&str>,
 ) -> Result<(), CliRunError> {
     let package_json = typescript_package_json(
         runtime_dependencies,
         has_cli_entrypoint,
         !assets.is_empty(),
         assets,
+        source_root,
     );
     write_project_file(output, "package.json", package_json.as_str())?;
     write_package_compat_shims(output, runtime_dependencies)?;
     if should_write_legacy_peer_deps_npmrc(runtime_dependencies) {
         write_project_file(output, ".npmrc", TYPESCRIPT_NPMRC)?;
     }
-    write_project_file(output, "tsconfig.json", TYPESCRIPT_TSCONFIG_JSON)?;
-    write_project_file(
-        output,
-        "tsconfig.runtime.json",
-        TYPESCRIPT_RUNTIME_TSCONFIG_JSON,
-    )?;
+    match source_root {
+        Some(root) => {
+            write_project_file(output, "tsconfig.json", &modern_tsconfig_json(root))?;
+            write_project_file(
+                output,
+                "tsconfig.runtime.json",
+                &modern_runtime_tsconfig_json(root),
+            )?;
+            write_project_file(output, ".gitignore", TYPESCRIPT_GITIGNORE)?;
+            write_project_file(
+                output,
+                "README.md",
+                &project_readme(root, has_cli_entrypoint),
+            )?;
+        }
+        None => {
+            write_project_file(output, "tsconfig.json", TYPESCRIPT_TSCONFIG_JSON)?;
+            write_project_file(
+                output,
+                "tsconfig.runtime.json",
+                TYPESCRIPT_RUNTIME_TSCONFIG_JSON,
+            )?;
+        }
+    }
     if !assets.is_empty() {
         let copy_assets = typescript_copy_assets_script(assets);
         write_project_file(output, "scripts/copy-assets.mjs", copy_assets.as_str())?;
     }
     Ok(())
+}
+
+/// Modern base tsconfig: `NodeNext` resolution (the recovered code runs on Node
+/// ESM and uses explicit `.js` import specifiers, which `bundler` resolution
+/// tolerates but `NodeNext` actually models), scoped to the source root.
+fn modern_tsconfig_json(source_root: &str) -> String {
+    format!(
+        r#"{{
+  "compilerOptions": {{
+    "allowJs": false,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "jsx": "react-jsx",
+    "lib": [
+      "es2024",
+      "dom",
+      "esnext"
+    ],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "noImplicitAny": false,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "target": "ES2022"
+  }},
+  "include": [
+    "{source_root}/**/*.ts",
+    "{source_root}/**/*.tsx",
+    "{source_root}/**/*.d.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
+}}
+"#
+    )
+}
+
+/// Modern build tsconfig: emits `<source_root>/` → `dist/` so `bin`/`start`
+/// resolve `dist/cli.js`.
+fn modern_runtime_tsconfig_json(source_root: &str) -> String {
+    format!(
+        r#"{{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {{
+    "declaration": false,
+    "declarationMap": false,
+    "emitDeclarationOnly": false,
+    "noEmit": false,
+    "noEmitOnError": true,
+    "outDir": "dist",
+    "rootDir": "{source_root}",
+    "sourceMap": false
+  }}
+}}
+"#
+    )
+}
+
+const TYPESCRIPT_GITIGNORE: &str = "node_modules/\ndist/\n.reverts/\n";
+
+fn project_readme(source_root: &str, has_cli_entrypoint: bool) -> String {
+    let entry = if has_cli_entrypoint {
+        format!("- Entry: `{source_root}/cli.ts` → built to `dist/cli.js` (`npm start`).\n")
+    } else {
+        String::new()
+    };
+    format!(
+        "# Decompiled TypeScript project\n\n\
+Generated by ReverTS from a JavaScript bundle. Recovered source lives under \
+`{source_root}/`; build output goes to `dist/`; pipeline metadata \
+(`symbol-index.json`, `binding-name-index.json`) is in `.reverts/`.\n\n\
+## Build & run\n\n\
+```bash\n\
+npm install\n\
+npm run build   # tsc -> dist/\n\
+npm start       # run the built entry\n\
+```\n\n\
+{entry}\n\
+## Validation\n\n\
+End-to-end equivalence against the original bundle lives in `e2e/reverts/` \
+(`cd e2e/reverts && npm install && npm test`). Regeneration preserves that \
+directory.\n\n\
+> Do not hand-edit recovered files to fix bugs — change names through the \
+ReverTS naming channels and regenerate.\n"
+    )
 }
 
 // Generated projects preserve the package versions proven from the bundled
@@ -175,6 +319,7 @@ fn typescript_package_json(
     has_cli_entrypoint: bool,
     has_assets: bool,
     assets: &[EmittedAsset],
+    source_root: Option<&str>,
 ) -> String {
     let local_private_packages = local_private_package_dependencies(assets);
     let mut dependencies = serde_json::Map::new();
@@ -240,6 +385,16 @@ fn typescript_package_json(
     if has_cli_entrypoint {
         package["bin"] = serde_json::json!({
             "reverts-output": "./dist/cli.js",
+        });
+    }
+    // Modern layout advertises an `exports` map so consumers resolve the built
+    // entry through the package surface rather than reaching into `dist/`.
+    if source_root.is_some() && has_cli_entrypoint {
+        package["exports"] = serde_json::json!({
+            ".": {
+                "import": "./dist/cli.js",
+                "types": "./dist/cli.d.ts"
+            }
         });
     }
     serde_json::to_string_pretty(&package).expect("package.json scaffold is serializable") + "\n"

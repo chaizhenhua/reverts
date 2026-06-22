@@ -27,13 +27,13 @@ pub use commands::full_inventory::{full_inventory_json, full_inventory_report};
 pub use commands::generate_project::GenerateProjectV2Args;
 pub use commands::identifier_inventory::{identifier_inventory_json, identifier_inventory_report};
 pub use commands::import_unpacked::{ImportUnpackedOutcome, import_unpacked_to_sqlite};
+pub use commands::island_package_candidates::{
+    IslandPackageCandidatesArgs, island_package_candidates_from_sqlite,
+};
 pub use commands::match_modules::MatchModulesRecallArgs;
 pub use commands::module_classify::{
     ModuleClassification, ModuleClassificationRow, ModuleClassifyOutcome,
     excluded_module_ids_from_sqlite, module_classify_from_sqlite,
-};
-pub use commands::island_package_candidates::{
-    IslandPackageCandidatesArgs, island_package_candidates_from_sqlite,
 };
 pub use commands::module_names::{ModuleNamesArgs, module_names_from_sqlite};
 pub use commands::naming_plan::naming_plan_json;
@@ -292,9 +292,11 @@ impl ClapCli {
             Some(ClapCommand::ModuleNames(args)) => {
                 CliCommand::ModuleNames(commands::module_names::validate_args(args)?)
             }
-            Some(ClapCommand::IslandPackageCandidates(args)) => CliCommand::IslandPackageCandidates(
-                commands::island_package_candidates::validate_args(args)?,
-            ),
+            Some(ClapCommand::IslandPackageCandidates(args)) => {
+                CliCommand::IslandPackageCandidates(
+                    commands::island_package_candidates::validate_args(args)?,
+                )
+            }
             Some(ClapCommand::MatchModulesRecall(args)) => CliCommand::MatchModulesRecall(args),
             None => CliCommand::Help(HelpTopic::TopLevel),
         })
@@ -435,9 +437,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::NamingPlan(args) => commands::naming_plan::run(args),
         CliCommand::ModuleClassify(args) => commands::module_classify::run(args),
         CliCommand::ModuleNames(args) => commands::module_names::run(args),
-        CliCommand::IslandPackageCandidates(args) => {
-            commands::island_package_candidates::run(args)
-        }
+        CliCommand::IslandPackageCandidates(args) => commands::island_package_candidates::run(args),
         CliCommand::MatchModulesRecall(args) => commands::match_modules::run(args),
     }
 }

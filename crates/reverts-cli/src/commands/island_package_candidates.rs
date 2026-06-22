@@ -134,11 +134,18 @@ pub fn island_package_candidates_from_sqlite(
         .map_err(|source| CliRunError::IslandPackageCandidates(source.to_string()))?;
 
     if args.list {
-        let listed = load_accepted_island_package_candidates(&connection, i64::from(args.project_id))
-            .map_err(|source| CliRunError::IslandPackageCandidates(source.to_string()))?
-            .into_iter()
-            .map(|candidate| (candidate.package_name, candidate.version_hint, candidate.evidence))
-            .collect();
+        let listed =
+            load_accepted_island_package_candidates(&connection, i64::from(args.project_id))
+                .map_err(|source| CliRunError::IslandPackageCandidates(source.to_string()))?
+                .into_iter()
+                .map(|candidate| {
+                    (
+                        candidate.package_name,
+                        candidate.version_hint,
+                        candidate.evidence,
+                    )
+                })
+                .collect();
         return Ok(IslandPackageCandidatesOutcome {
             listed,
             requested_changes: 0,
@@ -172,9 +179,7 @@ pub fn island_package_candidates_from_sqlite(
     })
 }
 
-fn collect_proposals(
-    args: &IslandPackageCandidatesArgs,
-) -> Result<Vec<Proposal>, CliRunError> {
+fn collect_proposals(args: &IslandPackageCandidatesArgs) -> Result<Vec<Proposal>, CliRunError> {
     let mut proposals = Vec::new();
     for name in &args.accepts {
         proposals.push(Proposal {
@@ -267,7 +272,10 @@ mod tests {
         .unwrap();
         assert_eq!(proposals.len(), 2);
         assert_eq!(proposals[0].candidate.package_name, "zod");
-        assert_eq!(proposals[0].candidate.version_hint.as_deref(), Some("^3.25.64"));
+        assert_eq!(
+            proposals[0].candidate.version_hint.as_deref(),
+            Some("^3.25.64")
+        );
         assert_eq!(proposals[0].status, IslandPackageCandidateStatus::Accepted);
         assert_eq!(proposals[1].candidate.package_name, "left-pad");
         assert!(proposals[1].candidate.version_hint.is_none());

@@ -30,6 +30,13 @@ pub struct GenerateProjectV2Args {
     pub output: PathBuf,
     #[arg(long, value_parser = parse_project_id)]
     pub project_id: u32,
+    /// Emit all generated source under this directory (e.g. `src`) for a modern
+    /// TypeScript project layout: `moduleResolution: NodeNext`, a `package.json`
+    /// `exports` map, README + `.gitignore`, and pipeline metadata
+    /// (`symbol-index.json`, `binding-name-index.json`) relocated to `.reverts/`
+    /// so the source tree stays clean. Omit it for the flat legacy layout.
+    #[arg(long)]
+    pub source_root: Option<String>,
 }
 
 impl GenerateProjectV2Args {
@@ -120,14 +127,27 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
     mark_timing!("prune_dependencies");
     let mut assets = run.assets.clone();
     assets.extend(run.source_mirror_assets.clone());
+    let source_root = args.source_root.as_deref();
     let written = write_accepted_project(
         &accepted_project,
         assets.as_slice(),
         &args.output,
         &runtime_dependencies,
+        source_root,
     )?;
     mark_timing!("write_project");
-    let symbol_index_path = args.output.join("symbol-index.json");
+    // Pipeline metadata is not part of the published source tree: in the modern
+    // (source-root) layout it lives in a `.reverts/` sidecar; the flat layout
+    // keeps it at the output root for backward compatibility.
+    let metadata_dir = match source_root {
+        Some(_) => args.output.join(".reverts"),
+        None => args.output.clone(),
+    };
+    std::fs::create_dir_all(&metadata_dir).map_err(|source| CliRunError::WriteOutput {
+        path: metadata_dir.clone(),
+        source,
+    })?;
+    let symbol_index_path = metadata_dir.join("symbol-index.json");
     std::fs::write(
         &symbol_index_path,
         serialize_symbol_index(&run.symbol_index),
@@ -136,7 +156,7 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         path: symbol_index_path.clone(),
         source,
     })?;
-    let binding_name_index_path = args.output.join("binding-name-index.json");
+    let binding_name_index_path = metadata_dir.join("binding-name-index.json");
     std::fs::write(
         &binding_name_index_path,
         serialize_binding_name_index(&local_binding_renames),
@@ -547,7 +567,9 @@ fn serialize_symbol_index(entries: &[reverts_pipeline::SymbolIndexEntry]) -> Str
 pub(crate) use crate::project_writer::write_accepted_project;
 
 #[cfg(test)]
-pub(crate) use crate::project_writer::{checked_output_path, write_emitted_project};
+pub(crate) use crate::project_writer::{
+    checked_output_path, write_emitted_project, write_emitted_project_with_source_root,
+};
 
 #[cfg(test)]
 mod tests {

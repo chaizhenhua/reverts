@@ -19,7 +19,9 @@ use reverts_pipeline::{
 };
 use rusqlite::{Connection, params};
 
-use super::commands::generate_project::{checked_output_path, write_emitted_project};
+use super::commands::generate_project::{
+    checked_output_path, write_emitted_project, write_emitted_project_with_source_root,
+};
 use super::commands::runtime_inventory::{
     RuntimeSourceSpanOwner, audit_finding_cluster_report, package_source_blocker_report_from_files,
     runtime_emitted_setter_blockers_from_files, runtime_inventory_counts_from_files,
@@ -3270,6 +3272,46 @@ fn project_writer_exposes_cli_entrypoint_when_planned() {
     assert!(package_json.contains("\"start\": \"node ./dist/cli.js\""));
     assert!(package_json.contains("\"reverts-output\": \"./dist/cli.js\""));
     assert!(tsconfig.contains("\"**/*.ts\""));
+}
+
+#[test]
+fn project_writer_emits_modern_layout_under_source_root() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let files = vec![
+        EmittedFile {
+            path: "cli.ts".to_string(),
+            source: "#!/usr/bin/env node\n// @ts-nocheck\nconsole.log('ok');".to_string(),
+        },
+        EmittedFile {
+            path: "modules/1-entry.ts".to_string(),
+            source: "// @ts-nocheck\nexport const ok = true;".to_string(),
+        },
+    ];
+
+    write_emitted_project_with_source_root(&files, &[], tempdir.path(), &[], "src")
+        .expect("modern project should be written");
+    let root = tempdir.path();
+
+    // Source is relocated under src/; scaffold + metadata stay at/under the root.
+    assert!(root.join("src/cli.ts").exists());
+    assert!(root.join("src/modules/1-entry.ts").exists());
+    assert!(
+        !root.join("cli.ts").exists(),
+        "source must not stay at root"
+    );
+
+    let tsconfig = fs::read_to_string(root.join("tsconfig.json")).expect("tsconfig");
+    assert!(tsconfig.contains("\"moduleResolution\": \"NodeNext\""));
+    assert!(tsconfig.contains("\"src/**/*.ts\""));
+    let runtime = fs::read_to_string(root.join("tsconfig.runtime.json")).expect("runtime tsconfig");
+    assert!(runtime.contains("\"rootDir\": \"src\""));
+
+    let package_json = fs::read_to_string(root.join("package.json")).expect("package json");
+    assert!(package_json.contains("\"exports\""));
+    assert!(package_json.contains("\"./dist/cli.js\""));
+
+    assert!(root.join("README.md").exists(), "README emitted");
+    assert!(root.join(".gitignore").exists(), ".gitignore emitted");
 }
 
 #[test]
