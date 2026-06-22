@@ -421,18 +421,31 @@ fn emit_island_clusters(
         .chain(planned_bindings.iter().cloned())
         .collect();
 
+    // Which cluster file owns (defines + exports) each moved binding. Cross-cluster
+    // references resolve to a DIRECT import from the owning cluster — normal
+    // module-to-module `import`/`export` — instead of routing through the entry
+    // hub. Only bindings that stay in the entry (eager statements, pinned
+    // shared-state writers, module-owned imports) are imported from the entry.
+    let binding_owner: BTreeMap<BindingName, usize> = partition
+        .clusters
+        .iter()
+        .flat_map(|group| {
+            group
+                .moved_bindings
+                .iter()
+                .map(move |binding| (binding.clone(), group.cluster_id))
+        })
+        .collect();
+
     let mut entry_imports = String::new();
     let mut entry_reexports: BTreeSet<BindingName> = BTreeSet::new();
     let mut moved_all: BTreeSet<BindingName> = BTreeSet::new();
     for group in &partition.clusters {
         let cluster_path = island_cluster_path(group.cluster_id);
-        let cluster_imports_from_entry =
-            relative_import_specifier(cluster_path.as_str(), ENTRYPOINT_ISLAND_PATH);
         let entry_imports_from_cluster =
             relative_import_specifier(ENTRYPOINT_ISLAND_PATH, cluster_path.as_str());
 
-        // What the cluster references that it does not declare itself and that
-        // the entry can provide — imported from the entry hub.
+        // What the cluster references that it does not declare itself.
         let cluster_local: BTreeSet<BindingName> = local_bindings_in_source(&group.cluster_source)
             .into_iter()
             .map(BindingName::new)
@@ -444,9 +457,26 @@ fn emit_island_clusters(
                 .filter(|name| !cluster_local.contains(name) && entry_available.contains(name))
                 .collect();
 
+        // Route each need to its source: another cluster (direct import) or the
+        // entry (hub, for eager/entry-resident bindings only).
         let mut imports: BTreeMap<String, BTreeSet<BindingName>> = BTreeMap::new();
-        if !cluster_needs.is_empty() {
-            imports.insert(cluster_imports_from_entry, cluster_needs.clone());
+        for need in &cluster_needs {
+            match binding_owner.get(need) {
+                Some(&owner_id) if owner_id != group.cluster_id => {
+                    let specifier = relative_import_specifier(
+                        cluster_path.as_str(),
+                        island_cluster_path(owner_id).as_str(),
+                    );
+                    imports.entry(specifier).or_default().insert(need.clone());
+                }
+                Some(_) => {} // owned by this cluster (already local) — nothing to import
+                None => {
+                    let specifier =
+                        relative_import_specifier(cluster_path.as_str(), ENTRYPOINT_ISLAND_PATH);
+                    imports.entry(specifier).or_default().insert(need.clone());
+                    entry_reexports.insert(need.clone());
+                }
+            }
         }
         let cluster_source = crate::island_split::assemble_cluster_file(
             group.cluster_source.as_str(),
@@ -477,7 +507,9 @@ fn emit_island_clusters(
             .as_str(),
         );
         entry_imports.push('\n');
-        entry_reexports.extend(cluster_needs);
+        // `entry_reexports` is populated per-need above (only entry-resident
+        // bindings); cross-cluster needs are imported directly and need no
+        // re-export from the entry.
         moved_all.extend(group.moved_bindings.iter().cloned());
     }
 
