@@ -506,6 +506,65 @@ mod tests {
         assert!(externalize_island_packages("var a = 1;", &[]).is_none());
     }
 
+    /// Golden snapshot of the end-to-end externalization emission for a realistic
+    /// inlined package: two internal submodule units (`diag`, `ctx`) plus a
+    /// barrel (`api`) that assembles them, and a consumer that calls the barrel.
+    /// The golden pins exactly what ships: the CJS-interop import pair, the kept
+    /// consumer, and the barrel-init shim — with every inlined unit removed.
+    #[test]
+    fn golden_externalized_inlined_package_emission() {
+        let island = "\
+var diagExports = {};
+var diagGuard;
+function diagInit() { return diagGuard || (diagGuard = 1, diagExports.createLogger = function() { return 1; }), diagExports; }
+var ctxExports = {};
+var ctxGuard;
+function ctxInit() { return ctxGuard || (ctxGuard = 1, ctxExports.active = function() { return 2; }), ctxExports; }
+var apiExports = {};
+var apiGuard;
+function apiInit() { return apiGuard || (apiGuard = 1, apiExports.diag = diagInit(), apiExports.context = ctxInit()), apiExports; }
+var theApi = apiInit();
+";
+        let result = externalize_island_packages(
+            island,
+            &[externalization(
+                "@scope/api",
+                "apiInit",
+                "apiExports",
+                &[
+                    "diagExports", "diagGuard", "diagInit", "ctxExports", "ctxGuard", "ctxInit",
+                    "apiExports", "apiGuard", "apiInit",
+                ],
+            )],
+        )
+        .expect("self-contained package externalizes");
+
+        // GOLDEN: the imports emitted at the top of the island.
+        assert_eq!(
+            result.imports,
+            vec![
+                "import * as apiExports__ext from '@scope/api';".to_string(),
+                "const apiExports = apiExports__ext.default ?? apiExports__ext;".to_string(),
+            ]
+        );
+        // GOLDEN: the surviving island body (whitespace-normalized) — only the
+        // consumer and the barrel-init shim remain; all nine unit declarations
+        // are gone.
+        let body: Vec<&str> = result
+            .source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(
+            body,
+            vec![
+                "var theApi = apiInit();",
+                "function apiInit() { return apiExports; }",
+            ]
+        );
+    }
+
     #[test]
     fn moves_only_cluster_function_declarations() {
         let island = "function f1() { return 1; }\n\
