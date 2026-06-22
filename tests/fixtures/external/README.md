@@ -50,9 +50,9 @@ case's `case.json::upstream` and `artifacts/*/build-meta.json` record:
 - the upstream commit,
 - the upstream test reference path.
 
-Curation was originally produced for the prior ReverTS implementation
-and is reused here verbatim under this project's Apache License 2.0. The
-underlying bundler test sources retain their respective upstream licenses.
+Curation was originally produced for the prior ReverTS implementation and is
+reused here verbatim; it is provided under this project's Apache License 2.0.
+The underlying bundler test sources retain their respective upstream licenses.
 
 ## Loader
 
