@@ -53,6 +53,11 @@ pub struct FormatSourceRequest<'a> {
     pub type_annotations: &'a [GeneratedTypeAnnotation],
     pub infer_literal_types: bool,
     pub path_hint: Option<&'a Path>,
+    /// The emitted output path of this file, ALWAYS set when known — unlike
+    /// `path_hint`, which the source strategy suppresses for non-`DirectSource`
+    /// files. Used only to resolve relative import sources for the wire pass, so
+    /// a module-aware import rewrite works regardless of recovery strategy.
+    pub importer_path: Option<&'a Path>,
     pub goal: ParseGoal,
     pub lowering: CompilerLowering,
 }
@@ -94,6 +99,7 @@ pub fn format_source_with_module_items_and_renames(
         type_annotations: &[],
         infer_literal_types: false,
         path_hint,
+        importer_path: None,
         goal,
         lowering,
     })
@@ -121,6 +127,7 @@ pub fn format_source_with_module_items_and_renames_with_report(
         type_annotations: &[],
         infer_literal_types: false,
         path_hint,
+        importer_path: None,
         goal,
         lowering,
     })
@@ -138,6 +145,7 @@ pub fn format_source_with_module_items_request_with_report(
         type_annotations,
         infer_literal_types,
         path_hint,
+        importer_path,
         goal,
         lowering,
     } = request;
@@ -272,7 +280,15 @@ pub fn format_source_with_module_items_request_with_report(
             .filter(|rename| rename.wire)
             .cloned()
             .collect::<Vec<_>>();
-        apply_wire_export_import_renames(&allocator, &mut parsed.program, &wire_renames, path_hint);
+        // Resolve relative import sources from the always-available output path;
+        // `path_hint` is suppressed for non-`DirectSource` files, which would
+        // otherwise leave their module-aware (aliased) import rewrites unresolved.
+        apply_wire_export_import_renames(
+            &allocator,
+            &mut parsed.program,
+            &wire_renames,
+            importer_path.or(path_hint),
+        );
         apply_emit_safety_renames(&allocator, &mut parsed.program, &mut report);
         apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
         normalize_imports_after_emit(&mut parsed.program, &builder);
@@ -355,6 +371,7 @@ mod wire_rename_tests {
             type_annotations: &[],
             infer_literal_types: false,
             path_hint: Some(Path::new("modules/consumer.ts")),
+            importer_path: None,
             goal: ParseGoal::TypeScript,
             lowering: CompilerLowering::None,
         })

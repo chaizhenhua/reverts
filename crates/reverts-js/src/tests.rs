@@ -414,6 +414,7 @@ fn module_item_formatting_infers_safe_literal_variable_types_when_requested() {
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -435,6 +436,7 @@ fn module_item_formatting_skips_reassigned_literal_variable_types_when_requested
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -455,6 +457,7 @@ fn module_item_formatting_infers_minified_unary_literal_types_when_requested() {
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -476,6 +479,7 @@ fn module_item_formatting_infers_fixed_operator_result_types_when_requested() {
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -498,6 +502,7 @@ fn module_item_formatting_infers_builtin_api_result_types_when_requested() {
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -526,6 +531,7 @@ fn module_item_formatting_infers_default_parameter_and_return_types_when_request
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -546,6 +552,7 @@ fn module_item_formatting_infers_parameters_from_call_sites_when_requested() {
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -566,6 +573,7 @@ fn module_item_formatting_propagates_identifier_types_when_requested() {
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -609,6 +617,7 @@ fn module_item_formatting_infers_union_call_site_parameters_when_requested() {
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -628,6 +637,7 @@ fn module_item_formatting_infers_union_return_types_when_requested() {
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -648,6 +658,7 @@ fn module_item_formatting_infers_structural_return_types_when_requested() {
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -669,6 +680,7 @@ fn module_item_formatting_infers_object_and_array_literal_types_when_requested()
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -691,6 +703,7 @@ fn module_item_formatting_infers_structural_array_literal_types_when_requested()
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -714,6 +727,7 @@ fn module_item_formatting_recovers_package_member_type_query() {
         type_annotations: &[],
         infer_literal_types: true,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -751,6 +765,7 @@ fn formatting_does_not_generate_placeholder_semantic_names() {
         type_annotations: &[],
         infer_literal_types: false,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
@@ -2972,6 +2987,7 @@ fn format_source_transfers_function_param_names_through_full_emit_path() {
         type_annotations: &[],
         infer_literal_types: false,
         path_hint: Some(Path::new("fixture.ts")),
+        importer_path: None,
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })

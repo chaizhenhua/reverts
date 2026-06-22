@@ -34,7 +34,20 @@ pub(crate) fn flag_wire_safe_export_renames(
     // re-export barrel (`export { o } from './M'`). Renaming such a module's
     // export wire name would break those consumers, so exclude the whole module.
     let wire_unsafe_modules = modules_consumed_by_namespace_or_reexport(program, plan);
-    let pairs = wire_renameable_pairs(program, externalized_packages, &wire_unsafe_modules);
+    // Collapsing module M's `export { s as o }` to `export { s }` only stays
+    // consistent if EVERY importer of `o` from M also resolves its local binding
+    // to `s` (so its `import { o … }` collapses in lockstep). An importer that
+    // keeps the minified name (no readability rename) or chose a different local
+    // name (a competing rename, e.g. `import { o as v }`) would be left importing
+    // a name M no longer exports — `No matching export` at bundle time. Exclude
+    // those `(module, original)` bindings so M keeps the export alias instead.
+    let uncollapsible = bindings_with_uncollapsible_importer(program, plan);
+    let pairs = wire_renameable_pairs(
+        program,
+        externalized_packages,
+        &wire_unsafe_modules,
+        &uncollapsible,
+    );
     if pairs.is_empty() {
         return;
     }
@@ -65,7 +78,10 @@ fn modules_consumed_by_namespace_or_reexport(
     let mut unsafe_modules = BTreeSet::new();
     for file in &plan.files {
         let body = file.body.join("\n");
-        for specifier in namespace_or_reexport_specifiers(&body) {
+        for specifier in namespace_or_reexport_specifiers(&body)
+            .into_iter()
+            .chain(import_then_reexport_specifiers(&body))
+        {
             let resolved = resolve_relative_specifier(file.path.as_str(), specifier.as_str());
             if let Some(module_id) = module_by_path.get(&resolved) {
                 unsafe_modules.insert(*module_id);
@@ -73,6 +89,70 @@ fn modules_consumed_by_namespace_or_reexport(
         }
     }
     unsafe_modules
+}
+
+/// Relative-import specifiers whose imported bindings are re-exported by the
+/// SAME file through a bare `export { … }` (no `from`). The runtime-helper
+/// surface emits exactly this `import { X } from './M'` + separate `export { X }`
+/// shape, which a single `export { … } from '…'` scan misses. It forms a
+/// re-export chain across hops (definer → helper → consumer) the wire pass
+/// cannot keep in sync — the consumer imports `X` from the helper, not from the
+/// definer, so collapsing the definer's `export { s as X }` to `export { s }`
+/// leaves every downstream `X` dangling. Treat the definer module as wire-unsafe.
+fn import_then_reexport_specifiers(body: &str) -> Vec<String> {
+    // Local binding name -> source specifier, for relative named imports.
+    let mut imported_from: BTreeMap<String, String> = BTreeMap::new();
+    let mut reexported_locals: BTreeSet<String> = BTreeSet::new();
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("import") && trimmed.contains('{') && trimmed.contains(" from ") {
+            if let Some(specifier) = trailing_from_specifier(trimmed)
+                && (specifier.starts_with("./") || specifier.starts_with("../"))
+            {
+                for (_external, local) in named_clause_entries(trimmed) {
+                    imported_from.insert(local, specifier.clone());
+                }
+            }
+        } else if trimmed.starts_with("export")
+            && trimmed.contains('{')
+            && !trimmed.contains(" from ")
+        {
+            for (local, _external) in named_clause_entries(trimmed) {
+                reexported_locals.insert(local);
+            }
+        }
+    }
+    reexported_locals
+        .iter()
+        .filter_map(|local| imported_from.get(local).cloned())
+        .collect()
+}
+
+/// Parse a single-line `{ … }` named import/export clause into
+/// `(name_before_as, name_after_as)` entries. For `a as b` this is `(a, b)`;
+/// for a bare `a` it is `(a, a)`. The caller picks the local-binding side:
+/// imports bind the right (`b`); a bare re-export's local binding is the left.
+fn named_clause_entries(line: &str) -> Vec<(String, String)> {
+    let Some(start) = line.find('{') else {
+        return Vec::new();
+    };
+    let Some(rel_end) = line[start + 1..].find('}') else {
+        return Vec::new();
+    };
+    let inner = &line[start + 1..start + 1 + rel_end];
+    inner
+        .split(',')
+        .filter_map(|raw| {
+            let item = raw.trim();
+            if item.is_empty() {
+                return None;
+            }
+            Some(match item.split_once(" as ") {
+                Some((left, right)) => (left.trim().to_string(), right.trim().to_string()),
+                None => (item.to_string(), item.to_string()),
+            })
+        })
+        .collect()
 }
 
 /// Relative-import specifiers used in `import * as … from '…'`,
@@ -154,10 +234,88 @@ fn strip_source_extension(path: &str) -> String {
 /// modules exporting the same minified name are distinct bindings, not a
 /// re-export. Re-export is detected structurally via `wire_unsafe_modules`
 /// instead.
+/// `(defining_module, original)` bindings that have at least one named importer
+/// whose local binding does NOT resolve to the binding's semantic name, so the
+/// emitter's wire pass cannot collapse that importer's `import { original … }`
+/// in lockstep with a collapsed export. Computed from the planned bodies (which
+/// still carry minified names) plus each importer file's readability renames.
+fn bindings_with_uncollapsible_importer(
+    program: &EnrichedProgram,
+    plan: &EmitPlan,
+) -> BTreeSet<(ModuleId, BindingName)> {
+    let mut module_by_path: BTreeMap<String, ModuleId> = BTreeMap::new();
+    for module in program.model().modules() {
+        if let Some(path) = crate::module_output_path(program, module.id) {
+            module_by_path.insert(strip_source_extension(&path), module.id);
+        }
+    }
+    let mut uncollapsible = BTreeSet::new();
+    for file in &plan.files {
+        // This file's readability renames: minified original -> chosen local
+        // name(s). A binding can carry more than one candidate rename (its own
+        // readability choice AND a propagated owner-semantic rename); which one
+        // the emitter actually applies is order-dependent, so treat ANY target
+        // that differs from the semantic name as a reason the import may not
+        // collapse — favouring the safe (keep-alias) outcome.
+        let mut renames: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for rename in &file.readability_renames {
+            renames
+                .entry(rename.original.as_str())
+                .or_default()
+                .push(rename.renamed.as_str());
+        }
+        let body = file.body.join("\n");
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            if !(trimmed.starts_with("import")
+                && trimmed.contains('{')
+                && trimmed.contains(" from "))
+            {
+                continue;
+            }
+            let Some(specifier) = trailing_from_specifier(trimmed) else {
+                continue;
+            };
+            if !(specifier.starts_with("./") || specifier.starts_with("../")) {
+                continue;
+            }
+            let resolved = resolve_relative_specifier(file.path.as_str(), specifier.as_str());
+            let Some(&module_id) = module_by_path.get(&resolved) else {
+                continue;
+            };
+            // For an import clause `{ imported as local }`, `named_clause_entries`
+            // returns `(imported, local)`.
+            for (imported, body_local) in named_clause_entries(trimmed) {
+                let Some(semantic) = program
+                    .semantic_names()
+                    .binding_name(module_id, imported.as_str())
+                else {
+                    continue;
+                };
+                if semantic.as_str() == imported.as_str() {
+                    continue;
+                }
+                // The import collapses only if its effective local is exactly the
+                // semantic name. With no readability rename, that is the name in
+                // the body; with renames, EVERY candidate target must equal it.
+                let collapses = match renames.get(imported.as_str()) {
+                    Some(targets) => targets.iter().all(|t| *t == semantic.as_str()),
+                    None => body_local.as_str() == semantic.as_str(),
+                };
+                if !collapses {
+                    uncollapsible.insert((module_id, BindingName::new(imported)));
+                }
+            }
+        }
+    }
+    uncollapsible
+}
+
 fn wire_renameable_pairs(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
     wire_unsafe_modules: &BTreeSet<ModuleId>,
+    uncollapsible: &BTreeSet<(ModuleId, BindingName)>,
 ) -> BTreeSet<(BindingName, BindingName)> {
     let model = program.model();
     let graph = model.graph();
@@ -202,6 +360,12 @@ fn wire_renameable_pairs(
             if semantic == &original {
                 continue;
             }
+            // An importer that will not collapse `original` to `semantic` (kept
+            // the minified name, or chose a competing local name) would dangle if
+            // M dropped the wire name. Keep the export alias for this binding.
+            if uncollapsible.contains(&(module.id, original.clone())) {
+                continue;
+            }
             if semantic_count.get(semantic).copied() != Some(1) {
                 continue;
             }
@@ -231,6 +395,42 @@ mod tests {
         assert_eq!(
             resolve_relative_specifier("modules/feature/x.ts", "./sub/y.js"),
             "modules/feature/sub/y"
+        );
+    }
+
+    #[test]
+    fn named_clause_entries_splits_aliases_either_direction() {
+        assert_eq!(
+            named_clause_entries("import { a, b as c } from './m.js';"),
+            vec![
+                ("a".to_string(), "a".to_string()),
+                ("b".to_string(), "c".to_string()),
+            ]
+        );
+        assert_eq!(named_clause_entries("var x = 1;"), Vec::new());
+    }
+
+    #[test]
+    fn import_then_reexport_detects_chain_but_not_import_only_or_reexport_from() {
+        // Imports X from m, re-exports X via a bare `export { X }` → m is unsafe.
+        let chain = "import { X, Y } from './m.js';\n\
+                     export { X };\n";
+        assert_eq!(
+            import_then_reexport_specifiers(chain),
+            vec!["./m.js".to_string()],
+            "import-then-reexport chain"
+        );
+        // Imports but does NOT re-export → not a chain.
+        let import_only = "import { X } from './m.js';\nvar v = X();\nexport { v };\n";
+        assert!(
+            import_then_reexport_specifiers(import_only).is_empty(),
+            "import-only is not a chain"
+        );
+        // A bare re-export of a LOCAL binding (not imported) → not a chain.
+        let local_export = "var local = 1;\nexport { local };\n";
+        assert!(
+            import_then_reexport_specifiers(local_export).is_empty(),
+            "local export is not a chain"
         );
     }
 

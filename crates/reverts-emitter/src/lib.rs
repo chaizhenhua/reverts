@@ -174,6 +174,7 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
             type_annotations: &generated_type_annotations,
             infer_literal_types: true,
             path_hint: file.source_strategy().path_hint(file.path.as_str()),
+            importer_path: Some(std::path::Path::new(file.path.as_str())),
             goal: file.source_strategy().parse_goal(),
             lowering,
         }) {
