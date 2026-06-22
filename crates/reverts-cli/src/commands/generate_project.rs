@@ -32,7 +32,7 @@ pub struct GenerateProjectV2Args {
     pub project_id: u32,
     /// Emit all generated source under this directory (e.g. `src`) for a modern
     /// TypeScript project layout: `moduleResolution: NodeNext`, a `package.json`
-    /// `exports` map, README + `.gitignore`, and pipeline metadata
+    /// `exports` map, `.gitignore`, and pipeline metadata
     /// (`symbol-index.json`, `binding-name-index.json`) relocated to `.reverts/`
     /// so the source tree stays clean. Omit it for the flat legacy layout.
     #[arg(long)]

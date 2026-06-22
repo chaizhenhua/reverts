@@ -3310,8 +3310,13 @@ fn project_writer_emits_modern_layout_under_source_root() {
     assert!(package_json.contains("\"exports\""));
     assert!(package_json.contains("\"./dist/cli.js\""));
 
-    assert!(root.join("README.md").exists(), "README emitted");
     assert!(root.join(".gitignore").exists(), ".gitignore emitted");
+    // README.md is owned by the skill/agent (decompilation provenance +
+    // verification results), not the deterministic generator.
+    assert!(
+        !root.join("README.md").exists(),
+        "README.md must not be generated — the skill writes it"
+    );
 }
 
 #[test]

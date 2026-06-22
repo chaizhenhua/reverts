@@ -631,6 +631,46 @@ and regression test, fix ReverTS, regenerate, and rerun validation. A clean
 `tsc` is not done; profile-specific smoke must pass with zero browser/runtime
 errors. Never hand-patch generated output to make it run.
 
+### Execution verification is a mandatory completion gate
+
+Decompilation is NOT done when `tsc` is clean. After the output is generated and
+the structural audits pass, you MUST **really install it, really compile it,
+really run it, and exercise its actual user surface** — then gate on the result:
+
+- **Real install** — `npm install` for real: resolve every dependency and **build
+  native modules** (do NOT use `--ignore-scripts` as the final state; that is only
+  a temporary shortcut for an interim typecheck). For an Electron app this means a
+  runnable runtime is available (a real `electron` for the app's major version, or
+  the original app's bundled runtime via the drop-in below). A project that only
+  "installs" with scripts disabled and natives missing is not verified.
+- **Real compile** — emit JavaScript, not just typecheck: `tsc -p
+  tsconfig.runtime.json` (no `--noEmit`) producing `dist/`. A project that
+  typechecks but fails to emit, or emits JS that won't load, is not verified.
+- **Real execution** — run the **compiled `dist/` artifact** (not a bundle of the
+  source) and observe its behavior; assert it matches the original.
+- **Exercise the actual user surface** — the equivalence trace is the *floor*
+  (main-process / module-init smoke), NOT the whole gate. If the app has a **GUI**,
+  a **web UI**, or a **CLI**, you MUST drive that surface end-to-end too (table
+  below). A decompile of a GUI app is not verified by a headless trace alone.
+
+This gate runs on **every** decompile and must be re-run after any regeneration
+(naming, module renames, externalization, layout changes) — those can change
+emitted code, so a previously-green run does not carry over.
+
+#### Surface-specific e2e (in addition to the trace floor)
+
+| App surface | Required e2e (must actually run, not stub) |
+|---|---|
+| **Electron GUI desktop** | Build a runnable form of the recovered main (drop-in: esbuild the recovered `dist/` main to a CJS bundle, repack it into a copy of the original `.app`'s `app.asar`, fix the asar integrity header, **strip quarantine** (`xattr -dr com.apple.quarantine <App>`), re-sign (`codesign --force --deep --sign -`), launch with macOS `open <App>` so LaunchServices spawns the renderer tree). Assert the **renderer/GPU helper processes spawn** (renderers = it is drawing) and the window **renders the expected UI**, then drive **≥1 real interaction** (the human drives keyboard/mouse — synthesizing input from the terminal types into the wrong window; capture state with `screencapture -x -o -l<windowID>`, finding the id via `CGWindowListCopyWindowInfo`). Diff against the original `.app` launched the same way. |
+| **Web UI (renderer / browser bundle)** | Headless browser (Playwright/CDP): load the built UI, assert **zero console/page errors**, and perform a representative **UI interaction** (click/navigate/submit), checking the resulting DOM/state. |
+| **CLI / service** | Run the **built CLI** (`node dist/cli.js …` or the `bin`) with representative arguments; assert exit codes, stdout/stderr, and any produced files for the main commands. Include `--help`/`--version` plus at least one real subcommand path. |
+
+Pick by the same source signals as the launch-detection table below. An Electron
+app typically has BOTH a main-process surface (trace floor) AND a renderer GUI
+(GUI e2e) — do both. If a surface genuinely cannot run in the environment (e.g.
+no display for a GUI), say so explicitly and report it as an *unverified* surface
+— do not silently downgrade the gate to the trace and call it done.
+
 ### Emit a directly-runnable e2e harness beside the generated source
 
 The decompiled project must ship its own end-to-end validation so anyone can
@@ -642,12 +682,12 @@ required.
 1. **Detect how the app launches from its own source — do not assume.** Read the
    generated `package.json` and entry:
 
-   | Source signal | Profile | e2e validation |
+   | Source signal | Profile | e2e validation (floor + REQUIRED surface) |
    |---|---|---|
-   | `electron` dep, or `main`+`preload`, or an Electron start script | electron main process | main-process equivalence trace (below); optional GUI drop-in |
-   | `bin`/shebang, `main` → node entry, no electron | node CLI/service | run entry under stubbed I/O; assert exit + interaction trace |
-   | `manifest.json` / service worker | browser-extension | Playwright/CDP load + console-error/UI checks |
-   | renderer `index.html` + bundle | web | headless browser load + console-error checks |
+   | `electron` dep, or `main`+`preload`, or an Electron start script | electron desktop | main-process equivalence trace (floor) **+ GUI drop-in launch + render/interaction** (required) |
+   | `bin`/shebang, `main` → node entry, no electron | node CLI/service | trace floor **+ run the built CLI with real args, assert output/exit** (required) |
+   | `manifest.json` / service worker | browser-extension | Playwright/CDP load + console-error checks **+ a real UI interaction** (required) |
+   | renderer `index.html` + bundle | web | headless browser load + console-error checks **+ a real UI interaction** (required) |
 
 2. **For a main-process / Node entry, generate the equivalence-trace harness.**
    A full GUI launch is usually infeasible headless (display, sign-in, helper
@@ -657,17 +697,21 @@ required.
    undefined, string-returning `app.getPath`/`getName`, `whenReady` resolves,
    `process.versions.electron` defined; native `.node` and externalized packages
    stubbed) and compare the **interaction multiset** + error set. The runner
-   (`run.mjs`) must: (a) `tsc -p tsconfig.runtime.json --noEmit`; (b)
-   esbuild-bundle the recovered entry to CJS (wrap the top-level `await`, restore
-   `import.meta.url` via banner, externalize every native/3rd-party dep);
-   (c) trace both programs; (d) assert **recovered ⊇ reference** — no original
-   interaction is dropped or under-run, the recovered main loads without error,
-   and the only extras are benign idempotent builtin `require`s introduced by
-   modular re-emission (split clusters + ESM entry add a few `require('url')`/
+   (`run.mjs`) must: (a) **compile** — `tsc -p tsconfig.runtime.json` emitting
+   `dist/` (NOT `--noEmit`), and fail if the built entry is missing; (b) bundle
+   the **compiled `dist/` entry** (not the source `.ts`) to CJS — wrap the
+   top-level `await`, restore `import.meta.url` via banner, externalize every
+   native/3rd-party dep — so the **actual build output executes**; (c) run/trace
+   both programs; (d) assert **recovered ⊇ reference** — no original interaction
+   is dropped or under-run, the recovered main loads without error, and the only
+   extras are benign idempotent builtin `require`s introduced by modular
+   re-emission (split clusters + ESM entry add a few `require('url')`/
    `require('module')` for the `import.meta` shim). Exit non-zero on any dropped
    interaction, any non-`require` extra, or a recovered load error. Keep the
    original main bundle at `e2e/reverts/reference/main-bundle.cjs` (it must use
-   `.cjs`; the harness package is `type: module`).
+   `.cjs`; the harness package is `type: module`). Offer `--no-build` only to
+   skip the (slow) recompile when `dist/` is already fresh — the default path
+   always compiles.
 
    **Derive everything from the project — hardcode nothing app-specific** (so the
    same harness works for any decompiled app): the **source root** from
@@ -684,11 +728,54 @@ required.
    test`. A failing trace diff is a decompile-stage bug — file it, fix ReverTS,
    regenerate, re-run. Do not relax the harness to make it pass.
 
-The GUI drop-in (repack `app.asar`, fix asar-integrity header, re-sign, launch
-with macOS `open <App>` so LaunchServices spawns the renderer tree) is the deeper
-UI proof and is documented in
-[reverts-decompile](../reverts-decompile/references/runtime-validation-profiles.md);
-it is app-specific and not part of the headless `e2e/reverts` check.
+The trace floor above is necessary but NOT sufficient for a GUI/web/CLI app: it
+verifies the main process, not the user-facing surface. The GUI drop-in (repack
+`app.asar`, fix asar-integrity header, re-sign, launch with macOS `open <App>` so
+LaunchServices spawns the renderer tree) — and the web/CLI equivalents in the
+surface-e2e table above — are **required**, not optional, whenever that surface
+exists. The drop-in procedure is documented in
+[reverts-decompile](../reverts-decompile/references/runtime-validation-profiles.md).
+It needs a real display and human-driven interaction; if the environment cannot
+provide that, report the GUI surface as **unverified** rather than claiming the
+decompile is done.
+
+#### GUI drop-in troubleshooting (macOS)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Dialog *"Apple could not verify '<App>' is free of malware"* / *"Apple 无法验证…"*; `open` exits 0 but **no processes** survive | The modified app lost notarization and still carries the **quarantine** xattr (copied from a DMG/download), so Gatekeeper hard-blocks it | `xattr -dr com.apple.quarantine <App>` then re-`codesign --force --deep --sign -`; relaunch. (Do NOT disable Gatekeeper globally.) |
+| Only the **main** process runs, no `Renderer`/`GPU` helpers, blank/no window | Drop-in main threw before `createBrowserWindow`, OR you launched the binary directly instead of via `open` | Launch with `open <App>` (only LaunchServices spawns renderers). If still main-only, capture the main's error from the unified log (`log show --last 40s --predicate 'process == "<App>"'`) — it is a recovery bug to fix in-pipeline. |
+| *"app is damaged"* / integrity error at launch | asar integrity hash in `Info.plist` does not match the repacked `app.asar` | Recompute `sha256` of `getRawHeader(app.asar).headerString` and write it to `ElectronAsarIntegrity.'Resources/app.asar'.hash` (use `PlistBuddy`, not `plutil` — the key contains a dot), then re-sign. |
+
+Confirm success by the **process tree** (main + `Helper (GPU)` + several
+`Helper (Renderer)`) and a window **screenshot** (`screencapture -x -o
+-l<windowID>`), then have the human drive one interaction.
+
+### Write the project README (skill-owned, not generated)
+
+The generator does NOT emit `README.md` — it carries decompilation provenance and
+verification results that only the agent knows, so **write `<output>/README.md`
+yourself** after the e2e gate passes (the generator leaves an existing one
+untouched on regeneration, like `e2e/`). Build it from the *actual* generated
+project, not a template:
+
+- **Provenance** — state plainly that the project was produced by decompiling a
+  JavaScript bundle with ReverTS, and is a behavior-equivalent reconstruction,
+  not the original source; do not hand-edit recovered files.
+- **Layout** — describe the real tree you generated: the source root, the entry,
+  `modules/<domain>/…` (the semantic domains you actually named), the entry
+  island (`modules/entrypoint.ts`) and its `modules/island/cluster-*.ts` split,
+  `dist/`, `.reverts/`, `e2e/`. Use the counts/domains that are actually present.
+- **Externalized packages** — list the third-party packages that were matched and
+  externalized (the `dependencies` in the generated `package.json`).
+- **Verification performed** — record what you actually ran and the result:
+  `tsc` compile to `dist/`, real execution of the compiled main, and the
+  original-vs-recovered equivalence trace (quote the numbers, e.g. "recovered N
+  ⊇ reference M, 0 dropped, load-clean"). Point readers at `e2e/reverts` to
+  reproduce.
+
+Keep it accurate to this project; never copy stale numbers or domains from
+another decompile.
 
 ## Guardrails
 

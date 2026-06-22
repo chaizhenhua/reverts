@@ -129,6 +129,17 @@ zero crashes, passing the asar-integrity + fuse checks. Reproducible procedure:
    the renderer only renders under a proper LaunchServices `open`. Verify the app's
    `… Helper (Renderer)` / `(GPU)` processes appear, then `osascript -e 'tell
    application "<App>" to activate'` and screenshot.
+   - **Gatekeeper block (`"Apple could not verify … is free of malware"` / `open`
+     exits 0 but NO processes survive):** the copied/repacked app lost notarization
+     and still carries the **quarantine** xattr, so Gatekeeper hard-blocks it.
+     `xattr -dr com.apple.quarantine <Copy.app>` BEFORE (or after, then re-sign)
+     launching. Do not disable Gatekeeper globally.
+   - Update the integrity hash with `PlistBuddy` (`Set
+     :ElectronAsarIntegrity:Resources/app.asar:hash <hash>`), NOT `plutil` — the
+     key `Resources/app.asar` contains a dot that `plutil` keypaths mis-split.
+   - Screenshot a specific window focus-independently with `screencapture -x -o
+     -l<windowID>`, finding `<windowID>` via `CGWindowListCopyWindowInfo`
+     (pyobjc-Quartz) filtered to the app's owner name and a real window size.
 4. **Differential baseline.** Launch the ORIGINAL unmodified `.app` the identical
    way first. The recovered-vs-original window must match; any blank or missing
    content the original ALSO shows under the same launch is environmental
