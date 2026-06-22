@@ -337,9 +337,57 @@ pub(crate) fn emit_entrypoint_island(
     emit_planned_entrypoint_island(program, plan, island)
 }
 
-/// Emit path of one island cluster file.
+/// Emit path of one island cluster file (mechanical fallback name).
 fn island_cluster_path(cluster_id: usize) -> String {
     format!("modules/island/cluster-{cluster_id}.ts")
+}
+
+/// Emit path for a cluster with an accepted semantic `cluster-names` override.
+/// The override is a relative path UNDER `modules/island/` (e.g.
+/// `telemetry/opentelemetry-instrumentation`); each segment is sanitized to a
+/// safe path component and a numeric suffix breaks any collision so two clusters
+/// never map to the same file. `used` accumulates the paths already taken.
+fn semantic_island_cluster_path(semantic: &str, used: &mut BTreeSet<String>) -> String {
+    let cleaned = semantic
+        .trim()
+        .trim_matches('/')
+        .split('/')
+        .map(sanitize_path_component)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    let base = if cleaned.is_empty() {
+        "island-cluster".to_string()
+    } else {
+        cleaned
+    };
+    let mut candidate = format!("modules/island/{base}.ts");
+    if used.insert(candidate.clone()) {
+        return candidate;
+    }
+    for suffix in 2.. {
+        candidate = format!("modules/island/{base}-{suffix}.ts");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("numeric suffix search always finds a free island path")
+}
+
+/// Reduce one path segment to `[A-Za-z0-9._-]`, collapsing other runs to `-`.
+fn sanitize_path_component(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut last_dash = false;
+    for ch in segment.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 /// Smallest cluster (in moved bindings) emitted as its own file. Tiny clusters
@@ -622,6 +670,7 @@ fn route_chunk_need(
 /// through the entry hub so a moved function still sees the same values. Returns
 /// `false` (caller emits the unsplit island) when there is nothing worth
 /// splitting.
+#[allow(clippy::too_many_arguments)]
 fn emit_island_clusters(
     prelude: &reverts_graph::RuntimePrelude,
     plan: &mut EmitPlan,
@@ -630,6 +679,7 @@ fn emit_island_clusters(
     planned_bindings: &BTreeSet<BindingName>,
     entrypoint_callee: &BindingName,
     source_module_owner: &BTreeMap<BindingName, String>,
+    cluster_name_overrides: &BTreeMap<String, String>,
 ) -> bool {
     use std::collections::BTreeMap;
 
@@ -808,6 +858,37 @@ fn emit_island_clusters(
         &mut next_forced_cluster_id,
     );
 
+    // Resolve every cluster's emitted file path ONCE, so the cluster file, its
+    // header, and every other cluster's import specifier all agree. A cluster
+    // whose content fingerprint has an accepted `cluster-names` override emits at
+    // the semantic path; the rest keep the mechanical `cluster-<id>` name. The
+    // map is keyed by `cluster_id` because cross-cluster wiring below routes by id.
+    let cluster_fingerprints: BTreeMap<usize, String> = clusters
+        .iter()
+        .map(|group| {
+            (
+                group.cluster_id,
+                crate::island_split::cluster_fingerprint(&group.moved_bindings),
+            )
+        })
+        .collect();
+    let mut cluster_paths: BTreeMap<usize, String> = BTreeMap::new();
+    let mut used_cluster_paths: BTreeSet<String> = BTreeSet::new();
+    for group in &clusters {
+        let path = cluster_fingerprints
+            .get(&group.cluster_id)
+            .and_then(|fingerprint| cluster_name_overrides.get(fingerprint))
+            .map(|semantic| semantic_island_cluster_path(semantic, &mut used_cluster_paths))
+            .unwrap_or_else(|| island_cluster_path(group.cluster_id));
+        cluster_paths.insert(group.cluster_id, path);
+    }
+    let cluster_path_for = |cluster_id: usize| -> String {
+        cluster_paths
+            .get(&cluster_id)
+            .cloned()
+            .unwrap_or_else(|| island_cluster_path(cluster_id))
+    };
+
     // Names reachable from the entry namespace: every island binding (moved ones
     // are imported back) plus what the entry already imports.
     let entry_available: BTreeSet<BindingName> = local_bindings_in_source(island_source)
@@ -835,7 +916,7 @@ fn emit_island_clusters(
     let mut entry_reexports: BTreeSet<BindingName> = BTreeSet::new();
     let mut moved_all: BTreeSet<BindingName> = BTreeSet::new();
     for group in &clusters {
-        let cluster_path = island_cluster_path(group.cluster_id);
+        let cluster_path = cluster_path_for(group.cluster_id);
         let entry_imports_from_cluster =
             relative_import_specifier(ENTRYPOINT_ISLAND_PATH, cluster_path.as_str());
 
@@ -871,7 +952,7 @@ fn emit_island_clusters(
                 Some(&owner_id) if owner_id != group.cluster_id => {
                     let specifier = relative_import_specifier(
                         cluster_path.as_str(),
-                        island_cluster_path(owner_id).as_str(),
+                        cluster_path_for(owner_id).as_str(),
                     );
                     imports.entry(specifier).or_default().insert(need.clone());
                 }
@@ -900,9 +981,19 @@ fn emit_island_clusters(
             &imports,
         );
 
-        let mut cluster_file = PlannedFile::new(cluster_path);
+        let mut cluster_file = PlannedFile::new(cluster_path.clone());
         cluster_file.unmodularized_recovered_code = true;
         cluster_file.push_source(cluster_source);
+        // Record this cluster's stable fingerprint → emitted path so the generate
+        // command can write a manifest the `cluster-names` agent maps names by
+        // (a leading file comment is unreliable — the formatter drops it).
+        if let Some(fingerprint) = cluster_fingerprints.get(&group.cluster_id) {
+            plan.record_island_cluster(
+                fingerprint.clone(),
+                cluster_path.clone(),
+                group.moved_bindings.len(),
+            );
+        }
         for binding in &group.moved_bindings {
             cluster_file.add_binding(PlannedBinding::new(
                 binding.clone(),
@@ -978,10 +1069,31 @@ fn emit_island_clusters(
                 chunk_owner.entry(binding.clone()).or_insert(chunk_ids[index]);
             }
         }
+        // Resolve every chunk's emitted path ONCE (override-by-fingerprint, else
+        // the mechanical overflow name) so the chunk file, its manifest record,
+        // and any chunk→chunk import all agree even under a semantic rename. A
+        // chunk (chain-split overflow of the eager body) is nameable on the same
+        // footing as a cluster.
+        let mut chunk_paths: BTreeMap<usize, String> = BTreeMap::new();
+        for (index, locals) in chunk_locals.iter().enumerate() {
+            let chunk_fingerprint = crate::island_split::cluster_fingerprint(locals);
+            let chunk_path = cluster_name_overrides
+                .get(&chunk_fingerprint)
+                .map(|semantic| semantic_island_cluster_path(semantic, &mut used_cluster_paths))
+                .unwrap_or_else(|| island_cluster_path(chunk_ids[index]));
+            plan.record_island_cluster(chunk_fingerprint, chunk_path.clone(), locals.len());
+            chunk_paths.insert(chunk_ids[index], chunk_path);
+        }
+        let chunk_path_for = |chunk_id: usize| -> String {
+            chunk_paths
+                .get(&chunk_id)
+                .cloned()
+                .unwrap_or_else(|| island_cluster_path(chunk_id))
+        };
         let mut chain_imports = String::new();
         for (index, chunk) in eager_chunks.iter().enumerate() {
-            let chunk_path = island_cluster_path(chunk_ids[index]);
             let locals = &chunk_locals[index];
+            let chunk_path = chunk_path_for(chunk_ids[index]);
             let needs: BTreeSet<BindingName> = reverts_js::free_identifiers_in_source(
                 chunk,
                 None,
@@ -1019,10 +1131,20 @@ fn emit_island_clusters(
                     source_module_owner,
                 ) {
                     ChunkNeedRoute::Local => {}
-                    ChunkNeedRoute::Chunk(owner) | ChunkNeedRoute::Cluster(owner) => {
+                    // A chunk owner keeps its mechanical overflow name; a cluster
+                    // owner may carry a semantic `cluster-names` rename, so route it
+                    // through the resolved path map.
+                    ChunkNeedRoute::Chunk(owner) => {
                         let specifier = relative_import_specifier(
                             chunk_path.as_str(),
-                            island_cluster_path(owner).as_str(),
+                            chunk_path_for(owner).as_str(),
+                        );
+                        imports.entry(specifier).or_default().insert(need.clone());
+                    }
+                    ChunkNeedRoute::Cluster(owner) => {
+                        let specifier = relative_import_specifier(
+                            chunk_path.as_str(),
+                            cluster_path_for(owner).as_str(),
                         );
                         imports.entry(specifier).or_default().insert(need.clone());
                     }
@@ -1257,6 +1379,7 @@ pub(crate) fn emit_planned_entrypoint_island(
         &planned_bindings,
         &entrypoint.callee,
         &source_module_owner,
+        &program.model().input().island_cluster_names,
     ) {
         file.push_source(island_source);
     }
@@ -1401,6 +1524,31 @@ fn module_file_is_planned(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_island_path_sanitizes_segments_and_breaks_collisions() {
+        let mut used = BTreeSet::new();
+        // Nested path is preserved; unsafe characters collapse to `-`.
+        assert_eq!(
+            semantic_island_cluster_path("telemetry/open telemetry!", &mut used),
+            "modules/island/telemetry/open-telemetry.ts"
+        );
+        // A second accept resolving to the same base gets a numeric suffix.
+        assert_eq!(
+            semantic_island_cluster_path("telemetry/open telemetry!", &mut used),
+            "modules/island/telemetry/open-telemetry-2.ts"
+        );
+        // Leading/trailing slashes and empty segments are dropped; an all-garbage
+        // name still yields a usable file.
+        assert_eq!(
+            semantic_island_cluster_path("/a//b/", &mut used),
+            "modules/island/a/b.ts"
+        );
+        assert_eq!(
+            semantic_island_cluster_path("///", &mut used),
+            "modules/island/island-cluster.ts"
+        );
+    }
 
     fn owners(pairs: &[(&str, usize)]) -> BTreeMap<BindingName, usize> {
         pairs

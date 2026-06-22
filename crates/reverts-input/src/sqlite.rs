@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -67,7 +68,42 @@ pub fn load_project_rows_from_connection(
         )?);
     rows.package_surfaces = load_package_surfaces(connection, project_id)?;
     rows.assets = load_project_assets(connection, project_id)?;
-    InputRows::from_database_rows(rows).map_err(SqliteInputError::InputBundle)
+    let island_cluster_names = load_island_cluster_names(connection, project_id)?;
+    let mut input_rows =
+        InputRows::from_database_rows(rows).map_err(SqliteInputError::InputBundle)?;
+    input_rows.island_cluster_names = island_cluster_names;
+    Ok(input_rows)
+}
+
+/// Accepted island-cluster file-name overrides, keyed by the cluster's content
+/// fingerprint. Empty (and a no-op) when the `cluster-names` writer never ran,
+/// so the table may be absent.
+fn load_island_cluster_names(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<BTreeMap<String, String>, SqliteInputError> {
+    if !table_exists(connection, "island_cluster_names")? {
+        return Ok(BTreeMap::new());
+    }
+    let mut statement = connection.prepare(
+        r"
+        SELECT fingerprint, path
+        FROM island_cluster_names
+        WHERE project_id = ?1 AND accepted = 1 AND TRIM(path) != '' AND TRIM(fingerprint) != ''
+        ORDER BY updated_at DESC, origin DESC
+        ",
+    )?;
+    let rows = statement.query_map(params![i64::from(project_id)], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    // First row wins per fingerprint (most recently updated), matching the
+    // module-path-override precedence.
+    let mut names = BTreeMap::new();
+    for row in rows {
+        let (fingerprint, path) = row?;
+        names.entry(fingerprint).or_insert(path);
+    }
+    Ok(names)
 }
 
 fn load_project(connection: &Connection, project_id: u32) -> Result<ProjectRow, SqliteInputError> {
@@ -1341,5 +1377,45 @@ mod tests {
             .expect("package module");
         assert_eq!(app.semantic_path, "tools/MCPTool/classifyForCollapse.tsx");
         assert_eq!(package.semantic_path, "modules/11-lodash/map.ts");
+    }
+
+    #[test]
+    fn loads_accepted_island_cluster_names_and_skips_rejected() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source_path = temp.path().join("entry.js");
+        fs::write(source_path.as_path(), "console.log('fixture');").expect("source");
+        let connection = Connection::open_in_memory().expect("db");
+        create_schema(&connection);
+        insert_fixture_project(&connection, source_path.to_str().expect("utf8 path"));
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE island_cluster_names (
+                    project_id INTEGER NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    evidence TEXT,
+                    accepted INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, fingerprint, origin, path)
+                );
+                INSERT INTO island_cluster_names
+                    (project_id, fingerprint, path, origin, evidence, accepted, created_at, updated_at)
+                VALUES
+                    (7, 'deadbeef', 'telemetry/otel', 'agent', NULL, 1, 't', 't'),
+                    (7, 'feedface', 'schema/zod', 'agent', NULL, 0, 't', 't');
+                ",
+            )
+            .expect("cluster-name schema");
+
+        let rows = load_project_rows_from_connection(&connection, 7).expect("rows");
+        // Accepted row is loaded; the rejected (accepted = 0) row is skipped.
+        assert_eq!(
+            rows.island_cluster_names.get("deadbeef").map(String::as_str),
+            Some("telemetry/otel")
+        );
+        assert!(!rows.island_cluster_names.contains_key("feedface"));
     }
 }

@@ -216,8 +216,8 @@ use import_coalesce::{
 };
 
 pub use plan::{
-    EmitPlan, PlannedBinding, PlannedExport, PlannedFile, PlannedImport, PlannedParamRename,
-    PlannedRename, PlannedRenameScope, PlannedTypeAnnotation, ValidatedEmitPlan,
+    EmitPlan, IslandClusterRecord, PlannedBinding, PlannedExport, PlannedFile, PlannedImport,
+    PlannedParamRename, PlannedRename, PlannedRenameScope, PlannedTypeAnnotation, ValidatedEmitPlan,
     ValidatedPlannedFile,
 };
 pub use plan_error::PlanError;

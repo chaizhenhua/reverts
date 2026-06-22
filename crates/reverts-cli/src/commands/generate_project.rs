@@ -187,6 +187,18 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         path: binding_name_index_path.clone(),
         source,
     })?;
+    // The `cluster-names` worklist: fingerprint → emitted island path, so a
+    // naming agent can read each `island/…` file and accept a semantic path keyed
+    // by the stable fingerprint (which survives the rename).
+    let island_clusters_path = metadata_dir.join("island-clusters.json");
+    std::fs::write(
+        &island_clusters_path,
+        serialize_island_cluster_manifest(&run.island_clusters),
+    )
+    .map_err(|source| CliRunError::WriteOutput {
+        path: island_clusters_path.clone(),
+        source,
+    })?;
     println!(
         "generated project {} into {} with {written} files ({} symbol-index entries)",
         args.project_id,
@@ -730,6 +742,28 @@ fn serialize_symbol_index(entries: &[reverts_pipeline::SymbolIndexEntry]) -> Str
                 "function_like": entry.function_like,
                 "dead": entry.dead,
                 "exported": entry.exported,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::Value::Array(rows))
+        .expect("serializing a JSON array of plain values is infallible")
+}
+
+/// Serializes the island-cluster manifest as a JSON array of
+/// `{fingerprint, path, binding_count}`. The `cluster-names` agent reads each
+/// `path`, inspects the file, and accepts a semantic path keyed by `fingerprint`.
+fn serialize_island_cluster_manifest(
+    clusters: &[reverts_pipeline::IslandClusterRecord],
+) -> String {
+    let mut sorted: Vec<&reverts_pipeline::IslandClusterRecord> = clusters.iter().collect();
+    sorted.sort_by(|a, b| b.binding_count.cmp(&a.binding_count).then(a.path.cmp(&b.path)));
+    let rows: Vec<serde_json::Value> = sorted
+        .iter()
+        .map(|record| {
+            serde_json::json!({
+                "fingerprint": record.fingerprint,
+                "path": record.path,
+                "binding_count": record.binding_count,
             })
         })
         .collect();

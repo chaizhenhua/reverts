@@ -148,6 +148,30 @@ pub(crate) struct ClusterGroup {
     pub(crate) cluster_source: String,
 }
 
+/// A stable, content-derived identity for an island cluster, used as the key for
+/// semantic file-name overrides (`cluster-names`). It is the FNV-1a hash of the
+/// cluster's ORIGINAL (minified) binding names in sorted order — invariant under
+/// semantic naming (names don't change the reference graph), so a name accepted
+/// for a cluster keeps applying across regenerations even as the mechanical
+/// `cluster-<id>` label shifts. Order-independent and dependency-free.
+pub(crate) fn cluster_fingerprint(moved_bindings: &BTreeSet<BindingName>) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    // BTreeSet iterates in sorted order, so the digest is independent of how the
+    // bindings were inserted.
+    for binding in moved_bindings {
+        for byte in binding.as_str().bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        // Separator so {"ab","c"} and {"a","bc"} never collide.
+        hash ^= 0x00;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
 /// The result of partitioning the whole island in a single parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IslandPartition {
@@ -892,6 +916,29 @@ mod tests {
 
     fn bindings(names: &[&str]) -> BTreeSet<BindingName> {
         names.iter().map(|name| BindingName::new(*name)).collect()
+    }
+
+    #[test]
+    fn cluster_fingerprint_is_order_independent_and_set_sensitive() {
+        // Same set, different insertion order → same fingerprint (BTreeSet sorts).
+        assert_eq!(
+            cluster_fingerprint(&bindings(&["b", "a", "c"])),
+            cluster_fingerprint(&bindings(&["c", "b", "a"]))
+        );
+        // A different membership → a different fingerprint.
+        assert_ne!(
+            cluster_fingerprint(&bindings(&["a", "b"])),
+            cluster_fingerprint(&bindings(&["a", "b", "c"]))
+        );
+        // The separator prevents concatenation collisions: {"ab","c"} ≠ {"a","bc"}.
+        assert_ne!(
+            cluster_fingerprint(&bindings(&["ab", "c"])),
+            cluster_fingerprint(&bindings(&["a", "bc"]))
+        );
+        // Lowercase hex digest of fixed width.
+        let fingerprint = cluster_fingerprint(&bindings(&["a"]));
+        assert_eq!(fingerprint.len(), 16);
+        assert!(fingerprint.chars().all(|ch| ch.is_ascii_hexdigit()));
     }
 
     fn externalization(

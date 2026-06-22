@@ -35,7 +35,7 @@ use reverts_planner::{ImportExportPlanner, PlanError};
 pub use pre_accept::{AcceptedProject, PreAcceptProject, PreAcceptTransformReport};
 pub use reverts_emitter::{EmittedFile, EmittedProject};
 pub use reverts_planner::{
-    RuntimeSetterMigrationBindingKey, RuntimeSetterMigrationBindingStatus,
+    IslandClusterRecord, RuntimeSetterMigrationBindingKey, RuntimeSetterMigrationBindingStatus,
     RuntimeSetterMigrationBlockerReason, RuntimeSetterMigrationBlockerReport,
 };
 
@@ -62,6 +62,9 @@ pub struct OutputRun {
     /// by no model module. Consumers must use this set — never path
     /// comparisons — to recognize such files.
     pub unmodularized_code_paths: std::collections::BTreeSet<String>,
+    /// Fingerprint → emitted path for every island cluster file, so the generate
+    /// command can publish the `cluster-names` worklist manifest.
+    pub island_clusters: Vec<reverts_planner::IslandClusterRecord>,
 }
 
 /// One emitted module-level binding: where it appears and under which name.
@@ -566,6 +569,7 @@ pub fn generate_project_from_prepared_with_options(
             module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
             unmodularized_code_paths: std::collections::BTreeSet::new(),
+            island_clusters: Vec::new(),
         });
     }
 
@@ -590,6 +594,7 @@ pub fn generate_project_from_prepared_with_options(
             module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
             unmodularized_code_paths: std::collections::BTreeSet::new(),
+            island_clusters: Vec::new(),
         });
     }
 
@@ -667,6 +672,7 @@ pub fn generate_project_from_prepared_with_options(
         module_output_paths,
         symbol_index,
         unmodularized_code_paths,
+        island_clusters: plan.island_clusters.clone(),
     })
 }
 
@@ -763,6 +769,7 @@ pub fn generate_project_inventory_from_prepared(
             module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
             unmodularized_code_paths: std::collections::BTreeSet::new(),
+            island_clusters: Vec::new(),
         });
     }
 
@@ -783,6 +790,7 @@ pub fn generate_project_inventory_from_prepared(
             module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
             unmodularized_code_paths: std::collections::BTreeSet::new(),
+            island_clusters: Vec::new(),
         });
     }
 
@@ -819,6 +827,7 @@ pub fn generate_project_inventory_from_prepared(
         module_output_paths,
         symbol_index: Vec::new(),
         unmodularized_code_paths,
+        island_clusters: plan.island_clusters.clone(),
     })
 }
 

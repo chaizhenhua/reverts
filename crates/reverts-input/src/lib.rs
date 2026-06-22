@@ -522,6 +522,11 @@ pub struct InputBundle {
     pub dependencies: Vec<ModuleDependencyInput>,
     pub package_attributions: Vec<PackageAttributionInput>,
     pub package_surfaces: Vec<PackageSurfaceInput>,
+    /// Accepted semantic file-path overrides for island clusters, keyed by the
+    /// cluster's content fingerprint (see the planner's `cluster_fingerprint`).
+    /// The planner consults this when naming each emitted `island/…` file; an
+    /// empty map keeps the mechanical `cluster-<id>` names.
+    pub island_cluster_names: BTreeMap<String, String>,
 }
 
 impl InputBundle {
@@ -648,6 +653,7 @@ impl InputBundle {
             dependencies: rows.dependencies,
             package_attributions: rows.package_attributions,
             package_surfaces: rows.package_surfaces,
+            island_cluster_names: rows.island_cluster_names,
         })
     }
 
@@ -757,6 +763,7 @@ impl InputBundle {
             dependencies: self.dependencies,
             package_attributions: self.package_attributions,
             package_surfaces: self.package_surfaces,
+            island_cluster_names: self.island_cluster_names,
         }
     }
 }
@@ -777,6 +784,8 @@ pub struct InputRows {
     pub dependencies: Vec<ModuleDependencyInput>,
     pub package_attributions: Vec<PackageAttributionInput>,
     pub package_surfaces: Vec<PackageSurfaceInput>,
+    /// Fingerprint → semantic island file path (see `InputBundle`).
+    pub island_cluster_names: BTreeMap<String, String>,
 }
 
 impl InputRows {
@@ -791,6 +800,7 @@ impl InputRows {
             dependencies: Vec::new(),
             package_attributions: Vec::new(),
             package_surfaces: Vec::new(),
+            island_cluster_names: BTreeMap::new(),
         }
     }
 
@@ -957,6 +967,7 @@ impl InputRows {
             dependencies,
             package_attributions,
             package_surfaces,
+            island_cluster_names: BTreeMap::new(),
         })
     }
 

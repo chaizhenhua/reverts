@@ -27,6 +27,7 @@ pub enum HelpTopic {
     NamingPlan,
     ModuleClassify,
     ModuleNames,
+    ClusterNames,
     IslandPackageCandidates,
     MatchModulesRecall,
 }
@@ -60,6 +61,7 @@ pub const NAMING_PROGRESS_COMMAND: &str = "naming-progress";
 pub const NAMING_PLAN_COMMAND: &str = "naming-plan";
 pub const MODULE_CLASSIFY_COMMAND: &str = "module-classify";
 pub const MODULE_NAMES_COMMAND: &str = "module-names";
+pub const CLUSTER_NAMES_COMMAND: &str = "cluster-names";
 pub const ISLAND_PACKAGE_CANDIDATES_COMMAND: &str = "island-package-candidates";
 pub const MATCH_MODULES_RECALL_COMMAND: &str = "match-modules-recall";
 
@@ -175,6 +177,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         summary: "Accept semantic file paths for first-party modules (renames emitted files)",
     },
     CommandSpec {
+        name: CLUSTER_NAMES_COMMAND,
+        topic: HelpTopic::ClusterNames,
+        summary: "Accept semantic file paths for island clusters by content fingerprint",
+    },
+    CommandSpec {
         name: ISLAND_PACKAGE_CANDIDATES_COMMAND,
         topic: HelpTopic::IslandPackageCandidates,
         summary: "Record Agent-proposed third-party package names for the eager entry island",
@@ -271,6 +278,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         }
         HelpTopic::ModuleNames => {
             "reverts-cli module-names\n\nUSAGE:\n    reverts-cli module-names --input <DB> --project-id <ID> (--list | --accept <MODULE_ID=SEMANTIC_PATH>... | --batch <TSV>) [--origin <SOURCE>] [--evidence <TEXT>] [--apply]\n\nOPTIONS:\n    --input <DB>        SQLite input database\n    --project-id <ID>   Positive project id\n    --list              List accepted module path overrides\n    --accept <SPEC>     Accept one module file path; format MODULE_ID=SEMANTIC_PATH (e.g. 247=feature/markdown-renderer)\n    --batch <TSV>       TSV rows: accept<TAB>MODULE_ID<TAB>SEMANTIC_PATH<TAB>[EVIDENCE]\n    --origin <SOURCE>   Name source label, default: agent\n    --evidence <TEXT>   Evidence for paths from automated origins\n    --apply             Persist changes; without it, dry-run validation only\n\nAccepted paths are stored as module_path_overrides and consumed by\ngenerate-project-v2: each module's emitted file moves to the semantic path and\nevery importing file's relative specifier is recomputed. The wire/export names\nare untouched, so the build still links."
+        }
+        HelpTopic::ClusterNames => {
+            "reverts-cli cluster-names\n\nUSAGE:\n    reverts-cli cluster-names --input <DB> --project-id <ID> (--list | --accept <FINGERPRINT=SEMANTIC_PATH>... | --batch <TSV>) [--origin <SOURCE>] [--evidence <TEXT>] [--apply]\n\nOPTIONS:\n    --input <DB>        SQLite input database\n    --project-id <ID>   Positive project id\n    --list              List accepted island-cluster name overrides\n    --accept <SPEC>     Accept one island file path; format FINGERPRINT=SEMANTIC_PATH (e.g. 3066d34e2f3b70cb=telemetry/opentelemetry-instrumentation)\n    --batch <TSV>       TSV rows: accept<TAB>FINGERPRINT<TAB>SEMANTIC_PATH<TAB>[EVIDENCE]\n    --origin <SOURCE>   Name source label, default: agent\n    --evidence <TEXT>   Evidence for paths from automated origins\n    --apply             Persist changes; without it, dry-run validation only\n\nIsland clusters (Louvain communities / chain-split chunks drained out of the\neager entry) emit at mechanical modules/island/cluster-<id>.ts paths. The\nFINGERPRINT is the cluster's stable content digest printed in\n.reverts/island-clusters.json by generate-project-v2; it survives the rename, so\na name keeps applying across regenerations. Accepted rows are stored as\nisland_cluster_names and consumed by generate-project-v2: the cluster's emitted\nfile moves UNDER modules/island/<SEMANTIC_PATH>.ts and every importer's relative\nspecifier is recomputed. The SEMANTIC_PATH is relative to modules/island/."
         }
         HelpTopic::IslandPackageCandidates => {
             "reverts-cli island-package-candidates\n\nUSAGE:\n    reverts-cli island-package-candidates --input <DB> --project-id <ID> (--list | --accept <PACKAGE>... [--version <V>] | --reject <PACKAGE>... | --batch <TSV>) [--evidence <TEXT>] [--apply]\n\nOPTIONS:\n    --input <DB>        SQLite input database\n    --project-id <ID>   Positive project id\n    --list              List accepted island package candidates\n    --accept <PACKAGE>  Accept a proposed library name inlined in the entry island; repeatable\n    --reject <PACKAGE>  Reject a previously proposed name; repeatable\n    --version <V>       Version specifier applied to every --accept (else the matcher resolves latest)\n    --evidence <TEXT>   Evidence for the proposal (string anchors / API shapes seen in the island)\n    --batch <TSV>       TSV rows: OP<TAB>PACKAGE<TAB>VERSION|-<TAB>EVIDENCE (OP = accept|reject)\n    --apply             Persist changes; without it, dry-run validation only\n\nA scope-hoisting bundler inlines whole libraries into the eager island with no\nmodule of their own, so the deterministic matcher has no (name, version) to\nfetch. An Agent reads the island and proposes package names; match-packages\nseeds materialization with the accepted names and the fingerprint cascade\nconfirms each. A wrong guess simply fails to match and produces no anchor, so\nthe Agent's judgement never bypasses the deterministic proof."

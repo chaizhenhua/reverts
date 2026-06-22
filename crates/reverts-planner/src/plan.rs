@@ -15,11 +15,39 @@ use crate::compiler_preservation::{CompilerPreservationDecision, SourceCompilerS
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EmitPlan {
     pub files: Vec<PlannedFile>,
+    /// Fingerprint → emitted-path record for every island cluster file, so the
+    /// generate command can publish a manifest the `cluster-names` workflow maps
+    /// semantic names by. Empty when the project has no island clusters.
+    pub island_clusters: Vec<IslandClusterRecord>,
+}
+
+/// One island cluster's identity in the emitted project: its stable content
+/// fingerprint (the `cluster-names` key), the path it emitted at, and how many
+/// bindings it holds (a coarse size hint for the naming agent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IslandClusterRecord {
+    pub fingerprint: String,
+    pub path: String,
+    pub binding_count: usize,
 }
 
 impl EmitPlan {
     pub fn push_file(&mut self, file: PlannedFile) {
         self.files.push(file);
+    }
+
+    /// Record an island cluster's fingerprint → emitted path for the manifest.
+    pub fn record_island_cluster(
+        &mut self,
+        fingerprint: String,
+        path: String,
+        binding_count: usize,
+    ) {
+        self.island_clusters.push(IslandClusterRecord {
+            fingerprint,
+            path,
+            binding_count,
+        });
     }
 
     pub fn validate(self) -> Result<ValidatedEmitPlan, crate::PlanError> {
@@ -57,12 +85,16 @@ impl ValidatedEmitPlan {
 
     #[must_use]
     pub fn into_inner(self) -> EmitPlan {
+        // Validation only carries files forward; the island-cluster manifest is
+        // read from the pre-validation `EmitPlan` (the pipeline keeps it), so a
+        // reconstructed plan legitimately has no records.
         EmitPlan {
             files: self
                 .files
                 .into_iter()
                 .map(ValidatedPlannedFile::into_inner)
                 .collect(),
+            island_clusters: Vec::new(),
         }
     }
 }

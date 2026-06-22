@@ -133,6 +133,7 @@ pub enum CliCommand {
     NamingPlan(NamingPlanArgs),
     ModuleClassify(ModuleClassifyArgs),
     ModuleNames(ModuleNamesArgs),
+    ClusterNames(commands::cluster_names::ClusterNamesArgs),
     IslandPackageCandidates(IslandPackageCandidatesArgs),
     MatchModulesRecall(MatchModulesRecallArgs),
 }
@@ -241,6 +242,8 @@ enum ClapCommand {
     ModuleClassify(ModuleClassifyArgs),
     #[command(name = "module-names", disable_help_flag = true)]
     ModuleNames(ModuleNamesArgs),
+    #[command(name = "cluster-names", disable_help_flag = true)]
+    ClusterNames(commands::cluster_names::ClusterNamesArgs),
     #[command(name = "island-package-candidates", disable_help_flag = true)]
     IslandPackageCandidates(IslandPackageCandidatesArgs),
     #[command(name = "match-modules-recall", disable_help_flag = true)]
@@ -291,6 +294,9 @@ impl ClapCli {
             Some(ClapCommand::ModuleClassify(args)) => CliCommand::ModuleClassify(args),
             Some(ClapCommand::ModuleNames(args)) => {
                 CliCommand::ModuleNames(commands::module_names::validate_args(args)?)
+            }
+            Some(ClapCommand::ClusterNames(args)) => {
+                CliCommand::ClusterNames(commands::cluster_names::validate_args(args)?)
             }
             Some(ClapCommand::IslandPackageCandidates(args)) => {
                 CliCommand::IslandPackageCandidates(
@@ -437,6 +443,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::NamingPlan(args) => commands::naming_plan::run(args),
         CliCommand::ModuleClassify(args) => commands::module_classify::run(args),
         CliCommand::ModuleNames(args) => commands::module_names::run(args),
+        CliCommand::ClusterNames(args) => commands::cluster_names::run(args),
         CliCommand::IslandPackageCandidates(args) => commands::island_package_candidates::run(args),
         CliCommand::MatchModulesRecall(args) => commands::match_modules::run(args),
     }
