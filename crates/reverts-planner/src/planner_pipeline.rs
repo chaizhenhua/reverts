@@ -28,28 +28,55 @@ use reverts_ir::BindingName;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitPlan, PlanError> {
+    let timing = std::env::var_os("REVERTS_GENERATE_TIMING").is_some();
+    let mut last = std::time::Instant::now();
+    macro_rules! tick {
+        ($label:expr) => {
+            if timing {
+                let now = std::time::Instant::now();
+                eprintln!(
+                    "planner pass timing: {} stage={:.3}s",
+                    $label,
+                    now.duration_since(last).as_secs_f64()
+                );
+                last = now;
+            }
+        };
+    }
     let mut state = PlanningState::new(context);
+    tick!("PlanningState::new");
     PlanModulesPass.run(context, &mut state)?;
+    tick!("PlanModulesPass");
     EmitPackageRuntimePass.run(context, &mut state)?;
+    tick!("EmitPackageRuntimePass");
     MarkEntrypointRuntimePass.run(context, &mut state)?;
+    tick!("MarkEntrypointRuntimePass");
     RerouteRuntimeBarrelImportsPass.run(context, &mut state)?;
+    tick!("RerouteRuntimeBarrelImportsPass");
     RegisterEntrypointIslandSettersPass.run(context, &mut state)?;
+    tick!("RegisterEntrypointIslandSettersPass");
     EmitRuntimeHelpersPass.run(context, &mut state)?;
+    tick!("EmitRuntimeHelpersPass");
     EmitCliEntrypointPass.run(context, &mut state)?;
+    tick!("EmitCliEntrypointPass");
     // Lower inlined CommonJS module bodies (`require('./x')`, `module.exports`)
     // to ESM BEFORE reachability/prune, so a module reached only through a
     // `require()` becomes a real `import` edge (else it is pruned) and its
     // relative require resolves to the rerouted emitted path.
     crate::commonjs_lowering::lower_commonjs_modules_to_esm(context.program(), &mut state.plan);
+    tick!("commonjs_lowering");
     PruneUnreachableFilesPass.run(context, &mut state)?;
     PruneDeadExportsPass.run(context, &mut state)?;
     PruneInvalidExportsPass.run(context, &mut state)?;
+    tick!("prune passes");
     crate::delazify_init_chains::delazify_init_chains(&mut state.plan);
+    tick!("delazify_init_chains");
     // Layer-2 export-name recovery: rename minified bindings to their real esbuild
     // export names across every planned file (modules + entrypoint island + runtime
     // helpers). Runs last so it sees the final, pruned file set.
     let export_names = crate::compute_modules::build_namespace_export_name_map(context.program());
     crate::compute_modules::apply_export_name_renames(&mut state.plan, &export_names);
+    tick!("export_name_renames");
     // Final correctness completion: a binding the runtime-reader-cluster
     // migration routed into a cycle-avoidance bucket can be referenced (in call
     // position, e.g. an esbuild `__esm` init thunk in an `await import()`
@@ -58,6 +85,7 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     // from the module that exports them — cycle-safe (augments an existing edge,
     // adds none) — so the emitted ESM has no dangling reference.
     crate::complete_referenced_imports::complete_referenced_module_imports(&mut state.plan);
+    tick!("complete_referenced_imports");
     // Add a NEW import for a referenced runtime helper (e.g. esbuild's shared
     // `__esm` initializer `st`) used cross-source-file with no import — safe
     // because helpers are emitted as hoisted function declarations.
@@ -75,21 +103,25 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     // (`cdA()`) the eager entrypoint makes to a sliced module it has no other
     // edge to. Deferred-call + same-bundle (shared runtime helpers) → cycle-safe.
     crate::complete_init_thunk_imports::complete_init_thunk_imports(&mut state.plan);
+    tick!("complete_*_imports (helper/coupled/thunk)");
     // Symmetric completion: every name a consumer imports from a sibling module
     // must actually be exported by it. Works from the final emitted imports, so
     // it closes export gaps the def-use graph missed (esbuild scope-hoisted
     // cross-module bindings) by re-exporting from the module's externalized
     // package or exporting a locally-defined binding.
     crate::export_completion::complete_cross_module_exports(&mut state.plan);
+    tick!("complete_cross_module_exports");
     // Correctness: after every import-completion pass has settled the final
     // import set, ensure no file imports a binding it reassigns (ESM imports are
     // read-only). Re-home each such binding to its writer as a local `var`.
     crate::localize_written_imports::localize_written_imports(&mut state.plan);
+    tick!("localize_written_imports");
     // Several late passes (CommonJS lowering, scope-hoisted export emission,
     // cross-module reconciliation) append `export { … }` statements into an
     // already-finalised single body chunk, which the per-chunk coalescer can no
     // longer merge — sweep the whole body text to drop any duplicate export name.
     crate::export_completion::dedupe_redundant_named_exports(&mut state.plan);
+    tick!("dedupe_redundant_named_exports");
     // Final readability step: for exported bindings whose semantic name is
     // provably safe to expose project-wide, flag their renames so the emitter
     // also renames the public import/export wire name (dropping the alias). Runs
@@ -99,6 +131,7 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
         &context.analysis().externalized_packages,
         &mut state.plan,
     );
+    tick!("flag_wire_safe_export_renames");
     Ok(state.plan)
 }
 
