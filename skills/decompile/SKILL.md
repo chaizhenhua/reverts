@@ -164,6 +164,7 @@ Repeat:
 
 | Condition | Action |
 |----------|--------|
+| third-party not yet externalized (vendored modules **or** inlined island libraries still present) | run full externalization first — shape A + shape B (see [Package matching](#package-matching--externalization-third-party)); externalization precedes agent naming |
 | unnamed app modules > 0 | classify + name agents (combined) |
 | `incomplete_decompilation > 0` | symbol naming agents for incomplete modules |
 | `missing_semantic_name > 0` | symbol naming agents |
@@ -205,12 +206,27 @@ naming.
 > mechanisms (steps 1–2) and the package/externalization pass always run
 > regardless of the chosen tier; the question only bounds *agent* naming.
 
-1. **Refine the denominator before measuring.** Classify modules so the ratio
-   targets the true first-party surface, not package or runtime-glue code
-   (`module-classify --auto --apply`; MCP: `update_modules` category edits). An
-   inflated denominator makes 100% unreachable; a silently deflated one fakes it.
-   Re-confirm denominator integrity per the [Phase 4 rules](#p0--naming-denominator-integrity-no-silent-exclusion)
-   — the entry-island group must be present and counted.
+1. **Externalize all third-party code FIRST — including inlined island
+   libraries — then refine the denominator.** This is the single most important
+   ordering rule, learned the hard way: a scope-hoisting bundler inlines whole
+   libraries (`@opentelemetry/*`, `@sentry/*`, `semver`, `shimmer`, `debug`,
+   `lodash`, …) into the eager island, and they can account for the **majority**
+   of the island's bindings. Naming inlined third-party code is wasted work and
+   inflates the denominator with names no human should ever read. So before any
+   agent naming:
+   - run the full [Package matching & externalization](#package-matching--externalization-third-party)
+     pass — **both** shape A (vendored `node_modules` modules) **and** shape B
+     (inlined island libraries via `island-package-candidates` →
+     `match-packages --materialize-package-sources`);
+   - then `module-classify --auto --apply` to mark package/runtime-glue modules.
+
+   An inflated denominator makes 100% unreachable; a silently deflated one fakes
+   it. Re-confirm denominator integrity per the
+   [Phase 4 rules](#p0--naming-denominator-integrity-no-silent-exclusion) — the
+   entry-island group must be present and counted, but only over the bindings
+   that remain *after* externalization. **Agent naming may not begin while
+   recognizable inlined-library regions still sit in the denominator** — route
+   them to externalization (next bullet) instead.
 
 2. **Auto-name deterministically when an upstream first-party source tree is
    available.** A historical/published source tree for the same app names
@@ -240,6 +256,20 @@ naming.
    (`binding-names --batch --apply`, keyed by `file_path`). Always pass
    `--evidence` so `origin=agent` names clear the naming gate on the first try;
    the worklist's `evidence_tokens` are the raw material for that evidence.
+
+   **The naming agent is also a third-party DETECTOR — wire it back to
+   externalization.** Reading the island, an agent reliably recognizes inlined
+   libraries by their fingerprints: the lazy-CJS module idiom
+   (`var NS = {}; var flag; function init(){…}` triples), `VERSION` constants,
+   and known class/enum/API names (`ProxyTracer`, `ZodError`, `SentryClient`, the
+   semver regex ladder, lodash `getRawTag`/`isPlainObject`). When an agent finds a
+   contiguous region that is a vendored package, it must **STOP naming that region
+   and instead emit a package candidate** —
+   `island-package-candidates --accept <pkg> [--version <v>] --evidence "<the
+   API/version anchors it saw>"` — so the next externalization pass removes the
+   whole region from the denominator. Do NOT spend names on code that is about to
+   be externalized. After each detection round, re-run shape-B externalization and
+   re-measure; only the genuine first-party remainder gets named.
 
 6. **Name the module files, not just the symbols.** Readability also means the
    emitted file paths. Accept a semantic path per module
