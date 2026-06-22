@@ -1,0 +1,119 @@
+# 充分外化工程方案 (Externalization project plan)
+
+目标:**外化能外化的内联第三方库**。每外化一个库,其全部文件从一方树中消失 →
+直接减少命名工作量,并缩小需要审计/维护的一方代码面。这是比"继续命名长尾"更高杠杆的方向。
+
+---
+
+## 0. 现状基线(已实测)
+
+- 生成树 **1702** 个 `.ts`:~80 vendored 模块语义化;**121 island cluster 已命名**;
+  约 **1531** 未命名。
+- `package_source_cache` 缓存 **~70 个包**(zod / react / react-dom / rxjs / fflate /
+  tar / winston / jsonwebtoken / semver / @sentry/electron …)。
+- **实际已外化:5 个** —— `@opentelemetry/api`(island barrel 合成)+
+  `ws` / `node-pty` / `@ant/claude-native` / `@ant/claude-swift`(module-path 外化)。
+- `package_attributions`:**13 accepted / 710 rejected**。
+- 大量内联第三方库(确认在产物中):zod 47 文件、ajv 39、semver 12、winston 9、
+  @sentry/electron 6、react 2,以及 agent 命名出的 axios / undici / rxjs / fflate /
+  fastify / tar / intl-messageformat / MCP SDK 等。
+
+诊断工具:`REVERTS_DEBUG_ISLAND_PKG=1 generate-project-v2`(commit `14e48a52`)逐包打印
+为何外化失败。
+
+## 外化机制三步(回顾)
+
+1. **锚定 anchor**:把内联岛代码匹配到真实包 `(name, version)`。确定性指纹匹配
+   (`match-packages`),或对无 node_modules 身份的库由 agent 提议
+   (`island-package-candidates`)+ 指纹确认。
+2. **源缓存 cache**:真实包源进 `package_source_cache`(已有 ~70)。
+3. **barrel 合成 synthesize**:解析真实 `index` → `子模块路径 → 导出名` 映射 →
+   每个内联单元换成 `import * as ns from 'pkg'; const X = ns.Name;` + init shim,删内联。
+
+---
+
+## 四期分解(按 ROI / 风险)
+
+### Phase 1 — index-shape 解析扩展(低风险,前置能力)
+- **现状**:`reverts_js::parse_index_reexports` 只读 CJS `module.exports = { … }`
+  (含 `const X = require('./x'); module.exports = { X }` 与 member-pick)。
+- **缺**:ESM `export { … }`、`export { X } from './x'`、tslib `__exportStar(require('./x'), exports)`、
+  `Object.defineProperty(exports, 'X', { get: … })`、`tslib.__exportStar`。
+- **改**:给解析器加这些形态(纯 `reverts-js`,可单测)。
+- **影响**:`@sentry/electron`(ESM `export {}`)等 ESM 形态包的 index 能被解析。
+- **风险**:低(纯解析,单测覆盖)。**单独收编文件 ≈ 0**(是 Phase 3/4 的前置)。
+
+### Phase 2 — semver 式过度归因修复(中风险)
+- **现状**:`semver` index 已加载,但 **32 个 trivial 单元全部被归到
+  `semver/classes/range`** → over-match gate(`fb4aa412`)正确拒绝整包。
+- **根因**:指纹匹配器把 32 个小模块误匹配到 range.js(大、独特,易被碰撞)。
+- **两条改法**:
+  - **A 精度(推荐)**:锚定阶段加阈值 —— 单元绑定数 / 指纹分必须与真实子模块相称,
+    否则不归因。剔除 32 个假阳性 → 真 range 唯一 → semver 干净外化,**gate 保持严格**。
+  - **B 合成层韧性**:某子模块被 N>1 单元 claim 时,不整包 bail,而是排除该歧义子模块的
+    单元(留内联),外化其余 1:1 干净映射的成员。部分外化。
+- **风险**:中。gate 是为修 RxJS `Class extends value undefined` 加的 —— 改动后**必须回归
+  验证 RxJS 不再坏**(已有 over_matched_duplicate_submodule_is_not_synthesized 测试)。
+- **预期收编**:semver 12 文件 + 同类 over-match 的包。
+- **依赖**:归因在 DB 里 → 走精度路线 A 需 **re-match**(见 §re-match);路线 B 可纯合成层。
+
+### Phase 3 — 锚定覆盖缺口(最高 ROI,高投入)← 最大收编
+- **现状**:zod(47 文件)/ react / rxjs / fflate / tar / winston 等**已缓存源但 0
+  attribution** —— matcher 从没把内联代码连到它们,连 island-package 候选都不是。
+- **先调查根因**(低风险):为何没归因?可能
+  (a) 当时 match-packages 没覆盖到;
+  (b) tree-shaken 后内联单元指纹与真实包不匹配;
+  (c) 这些库以 ESM / 无 `__commonJS` wrapper 形态内联,锚定机制(认 CJS 单元三元组)不识别。
+- **改**:据根因提升锚定覆盖(很可能是 (c) —— 锚定器只认 CJS-wrapper 单元,认不出
+  scope-hoist 的 ESM 内联;需扩锚定到 ESM 内联形态)。
+- **风险**:高 —— 需 fresh re-import + match-packages(在已匹配 DB 上重跑会
+  `BundleDetectorAmbiguous`,**必须 fresh import**)。
+- **预期收编**:zod 47 + ajv 39 + react / rxjs / winston / … → **可能 100–300+ 文件从树消失**。
+
+### Phase 4 — 跨包 barrel(sentry,中风险,新机制)
+- **现状**:`@sentry/electron` 的 index 从 **sibling 包**(`@sentry/node` / `@sentry/core`)
+  re-export,不是对自身子模块的映射;内联的实际是 @sentry/node/core 的实现。
+- **改**:barrel 合成支持跨包 —— index 的 `export { X } from '@sentry/node'` 把内联单元映到
+  `@sentry/node` 的命名空间成员(或保留为 `@sentry/electron` 的 re-export)。**需 Phase 1**。
+- **风险**:中(新映射模型)。
+- **预期收编**:sentry 6 文件 + sentry 生态(metrics / tracing / http-instrumentation …)。
+
+---
+
+## re-match 安全流程(Phase 2-A / Phase 3 需要)
+
+绝不在 `project.sqlite` 上重跑 `match-packages`(会重复 synthetic sources →
+`BundleDetectorAmbiguous`)。**Fresh** 流程(见 memory `chain-split-dag-routing`):
+
+1. `hdiutil attach DMG` → `npx @electron/asar extract … /private/tmp/claude-app` +
+   `cp -R app.asar.unpacked/*`。
+2. `/tmp/gen_import_evidence.py` → `import-unpacked` → `module-classify --auto --apply`
+   → `match-packages --package-source-root … --apply`(**含本期的锚定精度/覆盖改进**)。
+3. `generate-project-v2 --source-root src`。
+
+**命名迁移**:`cluster-names` 是 **fingerprint-keyed**,内容不变则 fingerprint 不变 →
+已命名的 121 个 cluster 在 fresh DB 上**仍适用**;只需把 `island_cluster_names` 行从旧 DB
+迁到 fresh DB(`SELECT … ` + `cluster-names --batch`)。同理 `module_path_overrides` /
+`semantic_binding_names` / `symbols.semantic_name`。
+
+---
+
+## 预期总收编
+
+Phase 2+3+4 成功后:zod 47 + ajv 39 + semver 12 + winston 9 + sentry 6 + react 2 +
+axios / undici / rxjs / fflate / tar / … → **粗估 150–300+ 文件从一方树消失**,命名长尾从
+~1531 降到 1000 出头,一方代码面显著缩小,且这些库的运行时换成 `import 'pkg'`(更忠实于
+"这是第三方依赖"的事实)。
+
+## 建议投入顺序
+
+1. **Phase 1**(低风险前置)先做 —— 解锁 ESM index 解析。
+2. **Phase 3 仅调查**(低风险)—— fresh re-match + 诊断,定位 zod/react 为何 0 attribution。
+   这一步决定 Phase 3 的真实 ROI,且不改任何已发布代码。
+3. 据调查结果实施 Phase 2(精度)/ 3(覆盖)/ 4(跨包)。
+
+## 风险提示
+
+- gate 放松 / 锚定放宽都可能重新产出**坏的外化**(把真实模块 body 清空)→ 每期必须
+  esbuild + e2e + DanglingNamedImport 审计全绿,且回归 RxJS/已外化包不退化。
+- Phase 3 依赖 fresh 环境重建(fragile);命名/语义数据需按上面的 fingerprint/id-key 迁移。
