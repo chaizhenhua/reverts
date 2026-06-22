@@ -387,4 +387,50 @@ mod tests {
         assert_eq!(rows[0].fingerprint, "deadbeef");
         assert_eq!(rows[0].semantic_path, "telemetry/otel");
     }
+
+    /// Re-naming an already-named cluster: accepting a NEW path for a fingerprint
+    /// retires the prior accepted row and activates the new one, so `--list` (and
+    /// thus the loader) sees exactly the latest name. This is what makes
+    /// "命名后再次重命名" safe — the old path fully disappears.
+    fn apply_accept(connection: &mut Connection, fingerprint: &str, path: &str) {
+        let transaction = connection.transaction().expect("txn");
+        transaction
+            .execute(
+                "UPDATE island_cluster_names SET accepted = 0, updated_at = datetime('now') \
+                 WHERE project_id = 1 AND fingerprint = ?1 AND accepted = 1",
+                params![fingerprint],
+            )
+            .expect("retire");
+        transaction
+            .execute(
+                "INSERT INTO island_cluster_names \
+                 (project_id, fingerprint, path, origin, evidence, accepted, created_at, updated_at) \
+                 VALUES (1, ?1, ?2, 'agent', NULL, 1, datetime('now'), datetime('now')) \
+                 ON CONFLICT(project_id, fingerprint, origin, path) DO UPDATE SET \
+                   accepted = 1, updated_at = datetime('now')",
+                params![fingerprint, path],
+            )
+            .expect("insert");
+        transaction.commit().expect("commit");
+    }
+
+    #[test]
+    fn re_accepting_a_fingerprint_replaces_the_active_name() {
+        let mut connection = Connection::open_in_memory().expect("open");
+        ensure_island_cluster_names_table(&connection).expect("create table");
+
+        apply_accept(&mut connection, "cafe", "telemetry/otel");
+        apply_accept(&mut connection, "cafe", "telemetry/otel-and-sentry");
+        let rows = load_cluster_name_rows(&connection, 1).expect("list");
+        // Exactly one ACTIVE name, the latest — the first is retired (accepted = 0).
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].semantic_path, "telemetry/otel-and-sentry");
+
+        // Re-naming BACK to the original path re-activates its (retired) row, not a
+        // duplicate — still exactly one active name.
+        apply_accept(&mut connection, "cafe", "telemetry/otel");
+        let rows = load_cluster_name_rows(&connection, 1).expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].semantic_path, "telemetry/otel");
+    }
 }
