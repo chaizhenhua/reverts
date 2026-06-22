@@ -6,9 +6,10 @@ use oxc_ast::{
     Visit,
     ast::{
         Argument, ArrowFunctionExpression, BindingPatternKind, BlockStatement, CallExpression,
-        Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
-        Expression, Function, FunctionBody, IdentifierReference, ImportDeclaration,
-        ImportExpression, ModuleExportName, NewExpression, Program, Statement, StringLiteral,
+        ClassElement, Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind,
+        ExportNamedDeclaration, Expression, Function, FunctionBody, IdentifierReference,
+        ImportDeclaration, ImportExpression, ModuleExportName, NewExpression, Program, Statement,
+        StringLiteral,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_block_statement, walk_call_expression,
@@ -705,6 +706,175 @@ pub fn collect_identifier_read_facts(
     }
 
     Err(JsError::ParseFailed(errors))
+}
+
+/// The names referenced but not bound at module scope — the source's free
+/// variables (external references plus runtime globals). Scope-aware via OXC
+/// semantic resolution: every identifier resolved to a binding, however deeply
+/// nested, is excluded. Unlike a flat lexical scan this never mistakes a
+/// function-local for a free reference, so callers can resolve exactly the
+/// cross-module references a relocated fragment depends on.
+pub fn free_identifiers_in_source(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<BTreeSet<String>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+        return Ok(semantic
+            .scopes()
+            .root_unresolved_references()
+            .keys()
+            .map(|name| name.as_str().to_string())
+            .collect());
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+/// A top-level class and the identifiers it references at DEFINITION time — the
+/// positions JS evaluates when the `class` statement executes: the `extends`
+/// clause, decorators, computed member keys, `static` field initializers, and
+/// `static {}` blocks. Instance fields, method bodies, and the constructor are
+/// excluded — they run later (construction / call), not at definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassEagerReferences {
+    pub class_name: String,
+    pub references: BTreeSet<String>,
+}
+
+/// For each top-level `class` declaration, collect its definition-time
+/// references (see [`ClassEagerReferences`]). A relocation pass uses this to
+/// decide whether moving a class across the entry↔cluster import boundary is
+/// eval-order-safe: it is safe only when none of these references is an eager
+/// binding that initializes after the moved class's module loads.
+pub fn collect_top_level_class_eager_references(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<ClassEagerReferences>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut out = Vec::new();
+        for statement in &parsed.program.body {
+            let Statement::ClassDeclaration(class) = statement else {
+                continue;
+            };
+            let Some(id) = class.id.as_ref() else {
+                continue;
+            };
+            let mut collector = NameReferenceCollector::default();
+            if let Some(super_class) = &class.super_class {
+                collector.visit_expression(super_class);
+            }
+            for decorator in &class.decorators {
+                collector.visit_expression(&decorator.expression);
+            }
+            for element in &class.body.body {
+                match element {
+                    ClassElement::PropertyDefinition(property) => {
+                        for decorator in &property.decorators {
+                            collector.visit_expression(&decorator.expression);
+                        }
+                        if property.computed
+                            && let Some(key) = property.key.as_expression()
+                        {
+                            collector.visit_expression(key);
+                        }
+                        // Only STATIC field initializers run at definition time.
+                        if property.r#static
+                            && let Some(value) = &property.value
+                        {
+                            collector.visit_expression(value);
+                        }
+                    }
+                    ClassElement::AccessorProperty(accessor) => {
+                        for decorator in &accessor.decorators {
+                            collector.visit_expression(&decorator.expression);
+                        }
+                        if accessor.computed
+                            && let Some(key) = accessor.key.as_expression()
+                        {
+                            collector.visit_expression(key);
+                        }
+                        if accessor.r#static
+                            && let Some(value) = &accessor.value
+                        {
+                            collector.visit_expression(value);
+                        }
+                    }
+                    ClassElement::MethodDefinition(method) => {
+                        for decorator in &method.decorators {
+                            collector.visit_expression(&decorator.expression);
+                        }
+                        // A computed key is evaluated at definition time; the
+                        // method body is inert until called, so it is skipped.
+                        if method.computed
+                            && let Some(key) = method.key.as_expression()
+                        {
+                            collector.visit_expression(key);
+                        }
+                    }
+                    ClassElement::StaticBlock(block) => {
+                        for statement in &block.body {
+                            collector.visit_statement(statement);
+                        }
+                    }
+                    ClassElement::TSIndexSignature(_) => {}
+                }
+            }
+            out.push(ClassEagerReferences {
+                class_name: id.name.to_string(),
+                references: collector.names,
+            });
+        }
+        return Ok(out);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+/// Collects the names of every identifier REFERENCE reached while visiting,
+/// used to read the free-ish references inside a class's definition-time nodes.
+/// Over-approximates (e.g. counts references inside a static initializer's
+/// nested arrow body) — safe for the relocation gate, which only ever keeps a
+/// class inline when in doubt.
+#[derive(Debug, Default)]
+struct NameReferenceCollector {
+    names: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for NameReferenceCollector {
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        self.names.insert(identifier.name.to_string());
+    }
 }
 
 #[derive(Debug, Default)]

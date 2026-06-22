@@ -23,7 +23,7 @@ use crate::runtime_helper_source_closure::{
 };
 use crate::runtime_helper_writes::rewrite_runtime_helper_writes;
 use crate::runtime_source_scan::{
-    call_identifiers_in_source, runtime_import_identifiers_in_source, value_identifiers_in_source,
+    call_identifiers_in_source, runtime_import_identifiers_in_source,
 };
 use crate::runtime_var_migration::RuntimeVarMigrationPlan;
 use crate::statements::{
@@ -347,6 +347,145 @@ fn island_cluster_path(cluster_id: usize) -> String {
 /// overhead and balloons the import graph for no readability gain.
 const MIN_ISLAND_CLUSTER_SIZE: usize = 24;
 
+/// A recognized inlined CommonJS module unit cleared for relocation into its own
+/// file: the memoized init thunk plus the exports object and (optional) guard
+/// variable it owns. Moving all three together keeps the writer co-located with
+/// the state it writes.
+struct RelocatableCjsModule {
+    init_fn: BindingName,
+    exports: BindingName,
+    guard: Option<BindingName>,
+}
+
+/// Recognize inlined CJS module units (`var EXPORTS = {}; var GUARD; function
+/// INIT() {…}`) that are SAFE to relocate whole. A unit qualifies only when each
+/// of its exports/guard variables is declared by a `var` statement that declares
+/// nothing else (so relocating it drags no unrelated binding along) and the
+/// guard is referenced nowhere outside the init body (so moving the guard with
+/// the init leaves no dangling read). Units failing either check are left inline.
+fn recognize_relocatable_cjs_modules(island_source: &str) -> Vec<RelocatableCjsModule> {
+    use reverts_js::{
+        ParseGoal, TopLevelStatementKind, collect_identifier_read_facts,
+        collect_top_level_statement_facts,
+    };
+
+    let modules = reverts_graph::recognize_cjs_island_modules(island_source);
+    if modules.is_empty() {
+        return Vec::new();
+    }
+    let Ok(facts) = collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript)
+    else {
+        return Vec::new();
+    };
+    let Ok(reads) = collect_identifier_read_facts(island_source, None, ParseGoal::TypeScript)
+    else {
+        return Vec::new();
+    };
+
+    // A `var` declaration is a clean owner of `name` when it declares `name` and
+    // every binding it declares is in `allowed` (the unit's own exports/guard).
+    let var_declares_only = |name: &str, allowed: &BTreeSet<&str>| -> bool {
+        facts.iter().any(|fact| {
+            matches!(fact.kind, TopLevelStatementKind::Variable)
+                && fact.bindings.iter().any(|binding| binding == name)
+                && fact
+                    .bindings
+                    .iter()
+                    .all(|binding| allowed.contains(binding.as_str()))
+        })
+    };
+
+    let mut relocatable = Vec::new();
+    for module in modules {
+        let mut allowed: BTreeSet<&str> = BTreeSet::new();
+        allowed.insert(module.exports.as_str());
+        if let Some(guard) = module.guard.as_deref() {
+            allowed.insert(guard);
+        }
+
+        // Each of the unit's variables must be declared by a `var` statement that
+        // declares only the unit's own bindings.
+        if !var_declares_only(module.exports.as_str(), &allowed) {
+            continue;
+        }
+        if let Some(guard) = module.guard.as_deref()
+            && guard != module.exports.as_str()
+            && !var_declares_only(guard, &allowed)
+        {
+            continue;
+        }
+
+        // The guard is private to the memoization: it must be read nowhere
+        // outside the init function body, or relocating it would dangle a read.
+        if let Some(guard) = module.guard.as_deref()
+            && guard != module.exports.as_str()
+        {
+            let (init_start, init_end) = module.body_span;
+            let leaks = reads.iter().any(|read| {
+                read.name == guard && !(read.byte_start >= init_start && read.byte_end <= init_end)
+            });
+            if leaks {
+                continue;
+            }
+        }
+
+        relocatable.push(RelocatableCjsModule {
+            init_fn: BindingName::new(module.init_fn.as_str()),
+            exports: BindingName::new(module.exports.as_str()),
+            guard: module.guard.as_deref().map(BindingName::new),
+        });
+    }
+    relocatable
+}
+
+/// The top-level classes that are eval-order-safe to relocate into a cluster
+/// file (which loads before the entry). Safe iff none of a class's
+/// definition-time references (`extends`, decorators, static initializers,
+/// static blocks, computed keys) is an EAGER island binding — a top-level
+/// `var`/`const`/`let`/`class`. Hoisted functions and imports are excluded from
+/// the eager set: both are available before the entry body runs, so referencing
+/// them at class-definition time across the cluster boundary is safe.
+fn eval_order_safe_island_classes(island_source: &str) -> BTreeSet<BindingName> {
+    use reverts_js::{ParseGoal, TopLevelStatementKind};
+
+    let Ok(facts) =
+        reverts_js::collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript)
+    else {
+        return BTreeSet::new();
+    };
+    let eager_island_bindings: BTreeSet<BindingName> = facts
+        .into_iter()
+        .filter(|fact| {
+            !matches!(
+                fact.kind,
+                TopLevelStatementKind::Function | TopLevelStatementKind::Import
+            )
+        })
+        .flat_map(|fact| {
+            fact.bindings
+                .into_iter()
+                .map(|name| BindingName::new(name.as_str()))
+        })
+        .collect();
+
+    let Ok(classes) = reverts_js::collect_top_level_class_eager_references(
+        island_source,
+        None,
+        ParseGoal::TypeScript,
+    ) else {
+        return BTreeSet::new();
+    };
+    classes
+        .into_iter()
+        .filter(|class| {
+            class.references.iter().all(|reference| {
+                !eager_island_bindings.contains(&BindingName::new(reference.as_str()))
+            })
+        })
+        .map(|class| BindingName::new(class.class_name.as_str()))
+        .collect()
+}
+
 /// Split the eager island's hoistable declarations into per-cluster files,
 /// pushing each cluster file onto `plan` and writing the rewritten entry body
 /// (cluster imports + the original eager statements in order + the re-exports
@@ -377,7 +516,7 @@ fn emit_island_clusters(
     for &cluster in clusters_by_binding.values() {
         *cluster_sizes.entry(cluster).or_default() += 1;
     }
-    let binding_to_cluster: BTreeMap<BindingName, usize> = clusters_by_binding
+    let mut binding_to_cluster: BTreeMap<BindingName, usize> = clusters_by_binding
         .into_iter()
         .filter(|(_, cluster)| cluster_sizes[cluster] >= MIN_ISLAND_CLUSTER_SIZE)
         .collect();
@@ -402,10 +541,56 @@ fn emit_island_clusters(
         );
     }
 
+    // Recognize inlined CommonJS module units (the bundler's memoized
+    // `var EXPORTS = {}; var GUARD; function INIT() {…}` triples) and relocate
+    // each into its own file. The init writes EXPORTS/GUARD, so it is pinned as a
+    // shared-state writer above; but moving the init TOGETHER WITH its exports
+    // and guard variable declarations co-locates the writer with the state it
+    // writes, so nothing is forked. We therefore un-pin each such init and force
+    // its (init, exports, guard) triple into a dedicated cluster, letting the
+    // normal cluster emission below wire the imports. `force_move_variables`
+    // tells the partitioner those exports/guard `var` declarations may move (it
+    // otherwise relocates only `function` declarations).
+    let mut force_move_variables: BTreeSet<BindingName> = BTreeSet::new();
+    let mut next_forced_cluster_id = binding_to_cluster.values().copied().max().unwrap_or(0) + 1;
+    for module in recognize_relocatable_cjs_modules(island_source) {
+        let cluster_id = next_forced_cluster_id;
+        next_forced_cluster_id += 1;
+        pinned.remove(&module.init_fn);
+        binding_to_cluster.insert(module.init_fn, cluster_id);
+        binding_to_cluster.insert(module.exports.clone(), cluster_id);
+        force_move_variables.insert(module.exports);
+        if let Some(guard) = module.guard {
+            binding_to_cluster.insert(guard.clone(), cluster_id);
+            force_move_variables.insert(guard);
+        }
+    }
+
+    // Determine which top-level classes are eval-order-safe to relocate. A moved
+    // cluster loads BEFORE the entry, so a `class X extends base {}` (and any
+    // static initializer/decorator/computed key) that references an EAGER island
+    // binding — one that initializes only when the entry body runs — would touch
+    // it too early and crash. Globals, entry imports, and hoisted functions are
+    // all available when the cluster loads, so a class is safe iff none of its
+    // definition-time references is an eager island binding (a top-level `var`/
+    // `const`/`let`/`class`, i.e. neither a hoisted function nor an import).
+    let movable_classes = eval_order_safe_island_classes(island_source);
+    for class in &movable_classes {
+        // A safe class that landed in no surviving Louvain cluster still gets its
+        // own file; one already clustered moves with its cohort.
+        if !binding_to_cluster.contains_key(class) {
+            let cluster_id = next_forced_cluster_id;
+            next_forced_cluster_id += 1;
+            binding_to_cluster.insert(class.clone(), cluster_id);
+        }
+    }
+
     let Some(partition) = crate::island_split::partition_island_into_clusters(
         island_source,
         &binding_to_cluster,
         &pinned,
+        &force_move_variables,
+        &movable_classes,
     ) else {
         return false;
     };
@@ -445,17 +630,28 @@ fn emit_island_clusters(
         let entry_imports_from_cluster =
             relative_import_specifier(ENTRYPOINT_ISLAND_PATH, cluster_path.as_str());
 
-        // What the cluster references that it does not declare itself.
-        let cluster_local: BTreeSet<BindingName> = local_bindings_in_source(&group.cluster_source)
-            .into_iter()
-            .map(BindingName::new)
-            .collect();
-        let cluster_needs: BTreeSet<BindingName> =
-            value_identifiers_in_source(group.cluster_source.as_str())
-                .into_iter()
-                .map(BindingName::new)
-                .filter(|name| !cluster_local.contains(name) && entry_available.contains(name))
-                .collect();
+        // What the cluster references that it does not declare itself: the
+        // source's free variables (module-scope unresolved references) by OXC
+        // scope resolution. A flat lexical "reads minus locals" scan misreads
+        // large relocated module bodies — it can miss a deeply nested local
+        // declaration and then route that local through the entry hub as a
+        // phantom import (entry re-exports a name it never declares). Scope-aware
+        // free-variable analysis excludes every local, however nested.
+        let cluster_needs: BTreeSet<BindingName> = reverts_js::free_identifiers_in_source(
+            group.cluster_source.as_str(),
+            None,
+            reverts_js::ParseGoal::TypeScript,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        // `arguments` is a function-scope pseudo-identifier, never a real
+        // cross-module binding; the flat-scan `entry_available` injects it for
+        // every function, so without this guard a relocated body that reads
+        // `arguments` would route it through the entry hub as a phantom export.
+        .filter(|name| name != "arguments")
+        .map(BindingName::new)
+        .filter(|name| entry_available.contains(name))
+        .collect();
 
         // Route each need to its source: another cluster (direct import) or the
         // entry (hub, for eager/entry-resident bindings only).
@@ -620,8 +816,10 @@ pub(crate) fn emit_planned_entrypoint_island(
     // become island-provided imports; the removed members leave the island.
     let externalizations = program.island_package_externalizations();
     if !externalizations.is_empty()
-        && let Some(externalized) =
-            crate::island_split::externalize_island_packages(island_source.as_str(), externalizations)
+        && let Some(externalized) = crate::island_split::externalize_island_packages(
+            island_source.as_str(),
+            externalizations,
+        )
     {
         for import in &externalized.imports {
             file.push_source(import.clone());

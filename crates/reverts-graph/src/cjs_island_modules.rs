@@ -64,11 +64,15 @@ pub fn recognize_cjs_island_modules(source: &str) -> Vec<RecognizedCjsModule> {
 /// Recognize inlined CommonJS module units in an already-parsed program.
 #[must_use]
 pub fn recognize_in_program(program: &Program<'_>) -> Vec<RecognizedCjsModule> {
-    // Anchor on the structural fact that distinguishes a module-exports object
-    // from any other binding: a module-scope `var X = {}` initialized to an
-    // EMPTY object literal. The init thunk must return one of these.
-    let exports_objects = module_scope_empty_object_vars(program);
-    if exports_objects.is_empty() {
+    // A module unit is a memoized init thunk over a module-scope EXPORTS variable.
+    // The exports object may be initialized at its declaration (`var X = {}`, the
+    // esbuild `__esm` shape) OR left undefined and built inside the thunk (`var X;
+    // … X = …`, the `__commonJS`/lazy shape). Both are recovered: the gate is that
+    // the thunk's returned identifier is a module-scope `var`, with the memoization
+    // structure (a guard test/assignment) carrying the rest of the signal. Keying
+    // on the empty-object initializer alone misses every lazily-built module.
+    let exports_candidates = module_scope_var_names(program);
+    if exports_candidates.is_empty() {
         return Vec::new();
     }
 
@@ -77,7 +81,7 @@ pub fn recognize_in_program(program: &Program<'_>) -> Vec<RecognizedCjsModule> {
         let Statement::FunctionDeclaration(function) = statement else {
             continue;
         };
-        let Some(module) = recognize_init_thunk(function, &exports_objects) else {
+        let Some(module) = recognize_init_thunk(function, &exports_candidates) else {
             continue;
         };
         modules.push(module);
@@ -85,20 +89,17 @@ pub fn recognize_in_program(program: &Program<'_>) -> Vec<RecognizedCjsModule> {
     modules
 }
 
-/// Names of module-scope `var X = {}` declarations (empty object literal init).
-fn module_scope_empty_object_vars(program: &Program<'_>) -> BTreeSet<String> {
+/// Names of every module-scope `var` binding — `var X = {}`, `var X;`, and each
+/// name in a grouped `var X, Y;`. A CJS exports object is one of these; the
+/// memoization structure recognized in [`recognize_init_thunk`] is what confirms
+/// a given var is actually a module's exports rather than ordinary state.
+fn module_scope_var_names(program: &Program<'_>) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for statement in &program.body {
         let Statement::VariableDeclaration(declaration) = statement else {
             continue;
         };
         for declarator in &declaration.declarations {
-            let Some(Expression::ObjectExpression(object)) = &declarator.init else {
-                continue;
-            };
-            if !object.properties.is_empty() {
-                continue;
-            }
             if let Some(name) = declarator.id.get_identifier() {
                 names.insert(name.as_str().to_string());
             }
@@ -107,10 +108,11 @@ fn module_scope_empty_object_vars(program: &Program<'_>) -> BTreeSet<String> {
     names
 }
 
-/// Recognize a zero-arg memoized init thunk over one of `exports_objects`.
+/// Recognize a zero-arg memoized init thunk whose returned identifier is one of
+/// `exports_candidates` (the module-scope `var` names).
 fn recognize_init_thunk(
     function: &Function<'_>,
-    exports_objects: &BTreeSet<String>,
+    exports_candidates: &BTreeSet<String>,
 ) -> Option<RecognizedCjsModule> {
     let id = function.id.as_ref()?;
     // Zero parameters: a CJS init thunk takes none.
@@ -119,9 +121,9 @@ fn recognize_init_thunk(
     }
     let body = function.body.as_ref()?;
 
-    let (exports, guard) = recognize_form_a(&body.statements)
-        .or_else(|| recognize_form_b(&body.statements))?;
-    if !exports_objects.contains(&exports) {
+    let (exports, guard) =
+        recognize_form_a(&body.statements).or_else(|| recognize_form_b(&body.statements))?;
+    if !exports_candidates.contains(&exports) {
         return None;
     }
     Some(RecognizedCjsModule {
@@ -142,7 +144,7 @@ fn recognize_form_a(statements: &[Statement<'_>]) -> Option<(String, Option<Stri
     let Some(Expression::SequenceExpression(sequence)) = ret.argument.as_ref() else {
         return None;
     };
-    let exports = identifier_name(sequence.expressions.last()?)?;
+    let exports = exports_binding_name(sequence.expressions.last()?)?;
     // Some leading element must be `GUARD || (...)` — the memoization gate.
     let guard = sequence.expressions.iter().find_map(|expression| {
         let Expression::LogicalExpression(logical) = expression else {
@@ -177,13 +179,28 @@ fn return_statement_identifier(statement: &Statement<'_>) -> Option<String> {
         },
         _ => return None,
     };
-    identifier_name(return_statement.argument.as_ref()?)
+    exports_binding_name(return_statement.argument.as_ref()?)
 }
 
 /// The name of a plain identifier-reference expression, else `None`.
 fn identifier_name(expression: &Expression<'_>) -> Option<String> {
     match expression {
         Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+        _ => None,
+    }
+}
+
+/// The exports binding a thunk's return expression names. Two shapes:
+/// - a plain identifier `E` (`var E = {}` esbuild `__esm` exports), → `E`;
+/// - a `MOD.exports` static member (`var MOD = { exports: {} }` CommonJS
+///   `module.exports`), → `MOD` (the module object is the relocatable binding;
+///   callers reach its surface only through the init thunk).
+fn exports_binding_name(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+        Expression::StaticMemberExpression(member) if member.property.name == "exports" => {
+            identifier_name(&member.object)
+        }
         _ => None,
     }
 }
@@ -195,7 +212,8 @@ mod tests {
     #[test]
     fn recognizes_form_a_return_guard_or_sequence() {
         // esbuild minified `__esm` shape.
-        let source = "var CH = {};\nvar pAe;\nfunction EOt() { return pAe || (pAe = 1, CH._x = 1), CH; }\n";
+        let source =
+            "var CH = {};\nvar pAe;\nfunction EOt() { return pAe || (pAe = 1, CH._x = 1), CH; }\n";
         let modules = recognize_cjs_island_modules(source);
         assert_eq!(modules.len(), 1, "{modules:?}");
         assert_eq!(modules[0].init_fn, "EOt");
@@ -227,16 +245,99 @@ mod tests {
         // not an init thunk; a guard returning a NON-exports identifier is out.
         let source = "var X = { a: 1 };\nvar Y = {};\nfunction f(a) { return a; }\nfunction g() { return Y2 || (Y2 = 1, 0), Y2; }\nfunction h() { return Y; }\n";
         let modules = recognize_cjs_island_modules(source);
-        assert!(modules.is_empty(), "no init-thunk shape should match: {modules:?}");
+        assert!(
+            modules.is_empty(),
+            "no init-thunk shape should match: {modules:?}"
+        );
     }
 
     #[test]
     fn rejects_init_thunk_over_non_exports_object() {
-        // The guarded return exists, but `Z` is never a `var Z = {}` — so it is
-        // not an inlined module-exports object and must not be recognized.
+        // The guarded return exists, but `Z` is never declared as a module-scope
+        // `var` — so it is not an inlined module-exports object.
         let source = "var Q = {};\nvar gZ;\nfunction iZ() { return gZ || (gZ = 1, 0), Z; }\n";
         let modules = recognize_cjs_island_modules(source);
         assert!(modules.is_empty(), "{modules:?}");
+    }
+
+    #[test]
+    fn recognizes_form_b_lazily_built_exports_without_object_init() {
+        // The `__commonJS` shape: EXPORTS is declared `var UvA, _Ye;` (NO `= {}`)
+        // and built inside the thunk. Keying on the empty-object initializer would
+        // miss this; the memoization structure plus a module-scope `var` is enough.
+        let source = "var UvA, _Ye;\nfunction iQA() { if (_Ye) return UvA; _Ye = 1; UvA = { sftp: 1 }; return UvA; }\n";
+        let modules = recognize_cjs_island_modules(source);
+        assert_eq!(modules.len(), 1, "{modules:?}");
+        assert_eq!(modules[0].init_fn, "iQA");
+        assert_eq!(modules[0].exports, "UvA");
+        assert_eq!(modules[0].guard.as_deref(), Some("_Ye"));
+    }
+
+    #[test]
+    fn recognizes_form_a_lazily_built_exports() {
+        // Form A over a non-empty-object exports var built inside the thunk.
+        let source = "var ybA;\nvar R2e;\nfunction C9r() { return R2e || (R2e = 1, ybA = { html: 1 }), ybA; }\n";
+        let modules = recognize_cjs_island_modules(source);
+        assert_eq!(modules.len(), 1, "{modules:?}");
+        assert_eq!(modules[0].init_fn, "C9r");
+        assert_eq!(modules[0].exports, "ybA");
+        assert_eq!(modules[0].guard.as_deref(), Some("R2e"));
+    }
+
+    #[test]
+    fn recognizes_exports_and_guard_in_one_grouped_var() {
+        // `var UvA, _Ye;` declares both the exports and the guard in one statement;
+        // both must be picked up as module-scope vars.
+        let source = "var UvA, _Ye;\nfunction iQA() { if (_Ye) return UvA; _Ye = 1; UvA = {}; return UvA; }\n";
+        let modules = recognize_cjs_island_modules(source);
+        assert_eq!(modules.len(), 1, "{modules:?}");
+        assert_eq!(modules[0].exports, "UvA");
+        assert_eq!(modules[0].guard.as_deref(), Some("_Ye"));
+    }
+
+    #[test]
+    fn recognizes_commonjs_module_exports_shape() {
+        // esbuild `__commonJS` shape: a `var MOD = { exports: {} }` module object,
+        // the thunk returns `MOD.exports`. The relocatable binding is `MOD`.
+        let source = "var fDA = { exports: {} };\nvar Ipe;\nfunction MqA() { if (Ipe) return fDA.exports; Ipe = 1; fDA.exports = { forge: 1 }; return fDA.exports; }\n";
+        let modules = recognize_cjs_island_modules(source);
+        assert_eq!(modules.len(), 1, "{modules:?}");
+        assert_eq!(modules[0].init_fn, "MqA");
+        assert_eq!(modules[0].exports, "fDA");
+        assert_eq!(modules[0].guard.as_deref(), Some("Ipe"));
+    }
+
+    #[test]
+    fn recognizes_form_a_module_exports_shape() {
+        let source = "var d_A = { exports: {} };\nvar bSe;\nfunction ts() { return bSe || (bSe = 1, d_A.exports = { x: 1 }), d_A.exports; }\n";
+        let modules = recognize_cjs_island_modules(source);
+        assert_eq!(modules.len(), 1, "{modules:?}");
+        assert_eq!(modules[0].init_fn, "ts");
+        assert_eq!(modules[0].exports, "d_A");
+        assert_eq!(modules[0].guard.as_deref(), Some("bSe"));
+    }
+
+    #[test]
+    fn rejects_member_return_that_is_not_dot_exports() {
+        // `MOD.other` is not the CommonJS exports member — not a module unit.
+        let source = "var MOD = { exports: {} };\nvar g;\nfunction f() { if (g) return MOD.other; g = 1; return MOD.other; }\n";
+        let modules = recognize_cjs_island_modules(source);
+        assert!(
+            modules.is_empty(),
+            "non-exports member is not a module: {modules:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_guarded_thunk_returning_a_local_not_module_var() {
+        // A zero-arg guarded thunk whose returned identifier is a FUNCTION-LOCAL,
+        // not a module-scope `var`, is not a module unit.
+        let source = "var g;\nfunction f() { if (g) return undefined; g = 1; let local = {}; return local; }\n";
+        let modules = recognize_cjs_island_modules(source);
+        assert!(
+            modules.is_empty(),
+            "local return is not a module unit: {modules:?}"
+        );
     }
 
     #[test]

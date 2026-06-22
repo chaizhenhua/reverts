@@ -167,6 +167,8 @@ pub(crate) fn partition_island_into_clusters(
     island_source: &str,
     binding_to_cluster: &BTreeMap<BindingName, usize>,
     written_bindings: &BTreeSet<BindingName>,
+    force_move_variables: &BTreeSet<BindingName>,
+    movable_classes: &BTreeSet<BindingName>,
 ) -> Option<IslandPartition> {
     let facts =
         collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript).ok()?;
@@ -176,10 +178,7 @@ pub(crate) fn partition_island_into_clusters(
     let mut groups: BTreeMap<usize, Accumulator> = BTreeMap::new();
     let mut extracted_ranges: Vec<(usize, usize)> = Vec::new();
     for fact in &facts {
-        // Only hoisted function declarations are eval-order-safe to relocate
-        // across the cyclic entry<->cluster import boundary; classes are not
-        // (see `extract_hoistable_cluster`).
-        if !matches!(fact.kind, TopLevelStatementKind::Function) || fact.bindings.is_empty() {
+        if fact.bindings.is_empty() {
             continue;
         }
         let names: Vec<BindingName> = fact
@@ -187,10 +186,33 @@ pub(crate) fn partition_island_into_clusters(
             .iter()
             .map(|name| BindingName::new(name.as_str()))
             .collect();
-        if names
-            .iter()
-            .any(|binding| written_bindings.contains(binding))
-        {
+        // A hoisted `function` declaration is always eval-order-safe to relocate
+        // across the cyclic entry<->cluster import boundary (it is inert until
+        // called). A `var` declaration moves ONLY when every binding it declares
+        // is a force-move variable — a recognized CJS module's exports/guard,
+        // co-moved with its init function so the writer and the shared state it
+        // writes relocate together and nothing is forked. A `class` moves ONLY
+        // when the caller proved it eval-order-safe (its definition-time
+        // references — `extends`, decorators, static initializers — touch no
+        // eager binding that initializes after the cluster loads).
+        let movable = match fact.kind {
+            TopLevelStatementKind::Function => !names
+                .iter()
+                .any(|binding| written_bindings.contains(binding)),
+            TopLevelStatementKind::Variable => names
+                .iter()
+                .all(|binding| force_move_variables.contains(binding)),
+            TopLevelStatementKind::Class => {
+                names
+                    .iter()
+                    .all(|binding| movable_classes.contains(binding))
+                    && !names
+                        .iter()
+                        .any(|binding| written_bindings.contains(binding))
+            }
+            _ => false,
+        };
+        if !movable {
             continue;
         }
         // Every binding must map to the SAME cluster; otherwise the statement
@@ -715,6 +737,8 @@ var theApi = apiInit();
             island,
             &binding_to_cluster(&[("a1", 0), ("a2", 0), ("b1", 1)]),
             &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
         )
         .expect("island should partition into clusters");
 
@@ -748,6 +772,95 @@ var theApi = apiInit();
     fn entry_imports_the_moved_bindings_back() {
         let statement = entry_import_for_cluster(&bindings(&["f1", "C1"]), "./island/cluster-0.js");
         assert_eq!(statement, "import { C1, f1 } from './island/cluster-0.js';");
+    }
+
+    #[test]
+    fn moves_forced_exports_and_guard_vars_with_their_init() {
+        // A recognized CJS module triple: `var EXPORTS = {}; var GUARD; function
+        // INIT() {…}`. With the three bindings mapped to one cluster and the
+        // exports/guard vars marked force-move, all three relocate together while
+        // an unrelated eager `var` and side effect stay in the entry.
+        let island = "var CH = {};\n\
+                      var pAe;\n\
+                      function EOt() { return pAe || (pAe = 1, CH._x = 1), CH; }\n\
+                      var keep = 1;\n\
+                      sideEffect();\n";
+        let mut force = BTreeSet::new();
+        force.insert(BindingName::new("CH"));
+        force.insert(BindingName::new("pAe"));
+        let partition = partition_island_into_clusters(
+            island,
+            &binding_to_cluster(&[("EOt", 7), ("CH", 7), ("pAe", 7)]),
+            &BTreeSet::new(),
+            &force,
+            &BTreeSet::new(),
+        )
+        .expect("partition succeeds");
+
+        let group = partition
+            .clusters
+            .iter()
+            .find(|g| g.cluster_id == 7)
+            .expect("cluster 7 exists");
+        assert_eq!(group.moved_bindings, bindings(&["CH", "EOt", "pAe"]));
+        assert!(group.cluster_source.contains("var CH = {};"));
+        assert!(group.cluster_source.contains("var pAe;"));
+        assert!(group.cluster_source.contains("function EOt()"));
+        // The module triple is gone from the entry; unrelated statements remain.
+        assert!(!partition.remaining_source.contains("function EOt()"));
+        assert!(!partition.remaining_source.contains("var CH = {};"));
+        assert!(!partition.remaining_source.contains("var pAe;"));
+        assert!(partition.remaining_source.contains("var keep = 1;"));
+        assert!(partition.remaining_source.contains("sideEffect();"));
+    }
+
+    #[test]
+    fn does_not_move_a_non_forced_var() {
+        // A plain `var` that is not a force-move variable stays in the entry even
+        // when mapped to a cluster (only functions and forced vars relocate).
+        let island = "var x = compute();\nfunction f() { return 1; }\n";
+        let partition = partition_island_into_clusters(
+            island,
+            &binding_to_cluster(&[("x", 0), ("f", 0)]),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .expect("partition succeeds");
+        assert!(partition.remaining_source.contains("var x = compute();"));
+        let group = &partition.clusters[0];
+        assert_eq!(group.moved_bindings, bindings(&["f"]));
+    }
+
+    #[test]
+    fn moves_eval_order_safe_class_but_keeps_unsafe_one() {
+        // `Safe` is listed in `movable_classes` and relocates; `Unsafe` is not
+        // (its caller proved it touches an eager binding) and stays in the entry.
+        let island = "class Safe extends Error {}\nclass Unsafe extends IslandBase {}\n";
+        let mut movable = BTreeSet::new();
+        movable.insert(BindingName::new("Safe"));
+        let partition = partition_island_into_clusters(
+            island,
+            &binding_to_cluster(&[("Safe", 3), ("Unsafe", 3)]),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &movable,
+        )
+        .expect("partition succeeds");
+
+        let group = &partition.clusters[0];
+        assert_eq!(group.moved_bindings, bindings(&["Safe"]));
+        assert!(group.cluster_source.contains("class Safe extends Error"));
+        assert!(
+            !partition
+                .remaining_source
+                .contains("class Safe extends Error")
+        );
+        assert!(
+            partition
+                .remaining_source
+                .contains("class Unsafe extends IslandBase")
+        );
     }
 
     #[test]
