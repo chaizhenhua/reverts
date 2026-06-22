@@ -20,8 +20,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_graph::{RecognizedCjsModule, function_referenced_names, recognize_cjs_island_modules};
 use reverts_graph::RuntimePrelude;
+use reverts_graph::{RecognizedCjsModule, function_referenced_names, recognize_cjs_island_modules};
+use reverts_js::{PackageIndexReexports, normalize_submodule_relpath};
 
 /// One island unit binding attributed to a package — the minimal input the
 /// aggregation needs (binding name + package identity), independent of the full
@@ -31,6 +32,25 @@ pub struct IslandUnitAttribution {
     pub binding: String,
     pub package_name: String,
     pub package_version: String,
+    /// The submodule the binding's unit was matched to (e.g. `classes/range.js`),
+    /// normalized later against a package index to synthesize a barrel. Empty when
+    /// unknown (older anchor rows / non-submodule matches).
+    pub export_specifier: String,
+}
+
+/// One member rebinding when a package's barrel is SYNTHESIZED from its real
+/// index rather than recovered in-bundle: bind a recognized member unit's exports
+/// object to the matching member(s) of the imported package namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynthesizedMemberBinding {
+    /// The member unit's memoized init thunk — kept alive as `fn init(){ return local; }`.
+    pub init_fn: String,
+    /// The member unit's exports object binding — the rebind target.
+    pub local_binding: String,
+    /// How to reconstruct `local_binding` from the package namespace `ns`:
+    /// a single `("", "Range")` means `local = ns.Range` (whole submodule object);
+    /// multiple `(key, name)` means `local = { key: ns.name, … }` (member-pick).
+    pub namespace_members: Vec<(String, String)>,
 }
 
 /// A per-package plan for externalizing an inlined package's island units.
@@ -55,6 +75,10 @@ pub struct IslandPackagePlan {
     pub externalizable: bool,
     /// Why the package is not externalizable, when it is not.
     pub skip_reason: Option<String>,
+    /// Per-member rebindings when the barrel was SYNTHESIZED from the real index
+    /// (the in-bundle barrel was tree-shaken away). Empty for the recovered-barrel
+    /// case; non-empty selects the synthesized emission path.
+    pub synthesized_members: Vec<SynthesizedMemberBinding>,
 }
 
 /// Group island package anchors by package and recover each package's barrel,
@@ -63,14 +87,17 @@ pub struct IslandPackagePlan {
 pub fn aggregate_island_packages(
     prelude: &RuntimePrelude,
     attributions: &[IslandUnitAttribution],
+    index_maps: &BTreeMap<(String, String), PackageIndexReexports>,
 ) -> Vec<IslandPackagePlan> {
     let units = recognize_cjs_island_modules(&prelude.source);
     if units.is_empty() || attributions.is_empty() {
         return Vec::new();
     }
 
-    // binding name -> (package, version), from the per-unit attributions.
+    // binding name -> (package, version) and binding name -> submodule relpath,
+    // from the per-unit attributions.
     let mut package_of_binding: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
+    let mut submodule_of_binding: BTreeMap<&str, String> = BTreeMap::new();
     for attribution in attributions {
         package_of_binding.insert(
             attribution.binding.as_str(),
@@ -79,6 +106,18 @@ pub fn aggregate_island_packages(
                 attribution.package_version.as_str(),
             ),
         );
+        if !attribution.export_specifier.is_empty() {
+            // Strip the leading `<pkg>/` so the relpath matches index entries.
+            let relpath = attribution
+                .export_specifier
+                .strip_prefix(attribution.package_name.as_str())
+                .and_then(|rest| rest.strip_prefix('/'))
+                .unwrap_or(attribution.export_specifier.as_str());
+            submodule_of_binding.insert(
+                attribution.binding.as_str(),
+                normalize_submodule_relpath(relpath),
+            );
+        }
     }
 
     // The init-call graph: an edge i -> j means unit i's body calls unit j's
@@ -116,7 +155,25 @@ pub fn aggregate_island_packages(
     members_by_package
         .into_iter()
         .map(|(package, (member_indices, version))| {
-            build_plan(package, version, &member_indices, &units, &adjacency)
+            // Per-member submodule relpath, for synthesizing a barrel from the
+            // package's real index when no in-bundle barrel exists.
+            let member_submodule: BTreeMap<usize, String> = member_indices
+                .iter()
+                .filter_map(|&index| {
+                    unit_submodule(&units[index], &submodule_of_binding)
+                        .map(|relpath| (index, relpath))
+                })
+                .collect();
+            let index = index_maps.get(&(package.to_string(), version.to_string()));
+            build_plan(
+                package,
+                version,
+                &member_indices,
+                &units,
+                &adjacency,
+                &member_submodule,
+                index,
+            )
         })
         .collect()
 }
@@ -177,7 +234,11 @@ fn unit_package<'a>(
     package_of_binding
         .get(unit.exports.as_str())
         .or_else(|| package_of_binding.get(unit.init_fn.as_str()))
-        .or_else(|| unit.guard.as_deref().and_then(|g| package_of_binding.get(g)))
+        .or_else(|| {
+            unit.guard
+                .as_deref()
+                .and_then(|g| package_of_binding.get(g))
+        })
         .copied()
 }
 
@@ -203,15 +264,35 @@ fn unit_referenced_inits(
     referenced
 }
 
+/// The submodule relpath a unit was matched to: the attribution of any of its
+/// three bindings (mirrors `unit_package`).
+fn unit_submodule(
+    unit: &RecognizedCjsModule,
+    submodule_of_binding: &BTreeMap<&str, String>,
+) -> Option<String> {
+    submodule_of_binding
+        .get(unit.exports.as_str())
+        .or_else(|| submodule_of_binding.get(unit.init_fn.as_str()))
+        .or_else(|| {
+            unit.guard
+                .as_deref()
+                .and_then(|guard| submodule_of_binding.get(guard))
+        })
+        .cloned()
+}
+
 /// Build a package plan: recover the barrel (the tightest unit that
 /// transitively reaches every member submodule) and collect the bindings to
-/// drop.
+/// drop. When no in-bundle barrel exists but the real package index is known,
+/// fall back to synthesizing one from the index.
 fn build_plan(
     package: &str,
     version: &str,
     member_indices: &[usize],
     units: &[RecognizedCjsModule],
     adjacency: &[Vec<usize>],
+    member_submodule: &BTreeMap<usize, String>,
+    index: Option<&PackageIndexReexports>,
 ) -> IslandPackagePlan {
     let members: BTreeSet<usize> = member_indices.iter().copied().collect();
 
@@ -263,26 +344,99 @@ fn build_plan(
                 member_bindings,
                 externalizable: true,
                 skip_reason: None,
+                synthesized_members: Vec::new(),
             }
         }
-        _ => IslandPackagePlan {
-            package_name: package.to_string(),
-            version: version.to_string(),
-            import_specifier: package.to_string(),
-            entry_init: String::new(),
-            entry_exports: String::new(),
-            entry_guard: None,
-            member_bindings: BTreeSet::new(),
-            externalizable: false,
-            skip_reason: Some(if ambiguous {
-                "ambiguous barrel: multiple units reach the members with equal closure size"
-                    .to_string()
-            } else {
-                "no single unit transitively reaches all of the package's member submodules"
-                    .to_string()
-            }),
-        },
+        _ => {
+            // No single in-bundle barrel. If the real package index is known, the
+            // package was tree-shaken (its barrel dropped) — synthesize one.
+            if !ambiguous
+                && let Some(index) = index
+                && let Some(plan) = try_synthesize_plan(
+                    package,
+                    version,
+                    member_indices,
+                    units,
+                    member_submodule,
+                    index,
+                )
+            {
+                return plan;
+            }
+            IslandPackagePlan {
+                package_name: package.to_string(),
+                version: version.to_string(),
+                import_specifier: package.to_string(),
+                entry_init: String::new(),
+                entry_exports: String::new(),
+                entry_guard: None,
+                member_bindings: BTreeSet::new(),
+                externalizable: false,
+                skip_reason: Some(if ambiguous {
+                    "ambiguous barrel: multiple units reach the members with equal closure size"
+                        .to_string()
+                } else {
+                    "no single unit transitively reaches all of the package's member submodules"
+                        .to_string()
+                }),
+                synthesized_members: Vec::new(),
+            }
+        }
     }
+}
+
+/// Synthesize a barrel from the real package index: every anchored member unit
+/// must map (via its submodule) to at least one index re-export, giving a
+/// rebinding from the package namespace. Returns `None` if any member has no
+/// index entry (so the package is left inlined rather than partly externalized).
+fn try_synthesize_plan(
+    package: &str,
+    version: &str,
+    member_indices: &[usize],
+    units: &[RecognizedCjsModule],
+    member_submodule: &BTreeMap<usize, String>,
+    index: &PackageIndexReexports,
+) -> Option<IslandPackagePlan> {
+    let mut synthesized_members = Vec::new();
+    let mut member_bindings: BTreeSet<String> = BTreeSet::new();
+    for &unit_index in member_indices {
+        let unit = &units[unit_index];
+        let relpath = member_submodule.get(&unit_index)?; // unknown submodule → bail
+        let reexports = index.for_submodule(relpath);
+        if reexports.is_empty() {
+            return None; // member not re-exported by the index → cannot externalize cleanly
+        }
+        let namespace_members: Vec<(String, String)> = reexports
+            .iter()
+            .map(|reexport| {
+                (
+                    reexport.member.clone().unwrap_or_default(),
+                    reexport.export_name.clone(),
+                )
+            })
+            .collect();
+        synthesized_members.push(SynthesizedMemberBinding {
+            init_fn: unit.init_fn.clone(),
+            local_binding: unit.exports.clone(),
+            namespace_members,
+        });
+        extend_unit_bindings(&mut member_bindings, unit);
+    }
+    if synthesized_members.is_empty() {
+        return None;
+    }
+    Some(IslandPackagePlan {
+        package_name: package.to_string(),
+        version: version.to_string(),
+        import_specifier: package.to_string(),
+        entry_init: String::new(),
+        entry_exports: String::new(),
+        entry_guard: None,
+        member_bindings,
+        externalizable: true,
+        skip_reason: None,
+        synthesized_members,
+    })
 }
 
 fn extend_unit_bindings(bindings: &mut BTreeSet<String>, unit: &RecognizedCjsModule) {
@@ -316,6 +470,14 @@ mod tests {
             binding: binding.to_string(),
             package_name: package.to_string(),
             package_version: "1.9.0".to_string(),
+            export_specifier: String::new(),
+        }
+    }
+
+    fn anchor_sub(binding: &str, package: &str, specifier: &str) -> IslandUnitAttribution {
+        IslandUnitAttribution {
+            export_specifier: specifier.to_string(),
+            ..anchor(binding, package)
         }
     }
 
@@ -330,17 +492,24 @@ mod tests {
         let plans = aggregate_island_packages(
             &prelude(source),
             &[anchor("eA", "pkg-x"), anchor("eB", "pkg-x")],
+            &BTreeMap::new(),
         );
         assert_eq!(plans.len(), 1, "{plans:?}");
         let plan = &plans[0];
         assert!(plan.externalizable, "{plan:?}");
         assert_eq!(plan.package_name, "pkg-x");
         assert_eq!(plan.import_specifier, "pkg-x");
-        assert_eq!(plan.entry_init, "iIdx", "barrel recovered via init-call graph");
+        assert_eq!(
+            plan.entry_init, "iIdx",
+            "barrel recovered via init-call graph"
+        );
         assert_eq!(plan.entry_exports, "eIdx");
         // The whole set — both members and the barrel triple — is dropped.
         for binding in ["eA", "gA", "iA", "eB", "gB", "iB", "eIdx", "gIdx", "iIdx"] {
-            assert!(plan.member_bindings.contains(binding), "missing {binding}: {plan:?}");
+            assert!(
+                plan.member_bindings.contains(binding),
+                "missing {binding}: {plan:?}"
+            );
         }
     }
 
@@ -352,6 +521,7 @@ mod tests {
         let plans = aggregate_island_packages(
             &prelude(source),
             &[anchor("eA", "pkg-y"), anchor("eB", "pkg-y")],
+            &BTreeMap::new(),
         );
         assert_eq!(plans.len(), 1);
         assert!(!plans[0].externalizable);
@@ -359,8 +529,46 @@ mod tests {
     }
 
     #[test]
+    fn synthesizes_barrel_from_index_when_no_in_bundle_barrel() {
+        // Two anchored submodules, no in-bundle barrel — but the real index maps
+        // each submodule to a namespace member, so synthesis externalizes anyway.
+        let source = "var eA = {};\nvar gA;\nfunction iA() { return gA || (gA = 1, eA.a = 1), eA; }\n\
+                      var eB = {};\nvar gB;\nfunction iB() { return gB || (gB = 1, eB.b = 2), eB; }\n";
+        let mut index_maps = BTreeMap::new();
+        index_maps.insert(
+            ("pkg-z".to_string(), "1.9.0".to_string()),
+            reverts_js::parse_index_reexports(
+                "module.exports = { A: require('./classes/a'), B: require('./classes/b') };",
+            ),
+        );
+        let plans = aggregate_island_packages(
+            &prelude(source),
+            &[
+                anchor_sub("eA", "pkg-z", "pkg-z/classes/a.js"),
+                anchor_sub("eB", "pkg-z", "pkg-z/classes/b.js"),
+            ],
+            &index_maps,
+        );
+        assert_eq!(plans.len(), 1, "{plans:?}");
+        let plan = &plans[0];
+        assert!(plan.externalizable, "{plan:?}");
+        assert_eq!(plan.synthesized_members.len(), 2, "{plan:?}");
+        let member_a = plan
+            .synthesized_members
+            .iter()
+            .find(|member| member.local_binding == "eA")
+            .expect("eA member");
+        assert_eq!(
+            member_a.namespace_members,
+            vec![(String::new(), "A".to_string())]
+        );
+        assert_eq!(member_a.init_fn, "iA");
+    }
+
+    #[test]
     fn no_anchors_yields_no_plans() {
-        let source = "var eA = {};\nvar gA;\nfunction iA() { return gA || (gA = 1, eA.a = 1), eA; }\n";
-        assert!(aggregate_island_packages(&prelude(source), &[]).is_empty());
+        let source =
+            "var eA = {};\nvar gA;\nfunction iA() { return gA || (gA = 1, eA.a = 1), eA; }\n";
+        assert!(aggregate_island_packages(&prelude(source), &[], &BTreeMap::new()).is_empty());
     }
 }

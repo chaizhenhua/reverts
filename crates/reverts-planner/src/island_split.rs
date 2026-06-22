@@ -540,6 +540,16 @@ pub(crate) fn entry_import_for_cluster(
     named_import_statement(moved_bindings.iter(), specifier)
 }
 
+/// A collision-free identifier alias for an `import * as` namespace, derived from
+/// a package specifier (`@opentelemetry/api` → `_pkg__opentelemetry_api`).
+fn sanitize_namespace_alias(specifier: &str) -> String {
+    let mut alias = String::from("_pkg_");
+    for ch in specifier.chars() {
+        alias.push(if ch.is_ascii_alphanumeric() { ch } else { '_' });
+    }
+    alias
+}
+
 /// The island after inlined packages were replaced with bare imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IslandExternalization {
@@ -624,12 +634,26 @@ pub(crate) fn externalize_island_packages(
             }
         }
 
-        // Safety gate: every INTERNAL member (not the barrel surface) must be
-        // declared by a removable statement and referenced only within them.
+        // The package's SURFACE bindings stay alive (rebound to the namespace /
+        // shimmed); every other member is INTERNAL and must be declared by a
+        // removable statement and read only within them. For a recovered barrel
+        // the surface is its exports+init; for a synthesized barrel it is every
+        // member unit's exports object + init thunk.
+        let surface: BTreeSet<&BindingName> = if package.synthesized_members.is_empty() {
+            [&package.entry_exports, &package.entry_init]
+                .into_iter()
+                .collect()
+        } else {
+            package
+                .synthesized_members
+                .iter()
+                .flat_map(|member| [&member.local_binding, &member.init_fn])
+                .collect()
+        };
         let internal: BTreeSet<&BindingName> = package
             .member_bindings
             .iter()
-            .filter(|binding| **binding != package.entry_exports && **binding != package.entry_init)
+            .filter(|binding| !surface.contains(binding))
             .collect();
         let all_covered = internal.iter().all(|binding| covered.contains(*binding));
         // An internal member is referenced outside the package iff it has an
@@ -645,31 +669,63 @@ pub(crate) fn externalize_island_packages(
             continue; // leave this package inlined — not provably safe
         }
 
-        // Bind the barrel exports to the real package via a CJS-interop import:
-        // the inlined barrel produced the package's `module.exports` object, so
-        // `<exports>` must be that object — `ns.default ?? ns` yields it whether
-        // the package is CommonJS (default = module.exports) or ESM (namespace),
-        // and keeps named access working through a bundler's ESM-namespace wrap.
-        // The namespace import + const binding go at the top (imports hoist; the
-        // const initializes before the island body reads `<exports>`); the barrel
-        // init shim is a hoisted function appended at the end.
-        let namespace_alias = format!("{}__ext", package.entry_exports.as_str());
-        imports.push(format!(
-            "import * as {namespace_alias} from '{}';",
-            package.import_specifier
-        ));
-        imports.push(format!(
-            "const {} = {namespace_alias}.default ?? {namespace_alias};",
-            package.entry_exports.as_str()
-        ));
-        shims.push_str(&format!(
-            "function {}() {{ return {}; }}\n",
-            package.entry_init.as_str(),
-            package.entry_exports.as_str()
-        ));
+        if package.synthesized_members.is_empty() {
+            // RECOVERED barrel: bind its exports object to the real package via a
+            // CJS-interop import. `ns.default ?? ns` yields the `module.exports`
+            // object whether the package is CommonJS or ESM. The namespace import +
+            // const go at the top (imports hoist; the const initializes before the
+            // island body reads `<exports>`); the init shim is a hoisted function.
+            let namespace_alias = format!("{}__ext", package.entry_exports.as_str());
+            imports.push(format!(
+                "import * as {namespace_alias} from '{}';",
+                package.import_specifier
+            ));
+            imports.push(format!(
+                "const {} = {namespace_alias}.default ?? {namespace_alias};",
+                package.entry_exports.as_str()
+            ));
+            shims.push_str(&format!(
+                "function {}() {{ return {}; }}\n",
+                package.entry_init.as_str(),
+                package.entry_exports.as_str()
+            ));
+            entry_bindings.insert(package.entry_exports.clone());
+        } else {
+            // SYNTHESIZED barrel: the in-bundle barrel was tree-shaken, so rebind
+            // each member unit's exports object to its namespace member(s) and shim
+            // its init thunk. `ns.default ?? ns` unwraps CJS/ESM interop once.
+            let alias = sanitize_namespace_alias(&package.import_specifier);
+            let unwrapped = format!("{alias}_d");
+            imports.push(format!(
+                "import * as {alias} from '{}';",
+                package.import_specifier
+            ));
+            imports.push(format!("const {unwrapped} = {alias}.default ?? {alias};"));
+            for member in &package.synthesized_members {
+                let value = match member.namespace_members.as_slice() {
+                    [(key, name)] if key.is_empty() => format!("{unwrapped}.{name}"),
+                    members => {
+                        let fields: Vec<String> = members
+                            .iter()
+                            .map(|(key, name)| format!("{key}: {unwrapped}.{name}"))
+                            .collect();
+                        format!("{{ {} }}", fields.join(", "))
+                    }
+                };
+                imports.push(format!(
+                    "const {} = {value};",
+                    member.local_binding.as_str()
+                ));
+                shims.push_str(&format!(
+                    "function {}() {{ return {}; }}\n",
+                    member.init_fn.as_str(),
+                    member.local_binding.as_str()
+                ));
+                entry_bindings.insert(member.local_binding.clone());
+            }
+        }
         removed_ranges.extend(package_ranges);
         externalized_bindings.extend(covered);
-        entry_bindings.insert(package.entry_exports.clone());
     }
 
     if removed_ranges.is_empty() {
@@ -718,6 +774,41 @@ mod tests {
             entry_init: BindingName::new(init),
             entry_exports: BindingName::new(exports),
             member_bindings: bindings(members),
+            synthesized_members: Vec::new(),
+        }
+    }
+
+    /// `(init_fn, exports/local, guard, &[(object_key, namespace_member)])`.
+    type SynthMemberSpec<'a> = (&'a str, &'a str, &'a str, &'a [(&'a str, &'a str)]);
+
+    fn synthesized_externalization(
+        specifier: &str,
+        members: &[SynthMemberSpec],
+    ) -> IslandPackageExternalization {
+        let mut member_bindings = BTreeSet::new();
+        let synthesized_members = members
+            .iter()
+            .map(|(init, local, guard, namespace)| {
+                member_bindings.insert(BindingName::new(*init));
+                member_bindings.insert(BindingName::new(*local));
+                member_bindings.insert(BindingName::new(*guard));
+                reverts_model::SynthesizedMemberExternalization {
+                    init_fn: BindingName::new(*init),
+                    local_binding: BindingName::new(*local),
+                    namespace_members: namespace
+                        .iter()
+                        .map(|(key, name)| ((*key).to_string(), (*name).to_string()))
+                        .collect(),
+                }
+            })
+            .collect();
+        IslandPackageExternalization {
+            import_specifier: specifier.to_string(),
+            version: "1.0.0".to_string(),
+            entry_init: BindingName::new(""),
+            entry_exports: BindingName::new(""),
+            member_bindings,
+            synthesized_members,
         }
     }
 
@@ -1003,6 +1094,73 @@ var theApi = apiInit();
     fn entry_imports_the_moved_bindings_back() {
         let statement = entry_import_for_cluster(&bindings(&["f1", "C1"]), "./island/cluster-0.js");
         assert_eq!(statement, "import { C1, f1 } from './island/cluster-0.js';");
+    }
+
+    #[test]
+    fn synthesized_externalization_rebinds_members_and_shims_inits() {
+        // Two member units, no in-bundle barrel. Each exports object rebinds to a
+        // namespace member; each init thunk shims; member statements are removed.
+        let island = "var eRange = {};\nvar gRange;\nfunction iRange() { return gRange || (gRange = 1, eRange.x = 1), eRange; }\n\
+                      var eCmp = {};\nvar gCmp;\nfunction iCmp() { return gCmp || (gCmp = 1, eCmp.y = 1), eCmp; }\n\
+                      var keep = iRange();\n";
+        let result = externalize_island_packages(
+            island,
+            &[synthesized_externalization(
+                "semver",
+                &[
+                    ("iRange", "eRange", "gRange", &[("", "Range")]),
+                    ("iCmp", "eCmp", "gCmp", &[("", "Comparator")]),
+                ],
+            )],
+        )
+        .expect("synthesized externalization");
+
+        let imports = result.imports.join("\n");
+        assert!(
+            imports.contains("import * as _pkg_semver from 'semver';"),
+            "{imports}"
+        );
+        assert!(imports.contains("const _pkg_semver_d = _pkg_semver.default ?? _pkg_semver;"));
+        assert!(
+            imports.contains("const eRange = _pkg_semver_d.Range;"),
+            "{imports}"
+        );
+        assert!(
+            imports.contains("const eCmp = _pkg_semver_d.Comparator;"),
+            "{imports}"
+        );
+        assert!(
+            result
+                .source
+                .contains("function iRange() { return eRange; }")
+        );
+        assert!(result.source.contains("function iCmp() { return eCmp; }"));
+        // The member units' own declarations are gone; the consumer call survives.
+        assert!(!result.source.contains("var gRange;"), "{}", result.source);
+        assert!(result.source.contains("var keep = iRange();"));
+    }
+
+    #[test]
+    fn synthesized_member_pick_reconstructs_object_literal() {
+        // A single member whose submodule is re-exported member-by-member: the
+        // exports object is reconstructed `{ re: ns.re, t: ns.tokens }`.
+        let island = "var eRe = {};\nvar gRe;\nfunction iRe() { return gRe || (gRe = 1, eRe.re = 1), eRe; }\nvar keep = iRe();\n";
+        let result = externalize_island_packages(
+            island,
+            &[synthesized_externalization(
+                "semver",
+                &[("iRe", "eRe", "gRe", &[("re", "re"), ("t", "tokens")])],
+            )],
+        )
+        .expect("member-pick externalization");
+        assert!(
+            result
+                .imports
+                .join("\n")
+                .contains("const eRe = { re: _pkg_semver_d.re, t: _pkg_semver_d.tokens };"),
+            "{:?}",
+            result.imports
+        );
     }
 
     #[test]

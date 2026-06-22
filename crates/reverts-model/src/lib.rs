@@ -144,6 +144,26 @@ pub struct IslandPackageExternalization {
     pub entry_exports: BindingName,
     /// Every binding of the package's inlined units (all dropped from the island).
     pub member_bindings: BTreeSet<BindingName>,
+    /// Per-member rebindings when the barrel was SYNTHESIZED from the real package
+    /// index (the in-bundle barrel was tree-shaken away). Empty selects the
+    /// recovered-barrel emission (`entry_init`/`entry_exports`); non-empty selects
+    /// the synthesized emission (per-member namespace rebindings + init shims).
+    pub synthesized_members: Vec<SynthesizedMemberExternalization>,
+}
+
+/// One member unit's rebinding when a package barrel is synthesized: its exports
+/// object is reconstructed from the imported package namespace, and its init
+/// thunk is shimmed to return it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynthesizedMemberExternalization {
+    /// The member unit's init thunk — emitted as `fn init(){ return local; }`.
+    pub init_fn: BindingName,
+    /// The member unit's exports object — the rebind target.
+    pub local_binding: BindingName,
+    /// How to reconstruct `local_binding` from the package namespace `ns`: a single
+    /// `("", "Range")` means `local = ns.Range`; several `(key, name)` means
+    /// `local = { key: ns.name, … }`.
+    pub namespace_members: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

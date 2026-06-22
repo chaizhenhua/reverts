@@ -2,6 +2,7 @@
 //! run the output pipeline, audit-gate the result, then materialise the
 //! TypeScript project (sources, scaffold, assets) under `--output`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -84,6 +85,7 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
     let package_anchored_island_bindings =
         load_package_anchored_island_bindings(&args.input, args.project_id)?;
     let island_unit_attributions = load_island_unit_attributions(&args.input, args.project_id)?;
+    let island_index_maps = load_package_index_reexports(&args.input, &island_unit_attributions)?;
     mark_timing!("load_island_anchors");
 
     // Recover inlined packages from the island and attach them to the program so
@@ -91,8 +93,11 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
     // prelude, available only after enrichment, so build the prepared program
     // first, then aggregate, then generate.
     let mut prepared = prepare_and_enrich(input).map_err(CliRunError::Pipeline)?;
-    let externalizations =
-        island_package_externalizations(&prepared.program, &island_unit_attributions);
+    let externalizations = island_package_externalizations(
+        &prepared.program,
+        &island_unit_attributions,
+        &island_index_maps,
+    );
     if !externalizations.is_empty() {
         prepared.program = prepared
             .program
@@ -307,7 +312,7 @@ fn load_island_unit_attributions(
     }
     let mut statement = connection
         .prepare(
-            "SELECT DISTINCT binding_name, package_name, package_version \
+            "SELECT DISTINCT binding_name, package_name, package_version, export_specifier \
              FROM package_island_anchors \
              WHERE project_id = ?1 AND TRIM(binding_name) != '' AND TRIM(package_name) != ''",
         )
@@ -318,6 +323,7 @@ fn load_island_unit_attributions(
                 binding: row.get::<_, String>(0)?,
                 package_name: row.get::<_, String>(1)?,
                 package_version: row.get::<_, String>(2)?,
+                export_specifier: row.get::<_, String>(3).unwrap_or_default(),
             })
         })
         .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
@@ -328,19 +334,72 @@ fn load_island_unit_attributions(
     Ok(attributions)
 }
 
+/// Load and parse the real `index.js` re-export map for each attributed package,
+/// from the persisted `package_source_cache`. Used to synthesize a barrel for a
+/// tree-shaken package whose in-bundle barrel was dropped. Packages with no
+/// cached index (or an unparseable one) are simply absent — those fall back to
+/// the recovered-barrel path (and skip if none).
+fn load_package_index_reexports(
+    input: &Path,
+    attributions: &[IslandUnitAttribution],
+) -> Result<BTreeMap<(String, String), reverts_js::PackageIndexReexports>, CliRunError> {
+    if attributions.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let connection = Connection::open_with_flags(input, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    if !sqlite_table_exists(&connection, "package_source_cache")
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+    {
+        return Ok(BTreeMap::new());
+    }
+    let packages: BTreeSet<(String, String)> = attributions
+        .iter()
+        .map(|attribution| {
+            (
+                attribution.package_name.clone(),
+                attribution.package_version.clone(),
+            )
+        })
+        .collect();
+    let mut statement = connection
+        .prepare(
+            "SELECT source_content FROM package_source_cache \
+             WHERE package_name = ?1 AND package_version = ?2 \
+               AND entry_path IN ('index.js', 'dist/index.js', 'lib/index.js', 'src/index.js') \
+             ORDER BY length(entry_path) LIMIT 1",
+        )
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let mut maps = BTreeMap::new();
+    for (package, version) in packages {
+        let source: Option<String> = statement
+            .query_row(params![package, version], |row| row.get::<_, String>(0))
+            .optional()
+            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+        if let Some(source) = source {
+            let map = reverts_js::parse_index_reexports(&source);
+            if !map.is_empty() {
+                maps.insert((package, version), map);
+            }
+        }
+    }
+    Ok(maps)
+}
+
 /// Aggregate per-binding island attributions into per-package externalization
 /// plans over every runtime prelude, keeping only the safely externalizable
-/// ones (a single barrel recovered). Converted to the planner-facing model type.
+/// ones (a barrel recovered or synthesized). Converted to the planner-facing model type.
 fn island_package_externalizations(
     program: &reverts_model::EnrichedProgram,
     attributions: &[IslandUnitAttribution],
+    index_maps: &BTreeMap<(String, String), reverts_js::PackageIndexReexports>,
 ) -> Vec<IslandPackageExternalization> {
     if attributions.is_empty() {
         return Vec::new();
     }
     let mut externalizations = Vec::new();
     for prelude in program.model().graph().runtime_preludes().values() {
-        for plan in aggregate_island_packages(prelude, attributions) {
+        for plan in aggregate_island_packages(prelude, attributions, index_maps) {
             if !plan.externalizable {
                 eprintln!(
                     "island-package skip: {} ({} member binding(s)){}",
@@ -354,10 +413,24 @@ fn island_package_externalizations(
                 continue;
             }
             eprintln!(
-                "island-package externalize: {} ({} member binding(s))",
+                "island-package externalize: {} ({} member binding(s)){}",
                 plan.import_specifier,
-                plan.member_bindings.len()
+                plan.member_bindings.len(),
+                if plan.synthesized_members.is_empty() {
+                    ""
+                } else {
+                    " (synthesized barrel)"
+                }
             );
+            let synthesized_members = plan
+                .synthesized_members
+                .into_iter()
+                .map(|member| reverts_model::SynthesizedMemberExternalization {
+                    init_fn: reverts_ir::BindingName::new(member.init_fn),
+                    local_binding: reverts_ir::BindingName::new(member.local_binding),
+                    namespace_members: member.namespace_members,
+                })
+                .collect();
             externalizations.push(IslandPackageExternalization {
                 import_specifier: plan.import_specifier,
                 version: plan.version,
@@ -368,6 +441,7 @@ fn island_package_externalizations(
                     .into_iter()
                     .map(reverts_ir::BindingName::new)
                     .collect(),
+                synthesized_members,
             });
         }
     }
