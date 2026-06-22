@@ -4,6 +4,7 @@
 //! module owns the DB-backed matching workflow so package-source/cache matching
 //! does not keep growing the command facade.
 
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use reverts_input::sqlite::load_project_rows_from_connection;
@@ -12,7 +13,8 @@ use reverts_ir::ModuleKind;
 use reverts_model::ProgramModel;
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
-    PackageSource, anchor_prelude_bindings, match_packages_with_pipeline, prelude_binding_sources,
+    PackageSource, anchor_island_cjs_modules, anchor_prelude_bindings,
+    match_packages_with_pipeline, prelude_binding_sources,
 };
 use reverts_pipeline::prepare_input_rows_for_pipeline_with_reserved_ids;
 use rusqlite::Connection;
@@ -326,35 +328,72 @@ fn compute_island_anchors(
     };
     let model = ProgramModel::from_input(input);
 
-    let mut anchors = Vec::new();
+    // Per-binding anchoring fingerprints EVERY eager island binding (tens of
+    // thousands on a real bundle) as its own cascade subject — prohibitively
+    // slow, and most subjects are trivial exports objects / guards / genuine
+    // application code that can never match a package. It is an opt-in deep
+    // scan; the default is the module-unit pass below.
+    let deep_per_binding = std::env::var("REVERTS_ISLAND_DEEP_ANCHOR").is_ok();
+
+    let mut anchors: Vec<IslandPackageAnchor> = Vec::new();
+    let mut total_units = 0_usize;
     let mut total_bindings = 0_usize;
     for (source_file_id, prelude) in model.graph().runtime_preludes() {
-        let binding_sources = prelude_binding_sources(prelude);
-        if binding_sources.is_empty() {
-            continue;
+        // Fast path: recognize inlined CommonJS module units structurally and
+        // match each unit's INIT body once, at module granularity.
+        let unit_anchors = anchor_island_cjs_modules(prelude, package_sources);
+        total_units += unit_anchors.len();
+        let mut anchored_bindings: BTreeSet<String> =
+            unit_anchors.iter().map(|anchor| anchor.binding.clone()).collect();
+        for anchor in unit_anchors {
+            anchors.push(island_anchor_row(*source_file_id, anchor));
         }
-        total_bindings += binding_sources.len();
-        for anchor in anchor_prelude_bindings(&binding_sources, package_sources) {
-            anchors.push(IslandPackageAnchor {
-                source_file_id: *source_file_id,
-                binding_name: anchor.binding,
-                package_name: anchor.package_name,
-                package_version: anchor.package_version,
-                export_specifier: anchor.export_specifier,
-                function_span_start: anchor.function_span.start,
-                function_span_end: anchor.function_span.end,
-                tier: anchor.confidence.tier.as_str().to_string(),
-                external_importable: anchor.external_importable,
-                top_score: anchor.confidence.top_score,
-                runner_up_score: anchor.confidence.runner_up_score,
-                margin: anchor.confidence.margin,
-            });
+
+        if deep_per_binding {
+            let binding_sources = prelude_binding_sources(prelude);
+            total_bindings += binding_sources.len();
+            for anchor in anchor_prelude_bindings(&binding_sources, package_sources) {
+                // The unit pass already owns this binding — don't double-anchor.
+                if !anchored_bindings.insert(anchor.binding.clone()) {
+                    continue;
+                }
+                anchors.push(island_anchor_row(*source_file_id, anchor));
+            }
         }
     }
-    eprintln!(
-        "match-packages: island anchoring scanned {total_bindings} eager binding(s) against {} library source(s) -> {} anchor(s)",
-        package_sources.len(),
-        anchors.len()
-    );
+    if deep_per_binding {
+        eprintln!(
+            "match-packages: island anchoring matched {total_units} CJS module-unit binding(s) + deep-scanned {total_bindings} eager binding(s) against {} library source(s) -> {} anchor(s)",
+            package_sources.len(),
+            anchors.len()
+        );
+    } else {
+        eprintln!(
+            "match-packages: island anchoring matched {total_units} CJS module-unit binding(s) against {} library source(s) -> {} anchor(s) (set REVERTS_ISLAND_DEEP_ANCHOR=1 for the slow per-binding scan)",
+            package_sources.len(),
+            anchors.len()
+        );
+    }
     anchors
+}
+
+/// Build a persisted anchor row from a recovered prelude binding anchor.
+fn island_anchor_row(
+    source_file_id: u32,
+    anchor: reverts_package_matcher::PreludeBindingAnchor,
+) -> IslandPackageAnchor {
+    IslandPackageAnchor {
+        source_file_id,
+        binding_name: anchor.binding,
+        package_name: anchor.package_name,
+        package_version: anchor.package_version,
+        export_specifier: anchor.export_specifier,
+        function_span_start: anchor.function_span.start,
+        function_span_end: anchor.function_span.end,
+        tier: anchor.confidence.tier.as_str().to_string(),
+        external_importable: anchor.external_importable,
+        top_score: anchor.confidence.top_score,
+        runner_up_score: anchor.confidence.runner_up_score,
+        margin: anchor.confidence.margin,
+    }
 }

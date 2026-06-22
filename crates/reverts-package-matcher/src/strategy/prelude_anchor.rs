@@ -23,7 +23,9 @@
 
 use std::collections::BTreeMap;
 
-use reverts_graph::{FunctionExtractor, RuntimePrelude, RuntimePreludeBindingKind};
+use reverts_graph::{
+    FunctionExtractor, RuntimePrelude, RuntimePreludeBindingKind, recognize_cjs_island_modules,
+};
 use reverts_input::AttributionConfidence;
 use reverts_ir::{ByteRange, FunctionFingerprint, ModuleId};
 
@@ -119,6 +121,87 @@ pub fn anchor_prelude_bindings(
         .into_iter()
         .filter_map(|ownership| anchor_from_ownership(bindings, ownership))
         .collect()
+}
+
+/// Anchor inlined CommonJS module UNITS in the island to package sources at
+/// MODULE granularity — the fast, robust path for scope-hoisted bundles.
+///
+/// A scope-hoisting bundler inlines a third-party module as a minified memoized
+/// init thunk (`var EXPORTS = {}; var GUARD; function INIT(){…}`). Rather than
+/// fingerprint every one of the island's tens of thousands of bindings (the
+/// per-binding pass, dominated by trivial `var X = {}` exports objects, guard
+/// flags, and genuine application code that can never match a package), this
+/// recognizes each module unit structurally and fingerprints ONLY its `INIT`
+/// body — the actual library implementation — as one cascade subject. That is
+/// ~17× fewer subjects on a real bundle, and a match drops the unit's whole
+/// `{EXPORTS, INIT, GUARD}` triple together, not just the init function.
+///
+/// Returns one anchor per binding of every matched unit (so all three are
+/// dropped from the naming denominator and externalized in lockstep).
+#[must_use]
+pub fn anchor_island_cjs_modules(
+    prelude: &RuntimePrelude,
+    package_sources: &[PackageSource],
+) -> Vec<PreludeBindingAnchor> {
+    let units = recognize_cjs_island_modules(&prelude.source);
+    if units.is_empty() || package_sources.is_empty() {
+        return Vec::new();
+    }
+
+    // Fingerprint each unit's INIT body under its own synthetic module id (its
+    // index in `units`), so an ownership match maps back to the originating unit.
+    let mut subjects: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
+    for (index, unit) in units.iter().enumerate() {
+        let (start, end) = (unit.body_span.0 as usize, unit.body_span.1 as usize);
+        let Some(body) = prelude.source.get(start..end) else {
+            continue;
+        };
+        let module_id = ModuleId(index as u32);
+        let fingerprints = FunctionExtractor::fingerprint(module_id, body);
+        if !fingerprints.is_empty() {
+            subjects.insert(module_id, fingerprints);
+        }
+    }
+    if subjects.is_empty() {
+        return Vec::new();
+    }
+
+    let report = match_with_cascade(&subjects, package_sources);
+    let mut anchors = Vec::new();
+    for ownership in report.ownership_matches {
+        let Some(unit) = units.get(ownership.module_id.0 as usize) else {
+            continue;
+        };
+        // The INIT body span is relative to the island prelude source; re-base
+        // the matched function span onto it. Every binding of the unit shares
+        // the package attribution so the whole triple externalizes together.
+        let function_span = ByteRange::new(
+            unit.body_span.0 + ownership.function_span.start,
+            unit.body_span.0 + ownership.function_span.end,
+        );
+        for binding in unit_bindings(unit) {
+            anchors.push(PreludeBindingAnchor {
+                binding,
+                package_name: ownership.package_name.clone(),
+                package_version: ownership.package_version.clone(),
+                export_specifier: ownership.export_specifier.clone(),
+                function_span,
+                confidence: ownership.confidence.clone(),
+                external_importable: ownership.external_importable,
+            });
+        }
+    }
+    anchors
+}
+
+/// The bindings a recognized CJS module unit owns: its exports object, its init
+/// function, and its guard flag (when present).
+fn unit_bindings(unit: &reverts_graph::RecognizedCjsModule) -> Vec<String> {
+    let mut bindings = vec![unit.exports.clone(), unit.init_fn.clone()];
+    if let Some(guard) = &unit.guard {
+        bindings.push(guard.clone());
+    }
+    bindings
 }
 
 /// Map one cascade ownership match back to its originating binding and re-base
@@ -278,6 +361,52 @@ mod tests {
             anchors.is_empty(),
             "application binding must not anchor to an unrelated package: {anchors:?}"
         );
+    }
+
+    #[test]
+    fn anchors_an_inlined_cjs_module_unit_and_drops_its_whole_triple() {
+        // The library function inlined inside a memoized CJS init thunk — the
+        // exact shape a scope-hoisting bundler produces. The unit's three
+        // bindings (exports object, init fn, guard) must all anchor together.
+        let init_body = format!(
+            "function initDur() {{ return gDur || (gDur = 1, durExports.parse = {LIBRARY_FUNCTION}), durExports; }}"
+        );
+        let island = format!("var durExports = {{}};\nvar gDur;\n{init_body}\n");
+        let prelude = RuntimePrelude {
+            source_file_id: 7,
+            source_file_path: "entrypoint.ts".to_string(),
+            source: island,
+            bindings: BTreeMap::new(),
+            snippets: BTreeMap::new(),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+
+        let anchors = anchor_island_cjs_modules(&prelude, &[library_package_source()]);
+
+        let names: std::collections::BTreeSet<_> =
+            anchors.iter().map(|a| a.binding.as_str()).collect();
+        assert_eq!(
+            names,
+            ["durExports", "gDur", "initDur"].into_iter().collect(),
+            "the whole unit triple must anchor together: {anchors:?}"
+        );
+        assert!(anchors.iter().all(|a| a.package_name == "duration-utils"));
+        assert!(anchors.iter().all(|a| a.external_importable));
+    }
+
+    #[test]
+    fn cjs_module_unit_with_no_corpus_or_no_units_yields_nothing() {
+        let prelude = RuntimePrelude {
+            source_file_id: 7,
+            source_file_path: "entrypoint.ts".to_string(),
+            source: "var app = function(x) { return x + 1; };".to_string(),
+            bindings: BTreeMap::new(),
+            snippets: BTreeMap::new(),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        assert!(anchor_island_cjs_modules(&prelude, &[library_package_source()]).is_empty());
     }
 
     #[test]

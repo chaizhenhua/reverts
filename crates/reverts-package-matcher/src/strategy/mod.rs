@@ -6,7 +6,8 @@ pub mod structural_bag;
 pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
 pub use cascade_match::{CascadeMatchReport, CascadeOwnershipMatch, match_with_cascade};
 pub use prelude_anchor::{
-    PreludeBindingAnchor, PreludeBindingSource, anchor_prelude_bindings, prelude_binding_sources,
+    PreludeBindingAnchor, PreludeBindingSource, anchor_island_cjs_modules, anchor_prelude_bindings,
+    prelude_binding_sources,
 };
 pub use structural_bag::{
     StructuralBag, StructuralBagMatchReport, build_structural_bag, match_structural_bags,
