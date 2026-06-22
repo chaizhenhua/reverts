@@ -95,8 +95,9 @@ pub use source_evidence::{
 };
 pub use strategy::{
     CascadeMatchReport, CascadeOwnershipMatch, GlobalAssignment, PreludeBindingAnchor,
-    IslandPackagePlan, PreludeBindingSource, StructuralBag, StructuralBagMatchReport,
-    aggregate_island_packages, anchor_island_cjs_modules, anchor_prelude_bindings, assign_globally,
+    IslandPackagePlan, IslandUnitAttribution, PreludeBindingSource, StructuralBag,
+    StructuralBagMatchReport, aggregate_island_packages, anchor_island_cjs_modules,
+    anchor_prelude_bindings, assign_globally,
     build_structural_bag, cascade_candidates, match_function, match_structural_bags,
     match_structural_bags_with_excluded_modules, match_with_cascade, prelude_binding_sources,
     score_structural_bags,

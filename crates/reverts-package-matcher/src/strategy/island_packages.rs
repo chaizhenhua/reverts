@@ -23,7 +23,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use reverts_graph::{RecognizedCjsModule, function_referenced_names, recognize_cjs_island_modules};
 use reverts_graph::RuntimePrelude;
 
-use super::prelude_anchor::PreludeBindingAnchor;
+/// One island unit binding attributed to a package — the minimal input the
+/// aggregation needs (binding name + package identity), independent of the full
+/// per-binding anchor record persisted to the DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IslandUnitAttribution {
+    pub binding: String,
+    pub package_name: String,
+    pub package_version: String,
+}
 
 /// A per-package plan for externalizing an inlined package's island units.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,19 +62,22 @@ pub struct IslandPackagePlan {
 #[must_use]
 pub fn aggregate_island_packages(
     prelude: &RuntimePrelude,
-    anchors: &[PreludeBindingAnchor],
+    attributions: &[IslandUnitAttribution],
 ) -> Vec<IslandPackagePlan> {
     let units = recognize_cjs_island_modules(&prelude.source);
-    if units.is_empty() || anchors.is_empty() {
+    if units.is_empty() || attributions.is_empty() {
         return Vec::new();
     }
 
-    // binding name -> (package, version), from the per-unit anchors.
+    // binding name -> (package, version), from the per-unit attributions.
     let mut package_of_binding: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
-    for anchor in anchors {
+    for attribution in attributions {
         package_of_binding.insert(
-            anchor.binding.as_str(),
-            (anchor.package_name.as_str(), anchor.package_version.as_str()),
+            attribution.binding.as_str(),
+            (
+                attribution.package_name.as_str(),
+                attribution.package_version.as_str(),
+            ),
         );
     }
 
@@ -122,6 +133,40 @@ fn reachable_from(start: usize, adjacency: &[Vec<usize>]) -> BTreeSet<usize> {
         stack.extend(adjacency[node].iter().copied());
     }
     seen
+}
+
+/// The units DOMINATED by `barrel`: those whose every init-call predecessor is
+/// itself dominated (so they are reachable only THROUGH the barrel). These are
+/// the package's private units — removing them dangles nothing, because nothing
+/// outside the set calls into them. Forward reachability would instead pull in
+/// shared units the package merely calls (which other code also uses); those
+/// are excluded here because they have a predecessor outside the set.
+fn barrel_dominated_units(barrel: usize, adjacency: &[Vec<usize>]) -> BTreeSet<usize> {
+    // Reverse edges: predecessors[v] = units whose init calls v's init.
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); adjacency.len()];
+    for (caller, callees) in adjacency.iter().enumerate() {
+        for &callee in callees {
+            predecessors[callee].push(caller);
+        }
+    }
+    let mut dominated: BTreeSet<usize> = BTreeSet::from([barrel]);
+    loop {
+        let mut grew = false;
+        for (unit, preds) in predecessors.iter().enumerate() {
+            if dominated.contains(&unit) || preds.is_empty() {
+                continue;
+            }
+            // Reachable only through already-dominated units → private to barrel.
+            if preds.iter().all(|pred| dominated.contains(pred)) {
+                dominated.insert(unit);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    dominated
 }
 
 /// The package a unit belongs to: the attribution of any of its three bindings.
@@ -194,15 +239,20 @@ fn build_plan(
         }
     }
 
-    let mut member_bindings: BTreeSet<String> = BTreeSet::new();
-    for &i in member_indices {
-        extend_unit_bindings(&mut member_bindings, &units[i]);
-    }
-
     match best {
         Some((entry_index, _, _)) if !ambiguous => {
             let entry = &units[entry_index];
-            extend_unit_bindings(&mut member_bindings, entry);
+            // The package's removal set is the barrel plus every unit it
+            // DOMINATES (reachable only through it) — the package's private
+            // units, including submodules that never matched (re-export glue,
+            // tiny modules). Units the package merely calls but that other code
+            // also uses are excluded, so the inlined copy is replaced without
+            // dangling any shared dependency.
+            let dominated = barrel_dominated_units(entry_index, adjacency);
+            let mut member_bindings: BTreeSet<String> = BTreeSet::new();
+            for &i in &dominated {
+                extend_unit_bindings(&mut member_bindings, &units[i]);
+            }
             IslandPackagePlan {
                 package_name: package.to_string(),
                 version: version.to_string(),
@@ -222,7 +272,7 @@ fn build_plan(
             entry_init: String::new(),
             entry_exports: String::new(),
             entry_guard: None,
-            member_bindings,
+            member_bindings: BTreeSet::new(),
             externalizable: false,
             skip_reason: Some(if ambiguous {
                 "ambiguous barrel: multiple units reach the members with equal closure size"
@@ -247,22 +297,7 @@ fn extend_unit_bindings(bindings: &mut BTreeSet<String>, unit: &RecognizedCjsMod
 mod tests {
     use std::collections::BTreeMap;
 
-    use reverts_input::AttributionConfidence;
-    use reverts_ir::{ByteRange, MatchTier};
-
     use super::*;
-    use crate::strategy::prelude_anchor::PreludeBindingAnchor;
-
-    fn confidence() -> AttributionConfidence {
-        AttributionConfidence {
-            tier: MatchTier::Exact,
-            matched_axes: Vec::new(),
-            matched_alternate: None,
-            top_score: 1.0,
-            runner_up_score: 0.0,
-            margin: 1.0,
-        }
-    }
 
     fn prelude(source: &str) -> RuntimePrelude {
         RuntimePrelude {
@@ -276,15 +311,11 @@ mod tests {
         }
     }
 
-    fn anchor(binding: &str, package: &str) -> PreludeBindingAnchor {
-        PreludeBindingAnchor {
+    fn anchor(binding: &str, package: &str) -> IslandUnitAttribution {
+        IslandUnitAttribution {
             binding: binding.to_string(),
             package_name: package.to_string(),
             package_version: "1.9.0".to_string(),
-            export_specifier: format!("{package}/internal.js"),
-            function_span: ByteRange::new(0, 1),
-            confidence: confidence(),
-            external_importable: false,
         }
     }
 

@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_ir::BindingName;
 use reverts_js::{ParseGoal, TopLevelStatementKind, collect_top_level_statement_facts};
+use reverts_model::IslandPackageExternalization;
 
 use crate::statements::{named_export_statement, named_import_statement};
 
@@ -283,22 +284,6 @@ pub(crate) fn entry_import_for_cluster(
     named_import_statement(moved_bindings.iter(), specifier)
 }
 
-/// One inlined package to replace with a bare import. Recovered upstream
-/// (`reverts_package_matcher::aggregate_island_packages`): the package's whole
-/// set of inlined CommonJS unit bindings, its barrel entry, and the public
-/// specifier to import instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct IslandPackageExternalization {
-    /// Bare public import specifier, e.g. `@opentelemetry/api`.
-    pub(crate) import_specifier: String,
-    /// The barrel unit's init function — consumers call it to get the package.
-    pub(crate) entry_init: BindingName,
-    /// The barrel unit's exports object — bound to the imported namespace.
-    pub(crate) entry_exports: BindingName,
-    /// Every binding of the package's inlined units (all dropped from the island).
-    pub(crate) member_bindings: BTreeSet<BindingName>,
-}
-
 /// The island after inlined packages were replaced with bare imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IslandExternalization {
@@ -309,6 +294,10 @@ pub(crate) struct IslandExternalization {
     pub(crate) imports: Vec<String>,
     /// Every binding removed from the island (left the naming denominator).
     pub(crate) externalized_bindings: BTreeSet<BindingName>,
+    /// The barrel exports bindings now provided by an `import * as …` — these
+    /// remain bound in the island (as import bindings), unlike the removed
+    /// internal members.
+    pub(crate) entry_bindings: BTreeSet<BindingName>,
 }
 
 /// Replace each inlined package's CommonJS units with a bare import.
@@ -340,6 +329,7 @@ pub(crate) fn externalize_island_packages(
     let mut imports = Vec::new();
     let mut removed_ranges: Vec<(usize, usize)> = Vec::new();
     let mut externalized_bindings: BTreeSet<BindingName> = BTreeSet::new();
+    let mut entry_bindings: BTreeSet<BindingName> = BTreeSet::new();
     let mut shims = String::new();
 
     for package in packages {
@@ -390,6 +380,7 @@ pub(crate) fn externalize_island_packages(
         ));
         removed_ranges.extend(package_ranges);
         externalized_bindings.extend(covered);
+        entry_bindings.insert(package.entry_exports.clone());
     }
 
     if removed_ranges.is_empty() {
@@ -405,6 +396,7 @@ pub(crate) fn externalize_island_packages(
         source,
         imports,
         externalized_bindings,
+        entry_bindings,
     })
 }
 

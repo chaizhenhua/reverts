@@ -608,11 +608,35 @@ pub(crate) fn emit_planned_entrypoint_island(
             ));
         }
     }
-    let island_source = if written_runtime_bindings.is_empty() {
+    let mut island_source = if written_runtime_bindings.is_empty() {
         island.source
     } else {
         rewrite_runtime_helper_writes(island.source.as_str(), &written_runtime_bindings)
     };
+    // Replace inlined third-party packages (recovered by the matcher's island
+    // aggregation, attached to the program) with bare imports: delete each
+    // package's inlined unit declarations, emit `import * as <exports> from
+    // '<pkg>'`, and keep a barrel-init shim. The imported barrel-exports bindings
+    // become island-provided imports; the removed members leave the island.
+    let externalizations = program.island_package_externalizations();
+    if !externalizations.is_empty()
+        && let Some(externalized) =
+            crate::island_split::externalize_island_packages(island_source.as_str(), externalizations)
+    {
+        for import in &externalized.imports {
+            file.push_source(import.clone());
+        }
+        for binding in &externalized.entry_bindings {
+            planned_bindings.insert(binding.clone());
+            file.add_binding(PlannedBinding::new(
+                binding.clone(),
+                binding.clone(),
+                BindingShape::Unknown,
+                true,
+            ));
+        }
+        island_source = externalized.source;
+    }
     // The entrypoint island carries the main bundle's recovered esbuild node-ESM
     // banner, which uses the CommonJS globals `require`/`__filename`/`__dirname`
     // (undefined in the emitted ES module) — prepend `import.meta.url`-based

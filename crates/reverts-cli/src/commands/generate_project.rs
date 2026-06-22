@@ -5,9 +5,11 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
+use reverts_model::IslandPackageExternalization;
+use reverts_package_matcher::{IslandUnitAttribution, aggregate_island_packages};
 use reverts_pipeline::{
     FunctionParamRenameRow, GenerateProjectOptions, LocalBindingRename,
-    generate_project_from_input_with_options,
+    generate_project_from_prepared_with_options, prepare_and_enrich,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
@@ -81,9 +83,25 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
     mark_timing!("load_param_renames");
     let package_anchored_island_bindings =
         load_package_anchored_island_bindings(&args.input, args.project_id)?;
+    let island_unit_attributions =
+        load_island_unit_attributions(&args.input, args.project_id)?;
     mark_timing!("load_island_anchors");
-    let run = generate_project_from_input_with_options(
-        input,
+
+    // Recover inlined packages from the island and attach them to the program so
+    // the planner replaces them with bare imports. Aggregation needs the runtime
+    // prelude, available only after enrichment, so build the prepared program
+    // first, then aggregate, then generate.
+    let mut prepared = prepare_and_enrich(input).map_err(CliRunError::Pipeline)?;
+    let externalizations =
+        island_package_externalizations(&prepared.program, &island_unit_attributions);
+    if !externalizations.is_empty() {
+        prepared.program = prepared
+            .program
+            .with_island_package_externalizations(externalizations);
+    }
+    mark_timing!("aggregate_island_packages");
+    let run = generate_project_from_prepared_with_options(
+        prepared,
         GenerateProjectOptions {
             local_binding_renames: local_binding_renames.clone(),
             function_param_renames,
@@ -273,6 +291,73 @@ fn load_package_anchored_island_bindings(
         names.insert(row.map_err(|source| CliRunError::GenerateProject(source.to_string()))?);
     }
     Ok(names)
+}
+
+/// Per-binding island package attributions (`package_island_anchors`), the
+/// input the island aggregation groups into per-package externalization plans.
+fn load_island_unit_attributions(
+    input: &Path,
+    project_id: u32,
+) -> Result<Vec<IslandUnitAttribution>, CliRunError> {
+    let connection = Connection::open_with_flags(input, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    if !sqlite_table_exists(&connection, "package_island_anchors")
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+    {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT binding_name, package_name, package_version \
+             FROM package_island_anchors \
+             WHERE project_id = ?1 AND TRIM(binding_name) != '' AND TRIM(package_name) != ''",
+        )
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let rows = statement
+        .query_map(params![i64::from(project_id)], |row| {
+            Ok(IslandUnitAttribution {
+                binding: row.get::<_, String>(0)?,
+                package_name: row.get::<_, String>(1)?,
+                package_version: row.get::<_, String>(2)?,
+            })
+        })
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let mut attributions = Vec::new();
+    for row in rows {
+        attributions.push(row.map_err(|source| CliRunError::GenerateProject(source.to_string()))?);
+    }
+    Ok(attributions)
+}
+
+/// Aggregate per-binding island attributions into per-package externalization
+/// plans over every runtime prelude, keeping only the safely externalizable
+/// ones (a single barrel recovered). Converted to the planner-facing model type.
+fn island_package_externalizations(
+    program: &reverts_model::EnrichedProgram,
+    attributions: &[IslandUnitAttribution],
+) -> Vec<IslandPackageExternalization> {
+    if attributions.is_empty() {
+        return Vec::new();
+    }
+    let mut externalizations = Vec::new();
+    for prelude in program.model().graph().runtime_preludes().values() {
+        for plan in aggregate_island_packages(prelude, attributions) {
+            if !plan.externalizable {
+                continue;
+            }
+            externalizations.push(IslandPackageExternalization {
+                import_specifier: plan.import_specifier,
+                entry_init: reverts_ir::BindingName::new(plan.entry_init),
+                entry_exports: reverts_ir::BindingName::new(plan.entry_exports),
+                member_bindings: plan
+                    .member_bindings
+                    .into_iter()
+                    .map(reverts_ir::BindingName::new)
+                    .collect(),
+            });
+        }
+    }
+    externalizations
 }
 
 fn load_function_param_renames(

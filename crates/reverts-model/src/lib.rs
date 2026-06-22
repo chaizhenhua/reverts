@@ -128,6 +128,22 @@ impl PackageImportDecision {
     }
 }
 
+/// One inlined third-party package the planner should replace with a bare
+/// import. Recovered by the package matcher's island aggregation (barrel +
+/// member units) and attached to the program so the planner — which cannot
+/// depend on the matcher — consumes it as plain data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IslandPackageExternalization {
+    /// Bare public import specifier, e.g. `@opentelemetry/api`.
+    pub import_specifier: String,
+    /// The barrel unit's init function (consumers call it to get the package).
+    pub entry_init: BindingName,
+    /// The barrel unit's exports object (bound to the imported namespace).
+    pub entry_exports: BindingName,
+    /// Every binding of the package's inlined units (all dropped from the island).
+    pub member_bindings: BTreeSet<BindingName>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnrichedProgram {
     model: ProgramModel,
@@ -137,6 +153,7 @@ pub struct EnrichedProgram {
     type_solution: TypeSolution,
     compiler_profile: CompilerProfile,
     function_fingerprints: BTreeMap<ModuleId, Vec<FunctionFingerprint>>,
+    island_package_externalizations: Vec<IslandPackageExternalization>,
 }
 
 impl EnrichedProgram {
@@ -155,6 +172,7 @@ impl EnrichedProgram {
             type_solution: TypeSolution::default(),
             compiler_profile: CompilerProfile::default(),
             function_fingerprints: BTreeMap::default(),
+            island_package_externalizations: Vec::new(),
         }
     }
 
@@ -180,8 +198,22 @@ impl EnrichedProgram {
     }
 
     #[must_use]
+    pub fn with_island_package_externalizations(
+        mut self,
+        island_package_externalizations: Vec<IslandPackageExternalization>,
+    ) -> Self {
+        self.island_package_externalizations = island_package_externalizations;
+        self
+    }
+
+    #[must_use]
     pub fn function_fingerprints(&self) -> &BTreeMap<ModuleId, Vec<FunctionFingerprint>> {
         &self.function_fingerprints
+    }
+
+    #[must_use]
+    pub fn island_package_externalizations(&self) -> &[IslandPackageExternalization] {
+        &self.island_package_externalizations
     }
 
     #[must_use]
