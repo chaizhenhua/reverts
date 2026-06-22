@@ -199,8 +199,14 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         path: island_clusters_path.clone(),
         source,
     })?;
+    // Source-restoration M1: identify every module recognized as third-party
+    // (package ownership matched, even when NOT externalizable) and drop the real
+    // npm source beside the output for reference. Pure sidecar — never alters the
+    // running code, so it is always safe. See docs/source-restoration-plan.md.
+    let restored =
+        write_recognized_package_sources(&args.input, &run.module_output_paths, &metadata_dir)?;
     println!(
-        "generated project {} into {} with {written} files ({} symbol-index entries)",
+        "generated project {} into {} with {written} files ({} symbol-index entries; {restored} recognized-package source(s) restored)",
         args.project_id,
         args.output.display(),
         run.symbol_index.len()
@@ -769,6 +775,183 @@ fn serialize_island_cluster_manifest(
         .collect();
     serde_json::to_string_pretty(&serde_json::Value::Array(rows))
         .expect("serializing a JSON array of plain values is infallible")
+}
+
+/// Source-restoration M1. For every module recognized as third-party (a
+/// `package_attributions` row that matched package ownership — accepted OR
+/// rejected-but-matched), write a `.reverts/recognized-packages.json` manifest
+/// (module → package@version/subpath, externalized?) and drop the real npm
+/// source from `package_source_cache` under `.reverts/restored-sources/`. This
+/// never touches the emitted, running code — it only ANNOTATES which inlined
+/// modules are which library and provides the readable original for reference.
+/// Returns the number of restored sources written.
+fn write_recognized_package_sources(
+    input: &Path,
+    module_output_paths: &BTreeMap<reverts_ir::ModuleId, String>,
+    metadata_dir: &Path,
+) -> Result<usize, CliRunError> {
+    let connection = Connection::open_with_flags(input, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    if !sqlite_table_exists(&connection, "package_attributions")
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+    {
+        std::fs::write(metadata_dir.join("recognized-packages.json"), "[]\n").ok();
+        return Ok(0);
+    }
+
+    // Recognized modules: a real package + version, any status (accepted means
+    // externalized; rejected with a matched package means recognized-but-inlined).
+    let mut statement = connection
+        .prepare(
+            r"
+            SELECT module_id, package_name, package_version, package_subpath, status
+            FROM package_attributions
+            WHERE package_name IS NOT NULL AND TRIM(package_name) != ''
+              AND package_version IS NOT NULL AND TRIM(package_version) != ''
+            ",
+        )
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+
+    // De-dup by (module, package, subpath); prefer an accepted status if present.
+    let mut recognized: BTreeMap<(i64, String, String), (String, String, bool)> = BTreeMap::new();
+    for row in rows {
+        let (module_id, package, version, subpath, status) =
+            row.map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+        let subpath = subpath.unwrap_or_default();
+        let accepted = status == "accepted";
+        recognized
+            .entry((module_id, package.clone(), subpath.clone()))
+            .and_modify(|entry| entry.2 |= accepted)
+            .or_insert((version.clone(), status.clone(), accepted));
+    }
+    if recognized.is_empty() {
+        std::fs::write(metadata_dir.join("recognized-packages.json"), "[]\n").ok();
+        return Ok(0);
+    }
+
+    let restored_dir = metadata_dir.join("restored-sources");
+    let mut manifest = Vec::<serde_json::Value>::new();
+    let mut written_sources = 0usize;
+    let mut wrote_paths = std::collections::BTreeSet::<String>::new();
+    for ((module_id, package, subpath), (version, status, accepted)) in &recognized {
+        let module_path = module_output_paths
+            .get(&reverts_ir::ModuleId(u32::try_from(*module_id).unwrap_or(0)))
+            .cloned();
+        // The real source for this submodule, from the cache.
+        let restored_rel = restored_source_for(&connection, package, version, subpath)
+            .ok()
+            .flatten()
+            .map(|source| {
+                let safe = sanitize_restored_path(package, version, subpath);
+                let dest = restored_dir.join(&safe);
+                if wrote_paths.insert(safe.clone()) {
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    if std::fs::write(&dest, source).is_ok() {
+                        written_sources += 1;
+                    }
+                }
+                format!("restored-sources/{safe}")
+            });
+        manifest.push(serde_json::json!({
+            "module_id": module_id,
+            "file_path": module_path,
+            "package": package,
+            "version": version,
+            "subpath": subpath,
+            "externalized": accepted,
+            "status": if *accepted { "externalized" } else { status.as_str() },
+            "restored_source": restored_rel,
+        }));
+    }
+    let manifest_json = serde_json::to_string_pretty(&serde_json::Value::Array(manifest))
+        .expect("serializing recognized-packages manifest is infallible");
+    std::fs::write(metadata_dir.join("recognized-packages.json"), manifest_json).map_err(
+        |source| CliRunError::WriteOutput {
+            path: metadata_dir.join("recognized-packages.json"),
+            source,
+        },
+    )?;
+    Ok(written_sources)
+}
+
+/// The cached real source for a package submodule, by best-matching entry path.
+fn restored_source_for(
+    connection: &Connection,
+    package: &str,
+    version: &str,
+    subpath: &str,
+) -> Result<Option<String>, CliRunError> {
+    let entry = if subpath.is_empty() {
+        "index.js".to_string()
+    } else {
+        subpath.to_string()
+    };
+    // The cache may key a submodule under a build-output prefix (build/esm/…,
+    // lib/…, dist/…) rather than the bare subpath, so fall back to a basename
+    // match before giving up. Exact key first (tightest).
+    let basename = entry.rsplit('/').next().unwrap_or(entry.as_str());
+    let source: Option<String> = connection
+        .query_row(
+            r"
+            SELECT source_content FROM package_source_cache
+            WHERE package_name = ?1 AND package_version = ?2
+              AND (entry_path = ?3 OR export_specifier = ?4 OR entry_path LIKE ?5)
+            ORDER BY (entry_path = ?3) DESC, length(entry_path) LIMIT 1
+            ",
+            params![
+                package,
+                version,
+                entry,
+                format!("{package}/{subpath}"),
+                format!("%/{basename}")
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    Ok(source)
+}
+
+/// A safe relative path under `restored-sources/` for a package submodule.
+fn sanitize_restored_path(package: &str, version: &str, subpath: &str) -> String {
+    let clean = |segment: &str| -> String {
+        segment
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric()
+                    || ch == '.'
+                    || ch == '_'
+                    || ch == '-'
+                    || ch == '/'
+                    || ch == '@'
+                {
+                    ch
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+    };
+    let sub = if subpath.is_empty() {
+        "index.js".to_string()
+    } else {
+        clean(subpath)
+    };
+    let sub = sub.trim_start_matches('/');
+    format!("{}@{}/{}", clean(package), clean(version), sub)
 }
 
 pub(crate) use crate::project_writer::write_accepted_project;
