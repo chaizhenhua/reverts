@@ -1081,7 +1081,9 @@ fn emit_island_clusters(
         let mut chunk_owner: BTreeMap<BindingName, usize> = BTreeMap::new();
         for (index, locals) in chunk_locals.iter().enumerate() {
             for binding in locals {
-                chunk_owner.entry(binding.clone()).or_insert(chunk_ids[index]);
+                chunk_owner
+                    .entry(binding.clone())
+                    .or_insert(chunk_ids[index]);
             }
         }
         // Resolve every chunk's emitted path ONCE (override-by-fingerprint, else
@@ -1176,8 +1178,7 @@ fn emit_island_clusters(
                     }
                 }
             }
-            let chunk_source =
-                crate::island_split::assemble_cluster_file(chunk, locals, &imports);
+            let chunk_source = crate::island_split::assemble_cluster_file(chunk, locals, &imports);
             if std::env::var("REVERTS_DEBUG_CHUNKS").is_ok() {
                 let _ = std::fs::create_dir_all("/tmp/chunks");
                 let _ = std::fs::write(format!("/tmp/chunks/chunk-{index}.ts"), &chunk_source);

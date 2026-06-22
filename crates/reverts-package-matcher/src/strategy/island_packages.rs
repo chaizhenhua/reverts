@@ -447,7 +447,12 @@ fn try_synthesize_plan(
             }
             return None;
         };
-        if units_per_submodule.get(relpath.as_str()).copied().unwrap_or(0) > 1 {
+        if units_per_submodule
+            .get(relpath.as_str())
+            .copied()
+            .unwrap_or(0)
+            > 1
+        {
             // Over-claimed submodule → false-positive collision. Skip these units;
             // they stay inlined (NOT added to member_bindings, so the planner never
             // removes them) and are never rebound.

@@ -78,8 +78,7 @@ impl PackageIndexReexports {
         let specifier = (!import_specifier.is_empty()).then(|| import_specifier.to_string());
         for reexport in &mut self.reexports {
             if !base.is_empty() {
-                reexport.submodule_relpath =
-                    format!("{base}/{}", reexport.submodule_relpath);
+                reexport.submodule_relpath = format!("{base}/{}", reexport.submodule_relpath);
             }
             reexport.import_specifier = specifier.clone();
         }
@@ -161,8 +160,7 @@ pub fn parse_index_reexports(index_source: &str) -> PackageIndexReexports {
     for statement in &program.body {
         match statement {
             Statement::ExpressionStatement(expression_statement) => {
-                let Expression::AssignmentExpression(assignment) =
-                    &expression_statement.expression
+                let Expression::AssignmentExpression(assignment) = &expression_statement.expression
                 else {
                     continue;
                 };
@@ -431,7 +429,10 @@ mod tests {
              exports.Range = range;\n\
              module.exports.compare = cmp.compare;\n",
         );
-        assert_eq!(names(&map, "classes/range"), vec![("Range".to_string(), None)]);
+        assert_eq!(
+            names(&map, "classes/range"),
+            vec![("Range".to_string(), None)]
+        );
         assert_eq!(
             names(&map, "functions/compare"),
             vec![("compare".to_string(), Some("compare".to_string()))]
@@ -479,9 +480,10 @@ mod tests {
             "const t = require('./transports/x.js');\nexports.makeX = t.makeX;\n",
         )
         .rebased("main", "@sentry/electron/main");
-        let renderer =
-            parse_index_reexports("const t = require('./transport.js');\nexports.makeR = t.makeR;\n")
-                .rebased("renderer", "@sentry/electron/renderer");
+        let renderer = parse_index_reexports(
+            "const t = require('./transport.js');\nexports.makeR = t.makeR;\n",
+        )
+        .rebased("renderer", "@sentry/electron/renderer");
         main.merge(renderer);
         assert_eq!(
             main.for_submodule("main/transports/x")[0]
@@ -518,13 +520,13 @@ mod tests {
             normalize_submodule_relpath("esm/renderer/integrations/scope-to-main.js"),
             "renderer/integrations/scope-to-main"
         );
-        assert_eq!(
-            normalize_submodule_relpath("./cjs/main/sdk.js"),
-            "main/sdk"
-        );
+        assert_eq!(normalize_submodule_relpath("./cjs/main/sdk.js"), "main/sdk");
         // Real submodule roots that merely LOOK build-ish are NOT stripped.
         assert_eq!(normalize_submodule_relpath("internal/re.js"), "internal/re");
-        assert_eq!(normalize_submodule_relpath("lib/websocket.js"), "lib/websocket");
+        assert_eq!(
+            normalize_submodule_relpath("lib/websocket.js"),
+            "lib/websocket"
+        );
         // `esm`/`cjs` only strip as a path ROOT, not mid-path or as a bare name.
         assert_eq!(normalize_submodule_relpath("a/esm/b.js"), "a/esm/b");
         assert_eq!(normalize_submodule_relpath("esmodule/x.js"), "esmodule/x");

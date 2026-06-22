@@ -1413,7 +1413,9 @@ mod tests {
         let rows = load_project_rows_from_connection(&connection, 7).expect("rows");
         // Accepted row is loaded; the rejected (accepted = 0) row is skipped.
         assert_eq!(
-            rows.island_cluster_names.get("deadbeef").map(String::as_str),
+            rows.island_cluster_names
+                .get("deadbeef")
+                .map(String::as_str),
             Some("telemetry/otel")
         );
         assert!(!rows.island_cluster_names.contains_key("feedface"));

@@ -406,15 +406,18 @@ mod template_chunk_tests {
     fn collects_quasis_in_order() {
         let chunks = template_raw_chunks("const x = `a${1}b${2}c`;\n", None, ParseGoal::TypeScript)
             .expect("parses");
-        assert_eq!(chunks, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            chunks,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]
     fn preserves_significant_whitespace_raw() {
         // Two spaces in the quasi must be reported verbatim so the emitter can
         // detect any codegen normalization.
-        let chunks =
-            template_raw_chunks("const x = `a  b`;\n", None, ParseGoal::TypeScript).expect("parses");
+        let chunks = template_raw_chunks("const x = `a  b`;\n", None, ParseGoal::TypeScript)
+            .expect("parses");
         assert_eq!(chunks, vec!["a  b".to_string()]);
     }
 

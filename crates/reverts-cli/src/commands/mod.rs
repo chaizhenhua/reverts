@@ -5,13 +5,13 @@
 //! and are exposed as `pub(crate)`.
 
 pub(crate) mod binding_names;
+pub(crate) mod cluster_names;
 pub(crate) mod coverage_ledger;
 pub(crate) mod extract_assets;
 pub(crate) mod full_inventory;
 pub(crate) mod generate_project;
 pub(crate) mod identifier_inventory;
 pub(crate) mod import_unpacked;
-pub(crate) mod cluster_names;
 pub(crate) mod island_package_candidates;
 pub(crate) mod match_modules;
 pub(crate) mod match_packages;

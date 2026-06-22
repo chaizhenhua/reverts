@@ -941,7 +941,10 @@ mod tests {
             ),
             ("modules/b.ts", "export const b = 1;"),
             // `export { local as renamed }` — the PUBLIC name is `renamed`.
-            ("modules/c.ts", "const local = 2;\nexport { local as renamed };"),
+            (
+                "modules/c.ts",
+                "const local = 2;\nexport { local as renamed };",
+            ),
         ]);
 
         let audit = super::audit_emitted_named_export_consistency(&project);
@@ -952,7 +955,10 @@ mod tests {
     fn named_import_without_matching_export_is_an_error() {
         // `gone` is not exported by the target — esbuild's `No matching export`.
         let project = project(&[
-            ("modules/a.ts", "import { gone } from './b.js';\nexport const a = gone;"),
+            (
+                "modules/a.ts",
+                "import { gone } from './b.js';\nexport const a = gone;",
+            ),
             ("modules/b.ts", "export const present = 1;"),
         ]);
 
@@ -970,7 +976,10 @@ mod tests {
         // A bare `export *` re-exports an opaque set, so an unlisted name may
         // still resolve through it — never flag it.
         let project = project(&[
-            ("modules/a.ts", "import { anything } from './b.js';\nexport const a = anything;"),
+            (
+                "modules/a.ts",
+                "import { anything } from './b.js';\nexport const a = anything;",
+            ),
             ("modules/b.ts", "export * from './deep.js';"),
         ]);
 

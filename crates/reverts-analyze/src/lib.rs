@@ -2269,8 +2269,11 @@ NativeModuleType();
         // Parent bundle: the `St` helper sits OUTSIDE the module span, so it is a
         // prelude binding keyed under source 1 in `runtime_preludes`.
         let bundle_source = "var St=(e,A)=>()=>(A||e((A={exports:{}}).exports,A),A.exports);\nvar app=St((exports,module)=>{module.exports=1});";
-        rows.source_files
-            .push(SourceFileInput::new(1, "bundle.js", Some(bundle_source.into())));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(bundle_source.into()),
+        ));
         let span_start = bundle_source
             .find("var app=")
             .expect("fixture contains `var app=`") as u32;

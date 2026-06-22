@@ -25,14 +25,14 @@ pub use classify::{
     DeclarationCallability, ImportUsageScope, classify_import_usage_scope,
     classify_top_level_bindings, verify_only_immediate_call_references,
 };
-pub use commonjs_index_reexports::{
-    IndexReexport, PackageIndexReexports, normalize_submodule_relpath, parse_index_reexports,
-};
 pub use commonjs_exports::{
     commonjs_create_binding_export_member, commonjs_export_property_name,
     commonjs_module_exports_target, expression_is_commonjs_exports_object, module_export_name,
     object_define_property_export_member, static_or_private_property_key_name_ref,
     static_property_key_name, static_property_key_name_ref,
+};
+pub use commonjs_index_reexports::{
+    IndexReexport, PackageIndexReexports, normalize_submodule_relpath, parse_index_reexports,
 };
 pub use format::{format_source_minified, format_source_pretty, normalize_source_for_pipeline};
 pub use format_module_items::{
@@ -50,8 +50,8 @@ pub use facts::{
     ModuleImportExportSurface, NamedImportEdge, PathBuilderCallFact, SourceLocationRewriteFact,
     StatementSpanFact, StaticModuleSpecifierFact, StaticTemplateLiteralFact, StringLiteralFact,
     TopLevelStatementFact, TopLevelStatementKind, collect_dead_top_level_bindings,
-    collect_exported_top_level_bindings, collect_module_import_export_surface,
-    collect_file_url_source_location_rewrites, collect_identifier_read_facts,
+    collect_exported_top_level_bindings, collect_file_url_source_location_rewrites,
+    collect_identifier_read_facts, collect_module_import_export_surface,
     collect_path_builder_calls, collect_reassigned_binding_names, collect_static_module_specifiers,
     collect_static_resource_specifiers, collect_static_template_literals, collect_string_literals,
     collect_top_level_class_eager_references, collect_top_level_eager_bindings,

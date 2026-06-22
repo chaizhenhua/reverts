@@ -285,8 +285,7 @@ fn build_symbol_index(
                 // into the island; it is not application naming work, so it
                 // leaves the denominator entirely. Gated on `module_id.is_none()`
                 // so a same-named binding in a real module is never dropped.
-                if module_id.is_none()
-                    && package_anchored_island_bindings.contains(&original_name)
+                if module_id.is_none() && package_anchored_island_bindings.contains(&original_name)
                 {
                     continue;
                 }
@@ -3126,14 +3125,8 @@ main();"#
         let marked = std::collections::BTreeSet::from(["modules/entry-island.ts".to_string()]);
         let anchored = std::collections::BTreeSet::from(["Fv".to_string()]);
 
-        let entries = super::build_symbol_index(
-            &program,
-            &module_paths,
-            &emitted,
-            &marked,
-            &[],
-            &anchored,
-        );
+        let entries =
+            super::build_symbol_index(&program, &module_paths, &emitted, &marked, &[], &anchored);
 
         // The island's anchored `Fv` is gone from the denominator.
         assert!(
@@ -3144,8 +3137,9 @@ main();"#
         );
         // The genuine island binding stays.
         assert!(
-            entries.iter().any(|entry| entry.module_id.is_none()
-                && entry.original_name == "appState"),
+            entries
+                .iter()
+                .any(|entry| entry.module_id.is_none() && entry.original_name == "appState"),
             "unanchored island binding must remain: {entries:?}"
         );
         // The same-named binding in a real module is untouched (gated on module_id).
@@ -3184,15 +3178,14 @@ main();"#
             semantic_name: "configRegistry".to_string(),
         }];
 
-        let entries =
-            super::build_symbol_index(
-                &program,
-                &module_paths,
-                &emitted,
-                &marked,
-                &renames,
-                &std::collections::BTreeSet::new(),
-            );
+        let entries = super::build_symbol_index(
+            &program,
+            &module_paths,
+            &emitted,
+            &marked,
+            &renames,
+            &std::collections::BTreeSet::new(),
+        );
 
         let entry = entries
             .iter()

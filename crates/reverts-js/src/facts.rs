@@ -1845,16 +1845,17 @@ mod void_zero_collector_tests {
         // patterns bind their names too. A scan that only handled
         // `BindingIdentifier` dropped these, so a chunk owning such a binding
         // never exported it and cross-module importers dangled.
-        let source =
-            "var { isArray: rH, from: gA } = Array;\nconst [a, , b] = xs;\nlet { p = 1, ...rest } = o;";
-        let facts =
-            collect_top_level_statement_facts(source, None, ParseGoal::TypeScript).unwrap();
+        let source = "var { isArray: rH, from: gA } = Array;\nconst [a, , b] = xs;\nlet { p = 1, ...rest } = o;";
+        let facts = collect_top_level_statement_facts(source, None, ParseGoal::TypeScript).unwrap();
         let bindings: std::collections::BTreeSet<&str> = facts
             .iter()
             .flat_map(|fact| fact.bindings.iter().map(String::as_str))
             .collect();
         for expected in ["rH", "gA", "a", "b", "p", "rest"] {
-            assert!(bindings.contains(expected), "missing {expected}: {bindings:?}");
+            assert!(
+                bindings.contains(expected),
+                "missing {expected}: {bindings:?}"
+            );
         }
     }
 
@@ -1882,7 +1883,8 @@ mod import_export_surface_tests {
     use crate::errors::ParseGoal;
 
     fn surface(source: &str) -> super::ModuleImportExportSurface {
-        collect_module_import_export_surface(source, None, ParseGoal::TypeScript).expect("parseable")
+        collect_module_import_export_surface(source, None, ParseGoal::TypeScript)
+            .expect("parseable")
     }
 
     #[test]
@@ -1893,7 +1895,11 @@ mod import_export_surface_tests {
              import * as ns from './n.js';\n\
              import 'side-effect';\n",
         );
-        assert_eq!(s.named_imports.len(), 1, "only the `{{ … }}` import is named");
+        assert_eq!(
+            s.named_imports.len(),
+            1,
+            "only the `{{ … }}` import is named"
+        );
         let edge = &s.named_imports[0];
         assert_eq!(edge.specifier, "./m.js");
         // The PUBLIC (target) names — not the importer's local `local`.

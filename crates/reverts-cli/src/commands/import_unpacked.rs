@@ -638,7 +638,10 @@ fn materialize_parseable_source(
         })?;
     }
     let stored_content = if content.starts_with("#!") {
-        format!("//{}", content.strip_prefix("#").unwrap_or(content.as_str()))
+        format!(
+            "//{}",
+            content.strip_prefix("#").unwrap_or(content.as_str())
+        )
     } else {
         content
     };

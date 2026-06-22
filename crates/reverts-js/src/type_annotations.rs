@@ -294,12 +294,14 @@ impl<'a> VisitMut<'a> for ClassIndexSignatureAnnotator<'_, 'a> {
             .any(|element| matches!(element, ClassElement::TSIndexSignature(_)));
         if !has_index_signature {
             let mut parameters = self.builder.vec();
-            parameters.push(self.builder.ts_index_signature_name(
-                SPAN,
-                "key",
-                self.builder
-                    .alloc_ts_type_annotation(SPAN, self.builder.ts_type_string_keyword(SPAN)),
-            ));
+            parameters.push(
+                self.builder.ts_index_signature_name(
+                    SPAN,
+                    "key",
+                    self.builder
+                        .alloc_ts_type_annotation(SPAN, self.builder.ts_type_string_keyword(SPAN)),
+                ),
+            );
             let index_signature = self.builder.class_element_ts_index_signature(
                 SPAN,
                 parameters,
@@ -683,7 +685,9 @@ fn object_pattern_static_keys(pattern: &oxc_ast::ast::ObjectPattern<'_>) -> BTre
             continue;
         }
         match &property.key {
-            PropertyKey::StaticIdentifier(identifier) if is_plain_identifier(identifier.name.as_str()) => {
+            PropertyKey::StaticIdentifier(identifier)
+                if is_plain_identifier(identifier.name.as_str()) =>
+            {
                 keys.insert(identifier.name.as_str().to_string());
             }
             PropertyKey::StringLiteral(literal) if is_plain_identifier(literal.value.as_str()) => {
@@ -1886,9 +1890,12 @@ mod open_object_tests {
 
     fn annotate(source: &str) -> String {
         let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, source, SourceType::ts())
-            .parse();
-        assert!(parsed.errors.is_empty(), "parse errors: {:?}", parsed.errors);
+        let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
         let mut program = parsed.program;
         apply_type_annotations_to_program(&allocator, &mut program, &[], true);
         CodeGenerator::new().build(&program).code
@@ -1901,28 +1908,43 @@ mod open_object_tests {
         assert!(out.contains("foo: any"), "missing foo prop: {out}");
         assert!(out.contains("bar: any"), "missing bar prop: {out}");
         // ... plus an index signature keeping it open.
-        assert!(out.contains("[key: string]: any"), "missing index sig: {out}");
+        assert!(
+            out.contains("[key: string]: any"),
+            "missing index sig: {out}"
+        );
     }
 
     #[test]
     fn empty_object_binding_without_writes_gets_index_signature_only() {
         // Member-read (no writes) → index signature, no named props.
         let out = annotate("const opts = {}; sink(opts.value);\n");
-        assert!(out.contains("[key: string]: any"), "missing index sig: {out}");
-        assert!(!out.contains(": any;\n  [key"), "unexpected named props: {out}");
+        assert!(
+            out.contains("[key: string]: any"),
+            "missing index sig: {out}"
+        );
+        assert!(
+            !out.contains(": any;\n  [key"),
+            "unexpected named props: {out}"
+        );
     }
 
     #[test]
     fn var_empty_object_with_only_member_writes_gets_open_type() {
         // The CJS lazy-init idiom: `var ve = {}; ve.A = …; ve.B = …`.
         let out = annotate("var ve = {}; ve.A = 1; ve.B = 2; export { ve };\n");
-        assert!(out.contains("[key: string]: any"), "var ve not annotated: {out}");
+        assert!(
+            out.contains("[key: string]: any"),
+            "var ve not annotated: {out}"
+        );
     }
 
     #[test]
     fn empty_object_default_parameter_gets_open_type() {
         let out = annotate("function f(opts = {}) { return opts.code; }\n");
-        assert!(out.contains("[key: string]: any"), "missing index sig on param: {out}");
+        assert!(
+            out.contains("[key: string]: any"),
+            "missing index sig on param: {out}"
+        );
     }
 
     #[test]
@@ -1930,49 +1952,76 @@ mod open_object_tests {
         // Lever A: `({ message } = {})` reads keys off `{}`. Props must be OPTIONAL
         // so the `= {}` default stays assignable to the synthesized type.
         let out = annotate("function f({ message } = {}) { return message; }\n");
-        assert!(out.contains("message?: any"), "missing optional destructured key: {out}");
-        assert!(out.contains("[key: string]: any"), "missing index sig: {out}");
+        assert!(
+            out.contains("message?: any"),
+            "missing optional destructured key: {out}"
+        );
+        assert!(
+            out.contains("[key: string]: any"),
+            "missing index sig: {out}"
+        );
     }
 
     #[test]
     fn trailing_params_made_optional() {
         // Lever D: bundled JS calls with fewer args; mark trailing params optional.
         let out = annotate("function f(a, b, c) { return a; }\n");
-        assert!(out.contains("a?") && out.contains("b?") && out.contains("c?"), "params not optional: {out}");
+        assert!(
+            out.contains("a?") && out.contains("b?") && out.contains("c?"),
+            "params not optional: {out}"
+        );
     }
 
     #[test]
     fn required_param_before_pattern_not_made_optional() {
         // A required destructuring pattern blocks optionalizing params to its left.
         let out = annotate("function f(a, { b }) { return a; }\n");
-        assert!(!out.contains("a?"), "must not optionalize before required pattern: {out}");
+        assert!(
+            !out.contains("a?"),
+            "must not optionalize before required pattern: {out}"
+        );
     }
 
     #[test]
     fn object_literal_setter_param_not_made_optional() {
         let out = annotate("const o = { set v(x) { sink(x); } };\n");
-        assert!(!out.contains("x?"), "object setter param must stay required: {out}");
+        assert!(
+            !out.contains("x?"),
+            "object setter param must stay required: {out}"
+        );
     }
 
     #[test]
     fn setter_param_not_made_optional() {
         let out = annotate("class C { set v(x) { this._x = x; } }\n");
-        assert!(!out.contains("x?"), "setter param must stay required: {out}");
+        assert!(
+            !out.contains("x?"),
+            "setter param must stay required: {out}"
+        );
     }
 
     #[test]
     fn class_gets_index_signature() {
         // Lever E: minified constructor uses a comma sequence, defeating implicit
         // field inference; an index signature restores member access.
-        let out = annotate("class C { constructor(e) { this._a = e, this._b = 0; } m() { return this._a; } }\n");
-        assert!(out.contains("[key: string]: any"), "class missing index sig: {out}");
+        let out = annotate(
+            "class C { constructor(e) { this._a = e, this._b = 0; } m() { return this._a; } }\n",
+        );
+        assert!(
+            out.contains("[key: string]: any"),
+            "class missing index sig: {out}"
+        );
     }
 
     #[test]
     fn class_with_existing_index_signature_is_untouched() {
         let out = annotate("class C { [k: string]: number; }\n");
         // exactly one index signature (we must not add a second)
-        assert_eq!(out.matches("[k: string]").count() + out.matches("[key: string]").count(), 1, "duplicated index sig: {out}");
+        assert_eq!(
+            out.matches("[k: string]").count() + out.matches("[key: string]").count(),
+            1,
+            "duplicated index sig: {out}"
+        );
     }
 
     #[test]
@@ -1980,6 +2029,9 @@ mod open_object_tests {
         // A populated literal already infers a usable shape; the open-object
         // path must not fire (no index signature injected).
         let out = annotate("const cfg = { a: 1 };\n");
-        assert!(!out.contains("[key: string]"), "should not open-type populated literal: {out}");
+        assert!(
+            !out.contains("[key: string]"),
+            "should not open-type populated literal: {out}"
+        );
     }
 }

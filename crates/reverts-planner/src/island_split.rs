@@ -577,8 +577,24 @@ fn top_level_cut_offsets(source: &str) -> Vec<usize> {
                     let continues = matches!(
                         bytes.get(next),
                         Some(
-                            b';' | b',' | b')' | b']' | b'.' | b'=' | b'+' | b'-' | b'*' | b'/'
-                                | b'%' | b'?' | b':' | b'<' | b'>' | b'&' | b'|' | b'^' | b'('
+                            b';' | b','
+                                | b')'
+                                | b']'
+                                | b'.'
+                                | b'='
+                                | b'+'
+                                | b'-'
+                                | b'*'
+                                | b'/'
+                                | b'%'
+                                | b'?'
+                                | b':'
+                                | b'<'
+                                | b'>'
+                                | b'&'
+                                | b'|'
+                                | b'^'
+                                | b'('
                                 | b'`'
                         )
                     );
@@ -618,7 +634,12 @@ pub(crate) fn chain_split_eager_body(source: &str, max_body_lines: usize) -> Vec
         let segment = source.get(segment_start..cut).unwrap_or_default();
         let segment_lines = estimated_emitted_lines(segment).max(1);
         if lines > 0 && lines + segment_lines > target && segment_start > chunk_start {
-            chunks.push(source.get(chunk_start..segment_start).unwrap_or_default().to_string());
+            chunks.push(
+                source
+                    .get(chunk_start..segment_start)
+                    .unwrap_or_default()
+                    .to_string(),
+            );
             chunk_start = segment_start;
             lines = 0;
         }
@@ -859,7 +880,10 @@ pub(crate) fn externalize_island_packages(
                     .import_specifier
                     .as_deref()
                     .unwrap_or(package.import_specifier.as_str());
-                members_by_specifier.entry(specifier).or_default().push(member);
+                members_by_specifier
+                    .entry(specifier)
+                    .or_default()
+                    .push(member);
             }
             for (specifier, members) in members_by_specifier {
                 let alias = sanitize_namespace_alias(specifier);
@@ -880,7 +904,10 @@ pub(crate) fn externalize_island_packages(
                             format!("{{ {} }}", fields.join(", "))
                         }
                     };
-                    imports.push(format!("const {} = {value};", member.local_binding.as_str()));
+                    imports.push(format!(
+                        "const {} = {value};",
+                        member.local_binding.as_str()
+                    ));
                     shims.push_str(&format!(
                         "function {}() {{ return {}; }}\n",
                         member.init_fn.as_str(),
@@ -1354,7 +1381,10 @@ var theApi = apiInit();
                 reverts_model::SynthesizedMemberExternalization {
                     init_fn: BindingName::new("iMain"),
                     local_binding: BindingName::new("eMain"),
-                    namespace_members: vec![(String::new(), "mainProcessSessionIntegration".to_string())],
+                    namespace_members: vec![(
+                        String::new(),
+                        "mainProcessSessionIntegration".to_string(),
+                    )],
                     import_specifier: Some("@sentry/electron/main".to_string()),
                 },
                 reverts_model::SynthesizedMemberExternalization {
@@ -1370,7 +1400,8 @@ var theApi = apiInit();
         let imports = result.imports.join("\n");
         // Two distinct subpath namespaces, NOT the unusable bare package.
         assert!(
-            imports.contains("import * as _pkg__sentry_electron_main from '@sentry/electron/main';"),
+            imports
+                .contains("import * as _pkg__sentry_electron_main from '@sentry/electron/main';"),
             "{imports}"
         );
         assert!(
@@ -1385,11 +1416,14 @@ var theApi = apiInit();
         );
         // Each member binds off its OWN subpath namespace.
         assert!(
-            imports.contains("const eMain = _pkg__sentry_electron_main_d.mainProcessSessionIntegration;"),
+            imports.contains(
+                "const eMain = _pkg__sentry_electron_main_d.mainProcessSessionIntegration;"
+            ),
             "{imports}"
         );
         assert!(
-            imports.contains("const eRend = _pkg__sentry_electron_renderer_d.scopeToMainIntegration;"),
+            imports
+                .contains("const eRend = _pkg__sentry_electron_renderer_d.scopeToMainIntegration;"),
             "{imports}"
         );
     }
@@ -1629,7 +1663,10 @@ var theApi = apiInit();
         // `}` inside the string `"};"` is skipped entirely (string scanning).
         for &cut in &cuts {
             let prev = source.as_bytes()[cut - 1];
-            assert!(matches!(prev, b';' | b'}'), "cut at {cut} not at a boundary");
+            assert!(
+                matches!(prev, b';' | b'}'),
+                "cut at {cut} not at a boundary"
+            );
         }
         // The `}` inside the string must not produce a spurious cut: the only cut
         // ending in the `var s` statement is the final `;`, so total cuts == 3.
@@ -1651,7 +1688,11 @@ var theApi = apiInit();
         let source = "var a=1;\nvar b=2;\nvar c=3;\nvar d=4;\nvar e=5;\nvar f=6;\n";
         let chunks = chain_split_eager_body(source, 5);
         assert!(chunks.len() > 1, "expected multiple chunks: {chunks:?}");
-        assert_eq!(chunks.concat(), source, "chunks must reconstruct the source");
+        assert_eq!(
+            chunks.concat(),
+            source,
+            "chunks must reconstruct the source"
+        );
         // No chunk splits a statement: each chunk's braces/parens balance.
         for chunk in &chunks {
             let opens = chunk.bytes().filter(|&b| b == b'{' || b == b'(').count();

@@ -414,9 +414,13 @@ fn load_package_index_reexports(
         // or /renderer") -> recover the package's public SUBPATH barrels instead.
         let mut merged = reverts_js::PackageIndexReexports::default();
         for subpath in subpath_entries_from_anchors(&package, attributions) {
-            let candidates = [format!("{subpath}/index.js"), format!("{subpath}/index.cjs")];
+            let candidates = [
+                format!("{subpath}/index.js"),
+                format!("{subpath}/index.cjs"),
+            ];
             let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
-            let Some(source) = load_cache_entry_first(&connection, &package, &version, &refs)? else {
+            let Some(source) = load_cache_entry_first(&connection, &package, &version, &refs)?
+            else {
                 continue;
             };
             let parsed = reverts_js::parse_index_reexports(&source);
@@ -849,11 +853,13 @@ fn serialize_symbol_index(entries: &[reverts_pipeline::SymbolIndexEntry]) -> Str
 /// Serializes the island-cluster manifest as a JSON array of
 /// `{fingerprint, path, binding_count}`. The `cluster-names` agent reads each
 /// `path`, inspects the file, and accepts a semantic path keyed by `fingerprint`.
-fn serialize_island_cluster_manifest(
-    clusters: &[reverts_pipeline::IslandClusterRecord],
-) -> String {
+fn serialize_island_cluster_manifest(clusters: &[reverts_pipeline::IslandClusterRecord]) -> String {
     let mut sorted: Vec<&reverts_pipeline::IslandClusterRecord> = clusters.iter().collect();
-    sorted.sort_by(|a, b| b.binding_count.cmp(&a.binding_count).then(a.path.cmp(&b.path)));
+    sorted.sort_by(|a, b| {
+        b.binding_count
+            .cmp(&a.binding_count)
+            .then(a.path.cmp(&b.path))
+    });
     let rows: Vec<serde_json::Value> = sorted
         .iter()
         .map(|record| {
@@ -937,7 +943,9 @@ fn write_recognized_package_sources(
     let mut wrote_paths = std::collections::BTreeSet::<String>::new();
     for ((module_id, package, subpath), (version, status, accepted)) in &recognized {
         let module_path = module_output_paths
-            .get(&reverts_ir::ModuleId(u32::try_from(*module_id).unwrap_or(0)))
+            .get(&reverts_ir::ModuleId(
+                u32::try_from(*module_id).unwrap_or(0),
+            ))
             .cloned();
         // The real source for this submodule, from the cache.
         let restored_rel = restored_source_for(&connection, package, version, subpath)
@@ -1131,7 +1139,10 @@ fn vendor_module_path(package: &str, subpath: &str) -> String {
         .trim_end_matches('/')
         .rsplit_once('.')
         .map(|(head, ext)| {
-            if matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts") {
+            if matches!(
+                ext,
+                "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts"
+            ) {
                 head
             } else {
                 subpath.trim()
@@ -1579,7 +1590,10 @@ mod tests {
         assert_eq!(sentry["subpath"], "main/index.js");
         assert_eq!(sentry["file_path"], "src/sentry-main.ts");
         // M2 annotation: the package-aware vendored path for each recognized module.
-        assert_eq!(sentry["vendor_path"], "vendor/sentry/electron/main/index.ts");
+        assert_eq!(
+            sentry["vendor_path"],
+            "vendor/sentry/electron/main/index.ts"
+        );
         assert_eq!(semver["vendor_path"], "vendor/semver/index.ts");
     }
 
@@ -1612,10 +1626,12 @@ mod tests {
         let metadata_dir = temp.path().join(".reverts");
         std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
 
-        let restored =
-            write_recognized_package_sources(&path, &BTreeMap::new(), &metadata_dir)
-                .expect("restoration writer ok");
-        assert_eq!(restored, 3, "all three 7.6.0 entries restored, not the 9.9.9 one");
+        let restored = write_recognized_package_sources(&path, &BTreeMap::new(), &metadata_dir)
+            .expect("restoration writer ok");
+        assert_eq!(
+            restored, 3,
+            "all three 7.6.0 entries restored, not the 9.9.9 one"
+        );
 
         let base = metadata_dir.join("restored-sources").join("semver@7.6.0");
         assert_eq!(
@@ -1708,9 +1724,8 @@ mod tests {
         let metadata_dir = temp.path().join(".reverts");
         std::fs::create_dir_all(&metadata_dir).expect("metadata dir");
 
-        let restored =
-            write_recognized_package_sources(&path, &BTreeMap::new(), &metadata_dir)
-                .expect("restoration writer tolerates a missing table");
+        let restored = write_recognized_package_sources(&path, &BTreeMap::new(), &metadata_dir)
+            .expect("restoration writer tolerates a missing table");
         assert_eq!(restored, 0);
         assert_eq!(
             std::fs::read_to_string(metadata_dir.join("recognized-packages.json"))
