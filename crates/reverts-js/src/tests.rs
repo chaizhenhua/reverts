@@ -558,8 +558,8 @@ fn module_item_formatting_infers_parameters_from_call_sites_when_requested() {
     })
     .expect("fixture should format");
 
-    assert!(formatted.contains("function greet(name: string): string"));
-    assert!(formatted.contains("const double = (value: number) =>"));
+    assert!(formatted.contains("function greet(name?: string): string"));
+    assert!(formatted.contains("const double = (value?: number) =>"));
 }
 
 #[test]
@@ -582,7 +582,7 @@ fn module_item_formatting_propagates_identifier_types_when_requested() {
     assert!(formatted.contains("const label: string = 'Ada';"));
     assert!(formatted.contains("const alias: string = label;"));
     assert!(
-        formatted.contains("function echo(value: string): string"),
+        formatted.contains("function echo(value?: string): string"),
         "{formatted}"
     );
 }
@@ -623,7 +623,7 @@ fn module_item_formatting_infers_union_call_site_parameters_when_requested() {
     })
     .expect("fixture should format");
 
-    assert!(formatted.contains("function mixed(value: number | string): boolean"));
+    assert!(formatted.contains("function mixed(value?: number | string): boolean"));
 }
 
 #[test]
@@ -643,8 +643,8 @@ fn module_item_formatting_infers_union_return_types_when_requested() {
     })
     .expect("fixture should format");
 
-    assert!(formatted.contains("function mixed(flag)"));
-    assert!(formatted.contains("function mixed(flag): number | string"));
+    assert!(formatted.contains("function mixed(flag?)"));
+    assert!(formatted.contains("function mixed(flag?): number | string"));
 }
 
 #[test]

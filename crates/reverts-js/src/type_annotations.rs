@@ -7,11 +7,12 @@ use oxc_ast::Visit;
 use oxc_ast::VisitMut;
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
-    AssignmentTarget, BindingPattern, BindingPatternKind, CallExpression, Declaration,
-    ExportNamedDeclaration, Expression, FormalParameters, Function, FunctionBody,
-    ImportDeclarationSpecifier, ObjectPropertyKind, Program, PropertyKey, ReturnStatement,
-    SimpleAssignmentTarget, Statement, TSType, TSTypeName, TSTypeParameterInstantiation,
-    TSTypeQueryExprName, UpdateExpression, VariableDeclaration, VariableDeclarationKind,
+    AssignmentTarget, BindingPattern, BindingPatternKind, CallExpression, Class, ClassElement,
+    Declaration, ExportNamedDeclaration, Expression, FormalParameters, Function, FunctionBody,
+    ImportDeclarationSpecifier, ObjectProperty, ObjectPropertyKind, Program, PropertyKey,
+    PropertyKind, ReturnStatement, SimpleAssignmentTarget, Statement, TSType, TSTypeName,
+    TSTypeParameterInstantiation, TSTypeQueryExprName, UpdateExpression, VariableDeclaration,
+    VariableDeclarationKind,
 };
 use oxc_ast::visit::walk::{
     walk_arrow_function_expression as walk_arrow_function_expression_read,
@@ -19,7 +20,8 @@ use oxc_ast::visit::walk::{
     walk_update_expression, walk_variable_declaration as walk_variable_declaration_read,
 };
 use oxc_ast::visit::walk_mut::{
-    walk_arrow_function_expression, walk_function, walk_variable_declaration,
+    walk_arrow_function_expression, walk_class, walk_function, walk_object_property,
+    walk_variable_declaration,
 };
 use oxc_parser::Parser;
 use oxc_semantic::{SemanticBuilder, SymbolTable};
@@ -171,9 +173,11 @@ pub fn apply_type_annotations_to_program<'a>(
     }
 
     let written_bindings = written_bindings_in_program(program);
+    let member_props = member_assigned_props_in_program(program);
     let mut annotator = SafeLiteralInitializerAnnotator {
         builder: &builder,
         written_bindings: &written_bindings,
+        member_props: &member_props,
     };
     annotator.visit_program(program);
 
@@ -193,6 +197,121 @@ pub fn apply_type_annotations_to_program<'a>(
         call_site_parameter_types: &call_site_parameter_types,
     };
     function_annotator.visit_program(program);
+
+    let mut class_annotator = ClassIndexSignatureAnnotator { builder: &builder };
+    class_annotator.visit_program(program);
+
+    let mut param_optional_annotator = ParamOptionalAnnotator;
+    param_optional_annotator.visit_program(program);
+}
+
+/// Marks a trailing run of plain-identifier parameters optional (`a?`).
+///
+/// Bundled JS routinely calls functions with fewer arguments than declared
+/// parameters (the missing ones are simply `undefined`); TS treats every declared
+/// parameter as required and reports TS2554 "Expected N arguments, but got M".
+/// Making the trailing parameters optional matches the runtime contract and is
+/// type-only. Under `strict: false` the resulting `T | undefined` does not produce
+/// "possibly undefined" access errors.
+struct ParamOptionalAnnotator;
+
+impl<'a> VisitMut<'a> for ParamOptionalAnnotator {
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        // A `set` accessor cannot have an optional parameter (TS1051); a `get` has
+        // none. Skip both.
+        if !flags.intersects(ScopeFlags::GetAccessor | ScopeFlags::SetAccessor) {
+            mark_trailing_params_optional(&mut function.params);
+        }
+        walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &mut ArrowFunctionExpression<'a>) {
+        mark_trailing_params_optional(&mut arrow.params);
+        walk_arrow_function_expression(self, arrow);
+    }
+
+    fn visit_object_property(&mut self, property: &mut ObjectProperty<'a>) {
+        walk_object_property(self, property);
+        // Object-literal set accessors (`{ set x(v) {} }`) do not carry the
+        // SetAccessor scope flag, so visit_function above would have wrongly made
+        // their parameter optional (TS1051). Undo it.
+        if property.kind == PropertyKind::Set
+            && let Expression::FunctionExpression(function) = &mut property.value
+        {
+            for item in function.params.items.iter_mut() {
+                item.pattern.optional = false;
+            }
+        }
+    }
+}
+
+fn mark_trailing_params_optional(parameters: &mut FormalParameters<'_>) {
+    // Right-to-left so we never leave a required parameter after an optional one
+    // (TS1016). A rest element absorbs extra args, so a preceding run may still be
+    // made optional — hence the seed is `true` regardless of `parameters.rest`.
+    let mut all_later_optional = true;
+    for item in parameters.items.iter_mut().rev() {
+        let optional_compatible = if item.pattern.optional {
+            true
+        } else {
+            match &item.pattern.kind {
+                // Already optional via a default value.
+                BindingPatternKind::AssignmentPattern(_) => true,
+                // A bare identifier can be made optional when everything to its
+                // right already is.
+                BindingPatternKind::BindingIdentifier(_) if all_later_optional => {
+                    item.pattern.optional = true;
+                    true
+                }
+                // Destructuring patterns can't be made optional without a default,
+                // and a required one blocks making anything to its left optional.
+                _ => false,
+            }
+        };
+        all_later_optional = all_later_optional && optional_compatible;
+    }
+}
+
+/// Adds `[key: string]: any` to every class that lacks an index signature.
+///
+/// Minifiers collapse a constructor's `this.a = …; this.b = …;` *statements* into
+/// a single comma `this.a = …, this.b = …` *sequence expression*. TS infers
+/// implicit class fields only from assignment *statements*, so the sequence form
+/// leaves the fields undeclared and every `this.a` / `instance.a` read fails
+/// TS2339. An index signature restores permissive member access without inventing
+/// (and possibly mis-typing) individual field declarations. Declared members keep
+/// their own types — the index signature only covers the otherwise-unknown ones.
+struct ClassIndexSignatureAnnotator<'b, 'a> {
+    builder: &'b AstBuilder<'a>,
+}
+
+impl<'a> VisitMut<'a> for ClassIndexSignatureAnnotator<'_, 'a> {
+    fn visit_class(&mut self, class: &mut Class<'a>) {
+        let has_index_signature = class
+            .body
+            .body
+            .iter()
+            .any(|element| matches!(element, ClassElement::TSIndexSignature(_)));
+        if !has_index_signature {
+            let mut parameters = self.builder.vec();
+            parameters.push(self.builder.ts_index_signature_name(
+                SPAN,
+                "key",
+                self.builder
+                    .alloc_ts_type_annotation(SPAN, self.builder.ts_type_string_keyword(SPAN)),
+            ));
+            let index_signature = self.builder.class_element_ts_index_signature(
+                SPAN,
+                parameters,
+                self.builder
+                    .alloc_ts_type_annotation(SPAN, self.builder.ts_type_any_keyword(SPAN)),
+                false,
+                false,
+            );
+            class.body.body.push(index_signature);
+        }
+        walk_class(self, class);
+    }
 }
 
 pub fn apply_import_member_type_queries_to_program<'a>(
@@ -299,11 +418,17 @@ fn apply_variable_declaration_type_annotations<'a>(
 struct SafeLiteralInitializerAnnotator<'b, 'a> {
     builder: &'b AstBuilder<'a>,
     written_bindings: &'b BTreeSet<String>,
+    member_props: &'b BTreeMap<String, BTreeSet<String>>,
 }
 
 impl<'a> VisitMut<'a> for SafeLiteralInitializerAnnotator<'_, 'a> {
     fn visit_variable_declaration(&mut self, declaration: &mut VariableDeclaration<'a>) {
-        annotate_safe_variable_declaration(self.builder, self.written_bindings, declaration);
+        annotate_safe_variable_declaration(
+            self.builder,
+            self.written_bindings,
+            self.member_props,
+            declaration,
+        );
         walk_variable_declaration(self, declaration);
     }
 }
@@ -311,8 +436,10 @@ impl<'a> VisitMut<'a> for SafeLiteralInitializerAnnotator<'_, 'a> {
 fn annotate_safe_variable_declaration<'a>(
     builder: &AstBuilder<'a>,
     written_bindings: &BTreeSet<String>,
+    member_props: &BTreeMap<String, BTreeSet<String>>,
     declaration: &mut VariableDeclaration<'a>,
 ) {
+    let kind = declaration.kind;
     for declarator in declaration.declarations.iter_mut() {
         if declarator.id.type_annotation.is_some() {
             continue;
@@ -320,16 +447,26 @@ fn annotate_safe_variable_declaration<'a>(
         let Some(binding) = binding_pattern_identifier(&declarator.id) else {
             continue;
         };
-        if declaration.kind != VariableDeclarationKind::Const && written_bindings.contains(binding)
-        {
+        if kind != VariableDeclarationKind::Const && written_bindings.contains(binding) {
             continue;
         }
         let Some(init) = &declarator.init else {
             continue;
         };
-        let Some(type_annotation) = inferred_type_annotation_for_expression(builder, init, 0)
-        else {
-            continue;
+        // An empty object literal initializer (`var X = {}`) infers the closed
+        // type `{}`, so the bundler's `X.a = …; X.b = …` build-up and later reads
+        // all fail TS2339. Annotate it with an OPEN object type that carries the
+        // statically-written property names and an index signature for the rest.
+        let type_annotation = if matches!(init, Expression::ObjectExpression(object) if object.properties.is_empty())
+        {
+            let binding = binding.to_string();
+            let props = member_props.get(&binding).cloned().unwrap_or_default();
+            open_object_type_annotation(builder, &props)
+        } else {
+            let Some(annotation) = inferred_type_annotation_for_expression(builder, init, 0) else {
+                continue;
+            };
+            annotation
         };
         declarator.id.type_annotation =
             Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
@@ -505,15 +642,57 @@ fn annotate_defaulted_binding_pattern<'a>(
     if assignment.left.type_annotation.is_some() {
         return;
     }
-    if binding_pattern_identifier(&assignment.left).is_none() {
-        return;
-    }
-    let Some(type_annotation) =
-        inferred_type_annotation_for_expression(builder, &assignment.right, 0)
-    else {
-        return;
+    let empty_object_default = matches!(&assignment.right, Expression::ObjectExpression(object) if object.properties.is_empty());
+    // `param = {}` is the minified options-object idiom: the empty-object default
+    // infers the closed type `{}`, so every `param.opt` read in the body fails
+    // TS2339. Give it an OPEN object type so member access stays valid. Parameter
+    // names are routinely reused (minified single letters) across functions, so we
+    // can't safely attribute member writes by name here — emit the index signature
+    // alone rather than risk leaking another function's props onto this one.
+    let type_annotation = match &assignment.left.kind {
+        BindingPatternKind::BindingIdentifier(_) if empty_object_default => {
+            open_object_type_annotation(builder, &BTreeSet::new())
+        }
+        BindingPatternKind::BindingIdentifier(_) => {
+            let Some(annotation) =
+                inferred_type_annotation_for_expression(builder, &assignment.right, 0)
+            else {
+                return;
+            };
+            annotation
+        }
+        // Destructuring param with an empty-object default: `({ message } = {})`.
+        // The pattern reads its keys off `{}`, so each fails TS2339. Annotate with
+        // an open type carrying the destructured keys plus an index signature.
+        BindingPatternKind::ObjectPattern(object_pattern) if empty_object_default => {
+            let keys = object_pattern_static_keys(object_pattern);
+            open_object_type_annotation_optional(builder, &keys)
+        }
+        _ => return,
     };
     assignment.left.type_annotation = Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
+}
+
+/// The statically-named keys destructured by an object pattern (`{ a, b: c }` →
+/// `{a, b}`). Computed/rest keys are skipped — they have no fixed name to put in
+/// the synthesized type, and the index signature covers them anyway.
+fn object_pattern_static_keys(pattern: &oxc_ast::ast::ObjectPattern<'_>) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    for property in &pattern.properties {
+        if property.computed {
+            continue;
+        }
+        match &property.key {
+            PropertyKey::StaticIdentifier(identifier) if is_plain_identifier(identifier.name.as_str()) => {
+                keys.insert(identifier.name.as_str().to_string());
+            }
+            PropertyKey::StringLiteral(literal) if is_plain_identifier(literal.value.as_str()) => {
+                keys.insert(literal.value.as_str().to_string());
+            }
+            _ => {}
+        }
+    }
+    keys
 }
 
 fn annotate_function_return<'a>(
@@ -785,6 +964,102 @@ impl<'a> Visit<'a> for WrittenBindingCollector {
         }
         walk_update_expression(self, expression);
     }
+}
+
+/// For every `X.prop = …` (and `X[i].prop` is ignored — only a bare
+/// `identifier.prop = …`), record `prop` against `X`. A scope-hoisting bundler
+/// emits inlined CommonJS modules as `var EXPORTS = {}; EXPORTS.a = …; EXPORTS.b
+/// = …`, so the empty-object initializer infers the closed type `{}` and every
+/// later `EXPORTS.a` read fails `TS2339`. Recovering the written property names
+/// lets us annotate the binding with an OPEN object type that both carries those
+/// names and stays permissive.
+fn member_assigned_props_in_program(program: &Program<'_>) -> BTreeMap<String, BTreeSet<String>> {
+    let mut collector = MemberAssignedPropsCollector::default();
+    collector.visit_program(program);
+    collector.props
+}
+
+#[derive(Default)]
+struct MemberAssignedPropsCollector {
+    props: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl<'a> Visit<'a> for MemberAssignedPropsCollector {
+    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
+        if let AssignmentTarget::StaticMemberExpression(member) = &expression.left
+            && let Expression::Identifier(object) = &member.object
+            && is_plain_identifier(member.property.name.as_str())
+        {
+            self.props
+                .entry(object.name.as_str().to_string())
+                .or_default()
+                .insert(member.property.name.as_str().to_string());
+        }
+        walk_assignment_expression(self, expression);
+    }
+}
+
+/// Whether `name` is a plain JS identifier safe to emit as an unquoted property
+/// key (so the synthesized `{ name: any; … }` type parses).
+fn is_plain_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// `{ <prop>: any; …; [key: string]: any }` — an OPEN object type carrying the
+/// statically-known property names while the index signature keeps any other
+/// member access (and the dynamic CJS build-up) from erroring.
+///
+/// `optional` makes the named props `prop?: any`. Required props are right for a
+/// variable's own type (`var X = {}; X.a = …`), but a *parameter* with an empty
+/// default (`({ a } = {})`) must keep its props optional — otherwise the `{}`
+/// default is no longer assignable to the synthesized type (TS2741).
+fn open_object_type_annotation<'a>(
+    builder: &AstBuilder<'a>,
+    props: &BTreeSet<String>,
+) -> TSType<'a> {
+    open_object_type_annotation_inner(builder, props, false)
+}
+
+fn open_object_type_annotation_optional<'a>(
+    builder: &AstBuilder<'a>,
+    props: &BTreeSet<String>,
+) -> TSType<'a> {
+    open_object_type_annotation_inner(builder, props, true)
+}
+
+fn open_object_type_annotation_inner<'a>(
+    builder: &AstBuilder<'a>,
+    props: &BTreeSet<String>,
+    optional: bool,
+) -> TSType<'a> {
+    let mut members = builder.vec();
+    for prop in props {
+        let any_ty = builder.ts_type_any_keyword(SPAN);
+        members.push(builder.ts_signature_property_signature(
+            SPAN,
+            false,
+            optional,
+            false,
+            builder.property_key_identifier_name(SPAN, prop.as_str()),
+            Some(builder.alloc_ts_type_annotation(SPAN, any_ty)),
+        ));
+    }
+    let mut index_params = builder.vec();
+    index_params.push(builder.ts_index_signature_name(
+        SPAN,
+        "key",
+        builder.alloc_ts_type_annotation(SPAN, builder.ts_type_string_keyword(SPAN)),
+    ));
+    members.push(builder.ts_signature_index_signature(
+        SPAN,
+        index_params,
+        builder.alloc_ts_type_annotation(SPAN, builder.ts_type_any_keyword(SPAN)),
+        false,
+        false,
+    ));
+    builder.ts_type_type_literal(SPAN, members)
 }
 
 fn assignment_target_identifier<'a>(target: &'a AssignmentTarget<'a>) -> Option<&'a str> {
@@ -1599,5 +1874,112 @@ fn type_annotation_for_kind<'a>(
         GeneratedTypeKind::BigInt => Some(builder.ts_type_big_int_keyword(SPAN)),
         GeneratedTypeKind::Null => Some(builder.ts_type_null_keyword(SPAN)),
         GeneratedTypeKind::Undefined => Some(builder.ts_type_undefined_keyword(SPAN)),
+    }
+}
+
+#[cfg(test)]
+mod open_object_tests {
+    use super::*;
+    use oxc_codegen::CodeGenerator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    fn annotate(source: &str) -> String {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::ts())
+            .parse();
+        assert!(parsed.errors.is_empty(), "parse errors: {:?}", parsed.errors);
+        let mut program = parsed.program;
+        apply_type_annotations_to_program(&allocator, &mut program, &[], true);
+        CodeGenerator::new().build(&program).code
+    }
+
+    #[test]
+    fn empty_object_binding_with_member_writes_gets_open_type() {
+        let out = annotate("const exports = {}; exports.foo = 1; exports.bar = 2;\n");
+        // carries the statically-written property names ...
+        assert!(out.contains("foo: any"), "missing foo prop: {out}");
+        assert!(out.contains("bar: any"), "missing bar prop: {out}");
+        // ... plus an index signature keeping it open.
+        assert!(out.contains("[key: string]: any"), "missing index sig: {out}");
+    }
+
+    #[test]
+    fn empty_object_binding_without_writes_gets_index_signature_only() {
+        // Member-read (no writes) → index signature, no named props.
+        let out = annotate("const opts = {}; sink(opts.value);\n");
+        assert!(out.contains("[key: string]: any"), "missing index sig: {out}");
+        assert!(!out.contains(": any;\n  [key"), "unexpected named props: {out}");
+    }
+
+    #[test]
+    fn var_empty_object_with_only_member_writes_gets_open_type() {
+        // The CJS lazy-init idiom: `var ve = {}; ve.A = …; ve.B = …`.
+        let out = annotate("var ve = {}; ve.A = 1; ve.B = 2; export { ve };\n");
+        assert!(out.contains("[key: string]: any"), "var ve not annotated: {out}");
+    }
+
+    #[test]
+    fn empty_object_default_parameter_gets_open_type() {
+        let out = annotate("function f(opts = {}) { return opts.code; }\n");
+        assert!(out.contains("[key: string]: any"), "missing index sig on param: {out}");
+    }
+
+    #[test]
+    fn destructuring_param_with_empty_default_gets_open_type() {
+        // Lever A: `({ message } = {})` reads keys off `{}`. Props must be OPTIONAL
+        // so the `= {}` default stays assignable to the synthesized type.
+        let out = annotate("function f({ message } = {}) { return message; }\n");
+        assert!(out.contains("message?: any"), "missing optional destructured key: {out}");
+        assert!(out.contains("[key: string]: any"), "missing index sig: {out}");
+    }
+
+    #[test]
+    fn trailing_params_made_optional() {
+        // Lever D: bundled JS calls with fewer args; mark trailing params optional.
+        let out = annotate("function f(a, b, c) { return a; }\n");
+        assert!(out.contains("a?") && out.contains("b?") && out.contains("c?"), "params not optional: {out}");
+    }
+
+    #[test]
+    fn required_param_before_pattern_not_made_optional() {
+        // A required destructuring pattern blocks optionalizing params to its left.
+        let out = annotate("function f(a, { b }) { return a; }\n");
+        assert!(!out.contains("a?"), "must not optionalize before required pattern: {out}");
+    }
+
+    #[test]
+    fn object_literal_setter_param_not_made_optional() {
+        let out = annotate("const o = { set v(x) { sink(x); } };\n");
+        assert!(!out.contains("x?"), "object setter param must stay required: {out}");
+    }
+
+    #[test]
+    fn setter_param_not_made_optional() {
+        let out = annotate("class C { set v(x) { this._x = x; } }\n");
+        assert!(!out.contains("x?"), "setter param must stay required: {out}");
+    }
+
+    #[test]
+    fn class_gets_index_signature() {
+        // Lever E: minified constructor uses a comma sequence, defeating implicit
+        // field inference; an index signature restores member access.
+        let out = annotate("class C { constructor(e) { this._a = e, this._b = 0; } m() { return this._a; } }\n");
+        assert!(out.contains("[key: string]: any"), "class missing index sig: {out}");
+    }
+
+    #[test]
+    fn class_with_existing_index_signature_is_untouched() {
+        let out = annotate("class C { [k: string]: number; }\n");
+        // exactly one index signature (we must not add a second)
+        assert_eq!(out.matches("[k: string]").count() + out.matches("[key: string]").count(), 1, "duplicated index sig: {out}");
+    }
+
+    #[test]
+    fn non_empty_object_literal_is_left_to_structural_inference() {
+        // A populated literal already infers a usable shape; the open-object
+        // path must not fire (no index signature injected).
+        let out = annotate("const cfg = { a: 1 };\n");
+        assert!(!out.contains("[key: string]"), "should not open-type populated literal: {out}");
     }
 }

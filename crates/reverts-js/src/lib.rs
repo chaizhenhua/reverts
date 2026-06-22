@@ -39,7 +39,7 @@ pub use format_module_items::{
     FormatSourceRequest, format_source_with_module_items,
     format_source_with_module_items_and_renames,
     format_source_with_module_items_and_renames_with_report,
-    format_source_with_module_items_request,
+    format_source_with_module_items_request, template_raw_chunks,
 };
 pub use lowering::CompilerLowering;
 pub use rename_apply::FunctionParamRename;

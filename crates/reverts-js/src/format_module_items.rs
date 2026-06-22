@@ -357,6 +357,73 @@ fn normalize_imports_after_emit<'a>(program: &mut Program<'a>, builder: &AstBuil
     coalesce_imports_in_program(program, builder);
 }
 
+/// The `raw` text of every template-literal quasi in `source`, in source order.
+/// Template raws are runtime-observable, so the emitter compares these before and
+/// after formatting a template-bearing file: if any chunk changes (OXC codegen can
+/// normalize whitespace-only quasis), the original bytes are kept instead. Returns
+/// `None` if the source does not parse under any candidate grammar.
+pub fn template_raw_chunks(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Option<Vec<String>> {
+    use oxc_ast::Visit;
+    use oxc_ast::ast::TemplateLiteral;
+    use oxc_ast::visit::walk::walk_template_literal;
+
+    struct TemplateRawCollector {
+        raws: Vec<String>,
+    }
+    impl<'a> Visit<'a> for TemplateRawCollector {
+        fn visit_template_literal(&mut self, literal: &TemplateLiteral<'a>) {
+            for quasi in &literal.quasis {
+                self.raws.push(quasi.value.raw.as_str().to_string());
+            }
+            walk_template_literal(self, literal);
+        }
+    }
+
+    let allocator = Allocator::default();
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            continue;
+        }
+        let mut collector = TemplateRawCollector { raws: Vec::new() };
+        collector.visit_program(&parsed.program);
+        return Some(collector.raws);
+    }
+    None
+}
+
+#[cfg(test)]
+mod template_chunk_tests {
+    use super::*;
+
+    #[test]
+    fn collects_quasis_in_order() {
+        let chunks = template_raw_chunks("const x = `a${1}b${2}c`;\n", None, ParseGoal::TypeScript)
+            .expect("parses");
+        assert_eq!(chunks, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn preserves_significant_whitespace_raw() {
+        // Two spaces in the quasi must be reported verbatim so the emitter can
+        // detect any codegen normalization.
+        let chunks =
+            template_raw_chunks("const x = `a  b`;\n", None, ParseGoal::TypeScript).expect("parses");
+        assert_eq!(chunks, vec!["a  b".to_string()]);
+    }
+
+    #[test]
+    fn unparseable_source_returns_none() {
+        assert!(template_raw_chunks("const = = =;", None, ParseGoal::TypeScript).is_none());
+    }
+}
+
 #[cfg(test)]
 mod wire_rename_tests {
     use super::*;

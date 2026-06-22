@@ -5,7 +5,7 @@ use reverts_ir::{BindingName, InferredType};
 use reverts_js::{
     CompilerLowering, FormatSourceRequest, GeneratedExport, GeneratedImport, GeneratedRename,
     GeneratedRenameScope, GeneratedTypeAnnotation, GeneratedTypeKind,
-    format_source_with_module_items_request, sanitize_identifier,
+    format_source_with_module_items_request, sanitize_identifier, template_raw_chunks,
 };
 use reverts_observe::{AuditFinding, FindingCode};
 use reverts_planner::{
@@ -155,16 +155,18 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
     //      exports / renames, so we record a Warning finding listing what
     //      was dropped. Downstream `audit_emitted_project_parse` still
     //      reports the unparseable bytes as an Error.
-    let (formatted, finding) = if should_preserve_raw_source_body(
-        body_source.as_str(),
-        &generated_imports,
-        &generated_exports,
-        &generated_renames,
-        &generated_type_annotations,
-        lowering,
-    ) {
-        (body_source, None)
-    } else {
+    // Nothing to inject and no compiler lowering: the format pass would only
+    // reformat + add inferred type annotations. That is desirable (it carries
+    // types into otherwise-minified files), but for template-bearing files we must
+    // first prove OXC codegen did not normalize a runtime-observable template raw.
+    let injection_free = generated_imports.is_empty()
+        && generated_exports.is_empty()
+        && generated_renames.is_empty()
+        && lowering == CompilerLowering::None;
+    let path_hint = file.source_strategy().path_hint(file.path.as_str());
+    let goal = file.source_strategy().parse_goal();
+
+    let (formatted, finding) = {
         match format_source_with_module_items_request(FormatSourceRequest {
             body_source: &body_source,
             generated_imports: &generated_imports,
@@ -173,12 +175,23 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
             function_param_renames: &generated_param_renames,
             type_annotations: &generated_type_annotations,
             infer_literal_types: true,
-            path_hint: file.source_strategy().path_hint(file.path.as_str()),
+            path_hint,
             importer_path: Some(std::path::Path::new(file.path.as_str())),
-            goal: file.source_strategy().parse_goal(),
+            goal,
             lowering,
         }) {
-            Ok(formatted) => (formatted, None),
+            Ok(formatted) => {
+                if injection_free
+                    && body_source.contains('`')
+                    && !templates_preserved(body_source.as_str(), &formatted, path_hint, goal)
+                {
+                    // Codegen would alter a template raw and we have nothing we must
+                    // inject — keep the original bytes (ADR 0002 faithfulness).
+                    (body_source, None)
+                } else {
+                    (formatted, None)
+                }
+            }
             Err(error) => {
                 let finding = AuditFinding::warning(
                     FindingCode::EmitterRawBodyPreservedAfterInjectionFailure,
@@ -207,26 +220,26 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
     ))
 }
 
-fn should_preserve_raw_source_body(
-    body_source: &str,
-    generated_imports: &[GeneratedImport],
-    generated_exports: &[GeneratedExport],
-    generated_renames: &[GeneratedRename],
-    generated_type_annotations: &[GeneratedTypeAnnotation],
-    lowering: CompilerLowering,
+/// Whether formatting left every runtime-observable template raw byte-identical.
+///
+/// Template literal raw chunks are runtime-observable and OXC codegen can normalize
+/// whitespace-only quasis (e.g. prompt / system-message bodies). When a file has
+/// nothing that must be injected, the emitter keeps the original bytes if this
+/// returns false, so the inference pass only reaches template files it cannot harm.
+/// Unparseable output is treated as "not preserved" (conservative — keep raw).
+fn templates_preserved(
+    original: &str,
+    formatted: &str,
+    path_hint: Option<&std::path::Path>,
+    goal: reverts_js::ParseGoal,
 ) -> bool {
-    // Template literal raw chunks are runtime-observable. OXC codegen
-    // reprints a parsed AST and can normalize whitespace-only template
-    // quasis, which changes strings such as prompt/system-message bodies.
-    // If the file is otherwise already source-backed (no synthetic module
-    // items, no explicit renames, no compiler lowering), validate that it
-    // parses but keep the original bytes for the body.
-    body_source.contains('`')
-        && generated_imports.is_empty()
-        && generated_exports.is_empty()
-        && generated_renames.is_empty()
-        && generated_type_annotations.is_empty()
-        && lowering == CompilerLowering::None
+    match (
+        template_raw_chunks(original, path_hint, goal),
+        template_raw_chunks(formatted, path_hint, goal),
+    ) {
+        (Some(before), Some(after)) => before == after,
+        _ => false,
+    }
 }
 
 fn emit_binding_name(binding: &BindingName) -> String {
