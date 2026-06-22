@@ -65,7 +65,10 @@ impl PackageIndexReexports {
 #[must_use]
 pub fn normalize_submodule_relpath(path: &str) -> String {
     let mut value = path.trim();
-    while let Some(rest) = value.strip_prefix("./").or_else(|| value.strip_prefix("../")) {
+    while let Some(rest) = value
+        .strip_prefix("./")
+        .or_else(|| value.strip_prefix("../"))
+    {
         value = rest;
     }
     for ext in [".js", ".cjs", ".mjs", ".json"] {
@@ -98,7 +101,8 @@ pub fn parse_index_reexports(index_source: &str) -> PackageIndexReexports {
             continue;
         };
         for declarator in &declaration.declarations {
-            let (Some(name), Some(init)) = (declarator.id.get_identifier(), &declarator.init) else {
+            let (Some(name), Some(init)) = (declarator.id.get_identifier(), &declarator.init)
+            else {
                 continue;
             };
             if let Some(relpath) = require_call_relpath(init) {
@@ -177,22 +181,26 @@ fn resolve_property_value(
         }),
         // `Range` (shorthand) or `Range: SemVer` — a require-local.
         Expression::Identifier(identifier) => {
-            requires.get(identifier.name.as_str()).map(|relpath| IndexReexport {
-                submodule_relpath: relpath.clone(),
-                export_name: export_name.to_string(),
-                member: None,
-            })
+            requires
+                .get(identifier.name.as_str())
+                .map(|relpath| IndexReexport {
+                    submodule_relpath: relpath.clone(),
+                    export_name: export_name.to_string(),
+                    member: None,
+                })
         }
         // `tokens: internalRe.t` — a property of a require-local.
         Expression::StaticMemberExpression(member) => {
             let Expression::Identifier(object) = &member.object else {
                 return None;
             };
-            requires.get(object.name.as_str()).map(|relpath| IndexReexport {
-                submodule_relpath: relpath.clone(),
-                export_name: export_name.to_string(),
-                member: Some(member.property.name.as_str().to_string()),
-            })
+            requires
+                .get(object.name.as_str())
+                .map(|relpath| IndexReexport {
+                    submodule_relpath: relpath.clone(),
+                    export_name: export_name.to_string(),
+                    member: Some(member.property.name.as_str().to_string()),
+                })
         }
         _ => None,
     }
@@ -215,7 +223,10 @@ mod tests {
     #[test]
     fn whole_object_inline_require() {
         let map = parse_index_reexports("module.exports = { Range: require('./classes/range') };");
-        assert_eq!(names(&map, "classes/range"), vec![("Range".to_string(), None)]);
+        assert_eq!(
+            names(&map, "classes/range"),
+            vec![("Range".to_string(), None)]
+        );
     }
 
     #[test]
@@ -223,7 +234,10 @@ mod tests {
         let map = parse_index_reexports(
             "const Range = require('./classes/range');\nmodule.exports = { Range };",
         );
-        assert_eq!(names(&map, "classes/range"), vec![("Range".to_string(), None)]);
+        assert_eq!(
+            names(&map, "classes/range"),
+            vec![("Range".to_string(), None)]
+        );
     }
 
     #[test]
@@ -257,8 +271,14 @@ mod tests {
 
     #[test]
     fn normalizes_relpaths() {
-        assert_eq!(normalize_submodule_relpath("./classes/range.js"), "classes/range");
-        assert_eq!(normalize_submodule_relpath("classes/range"), "classes/range");
+        assert_eq!(
+            normalize_submodule_relpath("./classes/range.js"),
+            "classes/range"
+        );
+        assert_eq!(
+            normalize_submodule_relpath("classes/range"),
+            "classes/range"
+        );
         assert_eq!(normalize_submodule_relpath("./a/b/index.js"), "a/b");
     }
 }
