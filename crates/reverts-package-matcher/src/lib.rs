@@ -6,6 +6,7 @@ mod matcher;
 mod model;
 mod ownership;
 pub mod package_helpers;
+mod parallel;
 mod pipeline;
 mod proof;
 mod scoring;
@@ -51,6 +52,7 @@ pub use package_helpers::{
     package_source_semantic_hint_score, package_source_semantic_surface_hint_score,
     path_hint_tokens, strip_package_prefix_from_semantic_path, strip_source_extension,
 };
+pub(crate) use parallel::par_map;
 pub use pipeline::match_packages_with_pipeline;
 pub(crate) use proof::concrete_source::{
     concrete_package_source_from_parts, concrete_package_sources_by_module,

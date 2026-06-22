@@ -234,15 +234,72 @@ fn assign_subject(
 }
 
 fn build_index(package_sources: &[PackageSource], audit: &mut AuditReport) -> FingerprintIndex {
+    // Phase 1 (parallel): parse + fingerprint every corpus source. The oxc parse
+    // dominates `build_index` (the corpus can be thousands of files), so fan it out
+    // across cores. Index insertion (phase 2) is cheap and stays serial in source
+    // order so the built index — and therefore match results — is byte-deterministic.
+    struct SourceFingerprints<'a> {
+        source: &'a PackageSource,
+        fps: Vec<FunctionFingerprint>,
+        parse_failed: bool,
+    }
+    let within_budget: Vec<(usize, &PackageSource)> = package_sources
+        .iter()
+        .enumerate()
+        .filter(|(_, source)| source.is_within_fingerprint_budget())
+        .collect();
+    let thread_count = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(within_budget.len().max(1));
+    let chunk_size = within_budget.len().div_ceil(thread_count).max(1);
+    let computed: Vec<SourceFingerprints> = std::thread::scope(|scope| {
+        let handles: Vec<_> = within_budget
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|(idx, source)| {
+                            // Preserve the original enumerate index so the synthetic
+                            // module id (and thus candidate identity) is unchanged.
+                            let synthetic_module_id = ModuleId(u32::MAX - *idx as u32);
+                            let fps = FunctionExtractor::fingerprint(
+                                synthetic_module_id,
+                                source.source.as_str(),
+                            );
+                            let parse_failed =
+                                fps.is_empty() && !cascade_source_parses(source.source.as_str());
+                            SourceFingerprints {
+                                source,
+                                fps,
+                                parse_failed,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .expect("cascade index fingerprint thread panicked")
+            })
+            .collect()
+    });
+
+    // Phase 2 (serial, source order): build the shared index deterministically.
     let mut index = FingerprintIndex::new();
-    for (idx, source) in package_sources.iter().enumerate() {
-        if !source.is_within_fingerprint_budget() {
-            continue;
-        }
-        let synthetic_module_id = ModuleId(u32::MAX - idx as u32);
-        let pkg_fps = FunctionExtractor::fingerprint(synthetic_module_id, source.source.as_str());
+    for SourceFingerprints {
+        source,
+        fps: pkg_fps,
+        parse_failed,
+    } in computed
+    {
         if pkg_fps.is_empty() {
-            if !cascade_source_parses(source.source.as_str()) {
+            if parse_failed {
                 audit.push(
                     AuditFinding::error(
                         FindingCode::UnparseablePackageSource,

@@ -143,13 +143,28 @@ pub(crate) fn match_packages_from_connection(
             preview
         );
     }
+    // The corpus to load = packages a bundle module references (vendored matching
+    // targets) + packages an Agent nominated as inlined island libraries. The full
+    // reference `package.json` dependency set also contains build/dev tooling and
+    // asset packages with NO bundle module and NO island candidacy (on a real
+    // Electron app `@phosphor-icons/react` alone is >4k sources, >50% of the
+    // corpus). Those can never match a bundle module or an island unit, so loading
+    // them only inflates every fingerprinting pass (and pushes the source count
+    // past the cascade limit). Restrict the blanket reference extension to the
+    // island candidate names; bundle-referenced reference packages still come in
+    // via `package_source_load_scope`, and reference *versions* stay available for
+    // resolution regardless.
+    let island_candidate_names: BTreeSet<String> = agent_island_candidates
+        .iter()
+        .map(|candidate| candidate.package_name.clone())
+        .collect();
     let package_names = if args.package_names.is_empty() {
         let mut package_names = package_source_load_scope(&rows, &[], &mut source_import_audit);
-        package_names.extend(reference_package_names);
+        package_names.extend(island_candidate_names.iter().cloned());
         package_names
     } else {
         let mut requested_package_names = args.package_names.clone();
-        requested_package_names.extend(reference_package_names);
+        requested_package_names.extend(island_candidate_names.iter().cloned());
         package_source_load_scope(&rows, &requested_package_names, &mut source_import_audit)
     };
     let package_filter = (!args.package_names.is_empty()).then_some(&package_names);
@@ -171,11 +186,38 @@ pub(crate) fn match_packages_from_connection(
     )?;
     let fingerprint_cache = loaded_package_sources.fingerprint_cache;
     let island_corpus = loaded_package_sources.island_corpus;
-    eprintln!(
-        "match-packages: island corpus has {} no-module library source(s)",
-        island_corpus.len()
-    );
+    let island_corpus_len = island_corpus.len();
+    eprintln!("match-packages: island corpus has {island_corpus_len} no-module library source(s)");
     let mut package_sources = loaded_package_sources.sources;
+    // Island-candidate packages are INLINED libraries with no bundle module of
+    // their own — they externalize through island anchoring (`island_corpus`),
+    // never through the main vendored-module cascade. Keeping their sources in the
+    // main `package_sources` only makes the cascade match all bundle modules
+    // against them (a generic package like `@opentelemetry/sdk-trace-base` triggers
+    // a candidate explosion → ~80s of Hungarian work for zero useful matches).
+    // Drop them here; `island_corpus` retains them for anchoring. A package that is
+    // genuinely BOTH a bundle module and a candidate keeps its bundle-module rows,
+    // so its vendored match is unaffected.
+    if !island_candidate_names.is_empty() {
+        let bundle_module_packages: BTreeSet<String> = rows
+            .modules
+            .iter()
+            .filter_map(|module| module.package_name.as_deref())
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+        let before = package_sources.len();
+        package_sources.retain(|source| {
+            !island_candidate_names.contains(&source.package_name)
+                || bundle_module_packages.contains(&source.package_name)
+        });
+        if package_sources.len() != before {
+            eprintln!(
+                "match-packages: excluded {} inlined island-candidate source(s) from the vendored cascade (kept for island anchoring)",
+                before - package_sources.len()
+            );
+        }
+    }
     mark_timing!("load_package_sources");
     let package_versions_before_resolution = package_versions_by_module(&rows);
     resolve_package_version_hints_to_available_sources(
@@ -202,29 +244,44 @@ pub(crate) fn match_packages_from_connection(
     // ONLY those sources. The full corpus is hundreds of no-module library sources;
     // matching every island CJS unit against all of them is the second per-run
     // bottleneck (tens of minutes) that gates incremental externalization.
-    // Filter by the LITERAL `--package-name` request, not the expanded
-    // `package_names` scope (which pulls in the whole graph component — e.g. all
-    // already-accepted island candidates). The cascade tolerates the wide scope,
-    // but island anchoring is O(island_units × corpus) and must see only the
-    // requested package's sources for an incremental run to be fast.
-    let requested_island_packages: BTreeSet<String> =
-        args.package_names.iter().cloned().collect();
-    let scoped_island_corpus: Vec<PackageSource> = if requested_island_packages.is_empty() {
-        island_corpus
+    // Island anchoring is O(island_units × corpus). The full reference corpus is
+    // dominated by packages that can NEVER be inlined into the runtime main-process
+    // island — icon sets, build/dev tooling, test runners, type-only packages (on a
+    // real Electron app `@phosphor-icons/react` alone is >50% of the corpus). Scope
+    // the corpus to the packages an Agent actually nominated as inlined
+    // (`island_package_candidates`), which is exactly the set island anchoring can
+    // confirm. An explicit `--package-name` narrows further (incremental runs);
+    // with neither signal we fall back to the full corpus (pure discovery).
+    let requested_island_packages: BTreeSet<String> = args.package_names.iter().cloned().collect();
+    let island_scope: Option<&BTreeSet<String>> = if !requested_island_packages.is_empty() {
+        Some(&requested_island_packages)
+    } else if !island_candidate_names.is_empty() {
+        Some(&island_candidate_names)
     } else {
-        island_corpus
-            .iter()
-            .filter(|source| requested_island_packages.contains(&source.package_name))
-            .cloned()
-            .collect()
+        None
     };
-    if std::env::var_os("REVERTS_DEBUG_ISLAND_PKG").is_some() {
-        eprintln!(
-            "match-packages: island anchoring corpus scoped {} source(s) (requested={})",
-            scoped_island_corpus.len(),
-            requested_island_packages.len()
-        );
-    }
+    let scoped_island_corpus: Vec<PackageSource> = match island_scope {
+        None => island_corpus,
+        Some(scope) => island_corpus
+            .iter()
+            .filter(|source| scope.contains(&source.package_name))
+            .cloned()
+            .collect(),
+    };
+    let island_scope_origin = if !requested_island_packages.is_empty() {
+        "--package-name"
+    } else if !island_candidate_names.is_empty() {
+        "accepted island candidates"
+    } else {
+        "full corpus (no candidates)"
+    };
+    eprintln!(
+        "match-packages: island anchoring corpus scoped to {} source(s) from {} (was {} total; via {})",
+        scoped_island_corpus.len(),
+        island_scope.map_or(0, BTreeSet::len),
+        island_corpus_len,
+        island_scope_origin,
+    );
     let island_anchors = compute_island_anchors(island_rows, &scoped_island_corpus);
     if !island_anchors.is_empty() {
         eprintln!(
@@ -372,8 +429,10 @@ fn compute_island_anchors(
         // match each unit's INIT body once, at module granularity.
         let unit_anchors = anchor_island_cjs_modules(prelude, package_sources);
         total_units += unit_anchors.len();
-        let mut anchored_bindings: BTreeSet<String> =
-            unit_anchors.iter().map(|anchor| anchor.binding.clone()).collect();
+        let mut anchored_bindings: BTreeSet<String> = unit_anchors
+            .iter()
+            .map(|anchor| anchor.binding.clone())
+            .collect();
         for anchor in unit_anchors {
             anchors.push(island_anchor_row(*source_file_id, anchor));
         }

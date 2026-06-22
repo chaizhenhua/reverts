@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use reverts_ir::{AxisHashes, AxisKind, FunctionFingerprint, MatchTier, NormalizationPassId};
 use reverts_package_index::{
     Candidate, CandidateOwner, CfgKey, ExactKey, FeatureKey, FingerprintIndex, PackageOwner,
@@ -274,20 +276,35 @@ fn feature_similarity_for_axes<O: CandidateOwner>(
 
     let remaining = collect_remaining_axes(axes, primary_axis);
 
+    // Precompute each remaining axis's bucket as a set of candidate identities
+    // ONCE, instead of rescanning the whole bucket for every candidate. The old
+    // O(candidates × axes × bucket) membership test made island anchoring against
+    // generic packages (hundreds of sources, large buckets) pathologically slow;
+    // this is O(axes × bucket) to build + O(candidates × axes × log) to test.
+    #[allow(clippy::type_complexity)]
+    let remaining_axis_sets: Vec<(AxisKind, BTreeSet<(O::IdentityKey, u64)>)> = remaining
+        .iter()
+        .map(|(axis, hash)| {
+            let bucket = index.lookup_feature(FeatureKey {
+                param_count,
+                kind: *axis,
+                hash: *hash,
+            });
+            let identities = bucket
+                .iter()
+                .map(|cand| (cand.owner.identity_key(), cand.external_function_id))
+                .collect::<BTreeSet<_>>();
+            (*axis, identities)
+        })
+        .collect();
+
     let mut scored: Vec<(Candidate<O>, f64, Vec<AxisKind>)> = cands
         .iter()
         .map(|cand| {
+            let cand_identity = (cand.owner.identity_key(), cand.external_function_id);
             let mut overlap_axes = Vec::new();
-            for (axis, hash) in &remaining {
-                let cand_hits = index.lookup_feature(FeatureKey {
-                    param_count,
-                    kind: *axis,
-                    hash: *hash,
-                });
-                if cand_hits.iter().any(|c| {
-                    c.owner.identity_key() == cand.owner.identity_key()
-                        && c.external_function_id == cand.external_function_id
-                }) {
+            for (axis, identities) in &remaining_axis_sets {
+                if identities.contains(&cand_identity) {
                     overlap_axes.push(*axis);
                 }
             }

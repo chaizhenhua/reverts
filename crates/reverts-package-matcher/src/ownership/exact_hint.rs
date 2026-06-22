@@ -206,16 +206,28 @@ fn exact_hint_source_path(
 fn package_names_by_source_hash(
     package_sources: &[PackageSource],
 ) -> BTreeMap<String, BTreeSet<String>> {
+    // The per-source parse + normalize dominates this pass; fan it out across
+    // cores, then fold into the map serially in input order (deterministic).
+    let per_source: Vec<(String, Vec<String>)> = crate::par_map(package_sources, |source| {
+        match package_source_fingerprint(source) {
+            Ok(fingerprint) => (
+                source.package_name.clone(),
+                fingerprint
+                    .normalized_source_hashes
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<String>>(),
+            ),
+            Err(_) => (source.package_name.clone(), Vec::<String>::new()),
+        }
+    });
     let mut by_hash = BTreeMap::<String, BTreeSet<String>>::new();
-    for source in package_sources {
-        let Ok(fingerprint) = package_source_fingerprint(source) else {
-            continue;
-        };
-        for hash in &fingerprint.normalized_source_hashes {
+    for (package_name, hashes) in per_source {
+        for hash in hashes {
             by_hash
-                .entry(hash.clone())
+                .entry(hash)
                 .or_default()
-                .insert(source.package_name.clone());
+                .insert(package_name.clone());
         }
     }
     by_hash

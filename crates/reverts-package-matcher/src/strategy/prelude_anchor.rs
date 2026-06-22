@@ -160,17 +160,44 @@ pub fn anchor_island_cjs_modules(
     // Fingerprint each unit's INIT body under its own synthetic module id (its
     // index in `units`), so an ownership match maps back to the originating unit.
     let t1 = std::time::Instant::now();
+    // Fingerprinting each unit's INIT body (an oxc parse) is the dominant cost
+    // here; fan it out across cores. Each unit is independent and keyed by its own
+    // index, so results fold into the BTreeMap deterministically regardless of
+    // completion order.
+    let unit_indices: Vec<usize> = (0..units.len()).collect();
+    let computed: Vec<Option<(ModuleId, Vec<FunctionFingerprint>)>> =
+        crate::par_map(&unit_indices, |&index| {
+            let unit = &units[index];
+            let (start, end) = (unit.body_span.0 as usize, unit.body_span.1 as usize);
+            let body = prelude.source.get(start..end)?;
+            let module_id = ModuleId(index as u32);
+            let fingerprints = FunctionExtractor::fingerprint(module_id, body);
+            if fingerprints.is_empty() {
+                None
+            } else {
+                Some((module_id, fingerprints))
+            }
+        });
+    // Per-subject global assignment is worst-case O(functions^3) in a dense
+    // candidate component. A genuine inlined CJS module is small; a unit with
+    // thousands of functions (a mis-recognized mega-region or a giant re-export
+    // barrel) cannot anchor cleanly to one package version anyway, and feeding it
+    // to the Hungarian assignment can wedge the whole pass for minutes-to-hours.
+    // Skip those units — bounding the cost — and report how many were dropped.
+    const MAX_UNIT_FUNCTIONS: usize = 2048;
     let mut subjects: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
-    for (index, unit) in units.iter().enumerate() {
-        let (start, end) = (unit.body_span.0 as usize, unit.body_span.1 as usize);
-        let Some(body) = prelude.source.get(start..end) else {
+    let mut skipped_oversized = 0_usize;
+    for (module_id, fingerprints) in computed.into_iter().flatten() {
+        if fingerprints.len() > MAX_UNIT_FUNCTIONS {
+            skipped_oversized += 1;
             continue;
-        };
-        let module_id = ModuleId(index as u32);
-        let fingerprints = FunctionExtractor::fingerprint(module_id, body);
-        if !fingerprints.is_empty() {
-            subjects.insert(module_id, fingerprints);
         }
+        subjects.insert(module_id, fingerprints);
+    }
+    if skipped_oversized > 0 {
+        eprintln!(
+            "island-anchor: skipped {skipped_oversized} oversized unit(s) (>{MAX_UNIT_FUNCTIONS} functions) to bound assignment cost"
+        );
     }
     if subjects.is_empty() {
         return Vec::new();
@@ -184,6 +211,12 @@ pub fn anchor_island_cjs_modules(
     }
 
     let t2 = std::time::Instant::now();
+    // One combined cascade over all candidate sources keeps the cross-package
+    // Hungarian disambiguation (a generic island function that could match several
+    // packages is assigned to exactly one), which a per-package split would lose —
+    // producing thousands of duplicate/false anchors. The cost of the combined
+    // index is bounded by the feature-similarity set-precompute + the greedy
+    // assignment fallback for oversized components (see cascade_match).
     let report = match_with_cascade(&subjects, package_sources);
     if debug_timing {
         eprintln!(

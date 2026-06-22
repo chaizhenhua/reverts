@@ -22,11 +22,19 @@ pub(crate) fn promote_weak_source_equivalent_matches(
     package_sources: &[PackageSource],
     report: &mut VersionedPackageMatchReport,
 ) {
+    // Fingerprinting every corpus source (parse + normalize) is the dominant cost
+    // of this pass; fan it out across cores. The serial fold below then assigns
+    // indices and builds the lookup map in input order, so `source_index` values
+    // and the map are identical to the previous single-threaded build.
+    let fingerprint_results: Vec<Option<PackageSourceFingerprint<'_>>> =
+        crate::par_map(package_sources, |source| {
+            package_source_fingerprint(source).ok()
+        });
     let mut source_fingerprints = Vec::<PackageSourceFingerprint<'_>>::new();
     let mut source_indices_by_version_hash =
         BTreeMap::<(String, String, String), Vec<usize>>::new();
-    for source in package_sources {
-        let Ok(fingerprint) = package_source_fingerprint(source) else {
+    for (source, fingerprint) in package_sources.iter().zip(fingerprint_results) {
+        let Some(fingerprint) = fingerprint else {
             continue;
         };
         let source_index = source_fingerprints.len();

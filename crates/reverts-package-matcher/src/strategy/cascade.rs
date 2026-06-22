@@ -206,6 +206,19 @@ pub fn assign_globally<O: CandidateOwner>(
             continue;
         }
 
+        // The optimal assignment below builds a dense rows×cols matrix and runs an
+        // O(n³) Hungarian solve. A handful of pathological subjects (generic
+        // library functions matching thousands of candidate columns) form one
+        // giant connected component that wedges the solve for minutes-to-hours and
+        // balloons the dense matrix. Those matches are noise anyway, so beyond a
+        // size budget fall back to a deterministic greedy max-weight matching
+        // (O(edges·log edges), no dense matrix) — bounded and order-independent.
+        const MAX_HUNGARIAN_DIM: usize = 128;
+        if component_rows.len().max(component_cols.len()) > MAX_HUNGARIAN_DIM {
+            greedy_component_assignment(&mut out, &col_keys, &component_rows, &row_edges);
+            continue;
+        }
+
         let local_col_by_global = component_cols
             .iter()
             .enumerate()
@@ -237,6 +250,39 @@ pub fn assign_globally<O: CandidateOwner>(
         }
     }
     out
+}
+
+/// Deterministic greedy max-weight matching for an oversized assignment
+/// component, used as a bounded fallback when the optimal Hungarian solve would
+/// be prohibitively expensive. Edges are taken in descending weight (ties broken
+/// by row then column for determinism) and each row/column is used at most once.
+/// Not globally optimal, but the components that hit this path are dominated by
+/// noise candidates where optimality is immaterial.
+fn greedy_component_assignment<O: CandidateOwner>(
+    out: &mut [GlobalAssignment<O>],
+    col_keys: &[(O::IdentityKey, u64)],
+    component_rows: &[usize],
+    row_edges: &[Vec<(usize, f64)>],
+) {
+    let mut edges: Vec<(f64, usize, usize)> = Vec::new();
+    for &row in component_rows {
+        for &(col, weight) in &row_edges[row] {
+            if weight > 0.0 {
+                edges.push((weight, row, col));
+            }
+        }
+    }
+    edges.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let mut used_rows = std::collections::BTreeSet::<usize>::new();
+    let mut used_cols = std::collections::BTreeSet::<usize>::new();
+    for (_weight, row, col) in edges {
+        if used_rows.contains(&row) || used_cols.contains(&col) {
+            continue;
+        }
+        used_rows.insert(row);
+        used_cols.insert(col);
+        choose_global_assignment(out, col_keys, row, col);
+    }
 }
 
 fn choose_global_assignment<O: CandidateOwner>(
