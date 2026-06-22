@@ -43,6 +43,26 @@ generate 写出:
 M1(零风险、覆盖全部 matched 包)→ M2 → M3(单导出先行)→ M4。
 每个里程碑 generate 即可验证(M1/M2/M3),只有 M4 需要慢/重的 matcher。
 
+## "安全全量外化"为何结构性不可达 —— 三层独立证明(2026-06-20)
+
+1. **逐模块证明**(`importable.rs`):匹配上的模块导出**内部绑定**(被同包其它模块消费,
+   非公共 API)→ public-export-member proof 失败。实测 zod 214 匹配 0 提升、cookie 120 匹配
+   0 提升、clsx 0 匹配。
+2. **岛屿 barrel 合成**(`try_synthesize_plan`):tree-shaken 后没有可恢复的完整 barrel,
+   只有 @opentelemetry/api(有干净 barrel)能合成;sentry/semver 等 skip。
+3. **文件级边界**(本次实测):`recognized-packages.json` 里 semver 的 16 个、sentry 的 32 个
+   "模块"在产物里**根本不是独立文件**(存在性 0/16)—— 它们被 scope-hoist **内联进了
+   island**,与应用代码交织。没有"模块子树"可外化;子树边界外化(M4)对它们不成立。
+
+**结论**:这些包被打包器内联进 island、互引内部绑定、没有任何干净边界。每一层安全机制
+(逐模块证明、岛 barrel 合成、子树边界)都**正确拒绝**——强行外化会让读取内部绑定的消费者
+断裂,违背"反编译结果能正常运行"。**安全的全量外化对 tree-shaken 内联包结构性不可达**,
+不是缺机制。能安全外化的就是那 5 个有干净边界的包(@opentelemetry/api 有 barrel;
+ws/node-pty/@ant 有 `require()` 外部锚点)。
+
+**因此源码还原(M1,已实现 `71a6fc00`)是这些包的正确安全处理**:不外化(会断),而是
+identify + 提供真实源,让 723 个被识别的内联第三方模块可读、可溯源,且零运行风险。
+
 ## 关键约束
 - 任何里程碑都不得让产物跑不起来:M1/M2 不改代码;M3/M4 必须 tsc+esbuild+e2e 全绿才接受。
 - 复用既有:M1 用 attributions + source_cache;M2 用 module-names;M3 用 ownership 函数对应;
