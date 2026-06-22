@@ -350,9 +350,22 @@ fn island_cluster_path(cluster_id: usize) -> String {
 /// safe path component and a numeric suffix breaks any collision so two clusters
 /// never map to the same file. `used` accumulates the paths already taken.
 fn semantic_island_cluster_path(semantic: &str, used: &mut BTreeSet<String>) -> String {
-    let cleaned = semantic
-        .trim()
-        .trim_matches('/')
+    // The override is RELATIVE to `modules/island/`. Some accepted names were
+    // recorded with a redundant leading `modules/island/` (or `island/`); strip
+    // it so the cluster does not nest under a doubled `modules/island/...` path.
+    let mut normalized = semantic.trim().trim_matches('/');
+    loop {
+        let next = normalized
+            .strip_prefix("modules/island/")
+            .or_else(|| normalized.strip_prefix("island/"))
+            .map(|rest| rest.trim_start_matches('/'))
+            .unwrap_or(normalized);
+        if next == normalized {
+            break;
+        }
+        normalized = next;
+    }
+    let cleaned = normalized
         .split('/')
         .map(sanitize_path_component)
         .filter(|segment| !segment.is_empty())
@@ -1549,6 +1562,32 @@ mod tests {
         assert_eq!(
             semantic_island_cluster_path("///", &mut used),
             "modules/island/island-cluster.ts"
+        );
+    }
+
+    #[test]
+    fn semantic_island_path_strips_redundant_island_prefix() {
+        let mut used = BTreeSet::new();
+        // A name recorded with a redundant `modules/island/` prefix must not
+        // nest under a doubled `modules/island/modules/island/...` path.
+        assert_eq!(
+            semantic_island_cluster_path("modules/island/vendor/node-forge", &mut used),
+            "modules/island/vendor/node-forge.ts"
+        );
+        // A bare `island/` prefix is stripped too.
+        assert_eq!(
+            semantic_island_cluster_path("island/telemetry/spans", &mut used),
+            "modules/island/telemetry/spans.ts"
+        );
+        // Repeated/leading-slash prefixes collapse fully.
+        assert_eq!(
+            semantic_island_cluster_path("/modules/island/modules/island/auth/token", &mut used),
+            "modules/island/auth/token.ts"
+        );
+        // A correctly-relative name is unaffected.
+        assert_eq!(
+            semantic_island_cluster_path("plugins/local-plugins", &mut used),
+            "modules/island/plugins/local-plugins.ts"
         );
     }
 
