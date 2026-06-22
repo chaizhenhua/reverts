@@ -310,6 +310,28 @@ pub struct RuntimeDependency {
     pub package_version: String,
 }
 
+/// Declare each island-externalized package as a runtime dependency, so the
+/// output `package.json` lists the package the recovered island now imports
+/// (`import * as … from '<pkg>'`) instead of inlining it. Skips specifiers
+/// already present from module-level attributions.
+fn extend_runtime_dependencies_with_island_externalizations(
+    runtime_dependencies: &mut Vec<RuntimeDependency>,
+    program: &EnrichedProgram,
+) {
+    for externalization in program.island_package_externalizations() {
+        let already_listed = runtime_dependencies
+            .iter()
+            .any(|dependency| dependency.package_name == externalization.import_specifier);
+        if already_listed {
+            continue;
+        }
+        runtime_dependencies.push(RuntimeDependency {
+            package_name: externalization.import_specifier.clone(),
+            package_version: externalization.version.clone(),
+        });
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmittedAsset {
     pub path: String,
@@ -520,7 +542,8 @@ pub fn generate_project_from_prepared_with_options(
     let mut audit = bundle_audit;
     audit.extend(enrichment_audit);
     let input = program.model().input();
-    let runtime_dependencies = collect_runtime_dependencies(input);
+    let mut runtime_dependencies = collect_runtime_dependencies(input);
+    extend_runtime_dependencies_with_island_externalizations(&mut runtime_dependencies, &program);
     let asset_references = collect_required_asset_references(input);
     let assets = collect_emitted_assets(input, &asset_references);
     let source_mirror_assets = collect_source_mirror_assets(input);
@@ -717,7 +740,8 @@ pub fn generate_project_inventory_from_prepared(
     let mut audit = bundle_audit;
     audit.extend(enrichment_audit);
     let input = program.model().input();
-    let runtime_dependencies = collect_runtime_dependencies(input);
+    let mut runtime_dependencies = collect_runtime_dependencies(input);
+    extend_runtime_dependencies_with_island_externalizations(&mut runtime_dependencies, &program);
     let asset_references = collect_required_asset_references(input);
     let assets = collect_emitted_assets(input, &asset_references);
     audit.extend(audit_required_sources(&program));

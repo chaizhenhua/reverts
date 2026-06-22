@@ -347,6 +347,7 @@ fn island_package_externalizations(
             }
             externalizations.push(IslandPackageExternalization {
                 import_specifier: plan.import_specifier,
+                version: plan.version,
                 entry_init: reverts_ir::BindingName::new(plan.entry_init),
                 entry_exports: reverts_ir::BindingName::new(plan.entry_exports),
                 member_bindings: plan

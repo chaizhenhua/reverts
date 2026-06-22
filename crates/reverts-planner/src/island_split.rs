@@ -26,7 +26,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_ir::BindingName;
-use reverts_js::{ParseGoal, TopLevelStatementKind, collect_top_level_statement_facts};
+use reverts_js::{
+    ParseGoal, TopLevelStatementKind, collect_identifier_read_facts,
+    collect_top_level_statement_facts,
+};
 use reverts_model::IslandPackageExternalization;
 
 use crate::statements::{named_export_statement, named_import_statement};
@@ -324,6 +327,19 @@ pub(crate) fn externalize_island_packages(
     }
     let facts = collect_top_level_statement_facts(island_source, None, ParseGoal::TypeScript).ok()?;
 
+    // True identifier READS across the island (name + span), excluding property
+    // keys, member accesses, and string contents — so the safety gate cannot be
+    // tripped by an object key that merely shares a member's minified name.
+    let read_facts =
+        collect_identifier_read_facts(island_source, None, ParseGoal::TypeScript).ok()?;
+    let mut reads_by_name: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
+    for fact in &read_facts {
+        reads_by_name
+            .entry(fact.name.as_str())
+            .or_default()
+            .push((fact.byte_start, fact.byte_end));
+    }
+
     // Map each binding to the statement ranges that declare ONLY package members,
     // so a straddling statement (declares a member + a non-member) is never cut.
     let mut imports = Vec::new();
@@ -359,20 +375,34 @@ pub(crate) fn externalize_island_packages(
             .filter(|binding| **binding != package.entry_exports && **binding != package.entry_init)
             .collect();
         let all_covered = internal.iter().all(|binding| covered.contains(*binding));
-        let kept_source = remove_ranges(island_source, &package_ranges);
-        let referenced_outside = internal
-            .iter()
-            .any(|binding| source_references_identifier(&kept_source, binding.as_str()));
+        // An internal member is referenced outside the package iff it has an
+        // identifier READ whose span lies outside every removed statement range.
+        let referenced_outside = internal.iter().any(|binding| {
+            reads_by_name
+                .get(binding.as_str())
+                .is_some_and(|spans| spans.iter().any(|span| !span_within_any(*span, &package_ranges)))
+        });
         if !all_covered || referenced_outside || package_ranges.is_empty() {
             continue; // leave this package inlined — not provably safe
         }
 
+        // Bind the barrel exports to the real package via a CJS-interop import:
+        // the inlined barrel produced the package's `module.exports` object, so
+        // `<exports>` must be that object — `ns.default ?? ns` yields it whether
+        // the package is CommonJS (default = module.exports) or ESM (namespace),
+        // and keeps named access working through a bundler's ESM-namespace wrap.
+        // The namespace import + const binding go at the top (imports hoist; the
+        // const initializes before the island body reads `<exports>`); the barrel
+        // init shim is a hoisted function appended at the end.
+        let namespace_alias = format!("{}__ext", package.entry_exports.as_str());
         imports.push(format!(
-            "import * as {} from '{}';",
-            package.entry_exports.as_str(),
+            "import * as {namespace_alias} from '{}';",
             package.import_specifier
         ));
-        // The barrel init becomes a trivial accessor of the imported namespace.
+        imports.push(format!(
+            "const {} = {namespace_alias}.default ?? {namespace_alias};",
+            package.entry_exports.as_str()
+        ));
         shims.push_str(&format!(
             "function {}() {{ return {}; }}\n",
             package.entry_init.as_str(),
@@ -400,25 +430,13 @@ pub(crate) fn externalize_island_packages(
     })
 }
 
-/// Whether `source` references `name` as a whole identifier token (not as a
-/// substring of a longer identifier). A deliberately simple lexical check used
-/// only as a conservative safety gate — a false positive merely keeps a package
-/// inlined.
-fn source_references_identifier(source: &str, name: &str) -> bool {
-    let is_ident_char = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-    let mut rest = source;
-    while let Some(pos) = rest.find(name) {
-        let before = rest[..pos].chars().next_back();
-        let after_index = pos + name.len();
-        let after = rest[after_index..].chars().next();
-        let boundary_before = before.is_none_or(|c| !is_ident_char(c));
-        let boundary_after = after.is_none_or(|c| !is_ident_char(c));
-        if boundary_before && boundary_after {
-            return true;
-        }
-        rest = &rest[pos + 1..];
-    }
-    false
+/// Whether the read span `(start, end)` is contained in any removed statement
+/// range — i.e. the reference is internal to the package being externalized.
+fn span_within_any(span: (u32, u32), ranges: &[(usize, usize)]) -> bool {
+    let (start, end) = (span.0 as usize, span.1 as usize);
+    ranges
+        .iter()
+        .any(|&(range_start, range_end)| range_start <= start && end <= range_end)
 }
 
 #[cfg(test)]
@@ -432,6 +450,7 @@ mod tests {
     fn externalization(specifier: &str, init: &str, exports: &str, members: &[&str]) -> IslandPackageExternalization {
         IslandPackageExternalization {
             import_specifier: specifier.to_string(),
+            version: "1.0.0".to_string(),
             entry_init: BindingName::new(init),
             entry_exports: BindingName::new(exports),
             member_bindings: bindings(members),
@@ -452,7 +471,13 @@ mod tests {
         )
         .expect("should externalize");
 
-        assert_eq!(result.imports, vec!["import * as eIdx from 'pkg-x';"]);
+        assert_eq!(
+            result.imports,
+            vec![
+                "import * as eIdx__ext from 'pkg-x';".to_string(),
+                "const eIdx = eIdx__ext.default ?? eIdx__ext;".to_string(),
+            ]
+        );
         // All unit declarations removed; the consumer survives.
         assert!(!result.source.contains("function iA()"), "{}", result.source);
         assert!(!result.source.contains("var eA = {}"), "{}", result.source);

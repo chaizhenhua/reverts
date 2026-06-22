@@ -136,6 +136,8 @@ impl PackageImportDecision {
 pub struct IslandPackageExternalization {
     /// Bare public import specifier, e.g. `@opentelemetry/api`.
     pub import_specifier: String,
+    /// Resolved package version, for the output `package.json` dependency.
+    pub version: String,
     /// The barrel unit's init function (consumers call it to get the package).
     pub entry_init: BindingName,
     /// The barrel unit's exports object (bound to the imported namespace).
