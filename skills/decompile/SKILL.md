@@ -105,6 +105,31 @@ preserves a pre-existing `e2e/` subtree). Prefer a stable project root such as
 app, e.g. `…/app/` (generated source) + `…/project.sqlite`. If the resolved
 output is a temp path, relocate it and tell the user where it lives.
 
+**Prefer the modern layout: `generate-project-v2 --source-root src`.** It emits
+recovered source under `src/`, a `NodeNext` tsconfig (the recovered code runs on
+Node ESM with explicit `.js` specifiers — `NodeNext` models that), a
+`package.json` `exports` map, `README.md` + `.gitignore`, and relocates pipeline
+metadata (`symbol-index.json`, `binding-name-index.json`) to a `.reverts/`
+sidecar so the source tree is clean. The flat layout (omit the flag) stays
+available for backward compatibility. The naming-plan/progress `--symbol-index`
+path then points at `.reverts/symbol-index.json`.
+
+### User-specifiable knobs (don't hardcode; honor user requests)
+
+Layout and names are inputs the user can dictate — never bake in app-specific
+assumptions:
+
+- **Layout / source root** — `--source-root <dir>` (default `src` when modern).
+- **Entry** — the runtime entrypoint is auto-detected, but its emitted export
+  name is renamable through the binding channel (e.g. `zUt → runMain` via
+  `binding-names`); downstream tooling derives the entry from the generated
+  `cli.ts`, so it follows the rename.
+- **Module names / paths** — `module-names --accept <id=path>` (or
+  `reference-source-names`); the user's chosen paths win.
+- **Symbol / binding names** — `symbol-names` (module symbols) /
+  `binding-names` (island bindings); accept user-provided names verbatim,
+  agent-proposals only fill the residue.
+
 ### Source argument
 
 After stripping `-o`, resolve the remaining argument as:
@@ -643,6 +668,17 @@ required.
    interaction, any non-`require` extra, or a recovered load error. Keep the
    original main bundle at `e2e/reverts/reference/main-bundle.cjs` (it must use
    `.cjs`; the harness package is `type: module`).
+
+   **Derive everything from the project — hardcode nothing app-specific** (so the
+   same harness works for any decompiled app): the **source root** from
+   `tsconfig.runtime.json` `rootDir`; the **entry binding + module** by parsing
+   the generated `cli.ts` (`import { <entry> } from '<module>.js'`); the
+   **packages to stub** from the app `package.json`
+   `dependencies`/`optionalDependencies` (every externalized package) — any other
+   unresolved bare `require` still records the boundary instead of crashing. Make
+   the Electron version and any extra stubs overridable by env
+   (`ELECTRON_VERSION`, `REVERTS_STUB_PACKAGES`). A Claude/ws/`@scope`-specific
+   list baked into the harness is a bug.
 
 3. **Run it and gate on it.** `cd <output>/e2e/reverts && npm install && npm
    test`. A failing trace diff is a decompile-stage bug — file it, fix ReverTS,
