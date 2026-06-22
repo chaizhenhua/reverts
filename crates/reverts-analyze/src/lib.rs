@@ -167,23 +167,56 @@ fn is_runtime_helper_binding(
     let Some(source_file_id) = module.source_file_id else {
         return false;
     };
-    let parent_id = model
+    let source_path = model
         .input()
         .source_files
         .iter()
         .find(|sf| sf.id == source_file_id)
-        .and_then(|sf| synthetic_parent_source_file_id(sf.path.as_str()));
+        .map(|sf| sf.path.as_str());
+    let parent_id = source_path.and_then(synthetic_parent_source_file_id);
     let mut candidates = vec![source_file_id];
     if let Some(parent) = parent_id {
         candidates.push(parent);
     }
-    candidates.iter().any(|id| {
+    if candidates.iter().any(|id| {
         model
             .graph()
             .runtime_prelude(*id)
             .map(|prelude| prelude.bindings.contains_key(binding))
             .unwrap_or(false)
-    })
+    }) {
+        return true;
+    }
+    // Persisted-synthetic fallback. `match-packages` materializes a synthetic
+    // source to disk as `…/.reverts-synthetic-sources/project-<n>/source-<id>.js`,
+    // DROPPING the in-memory `__reverts_synthetic__/<parent>/…` path that encoded
+    // its parent bundle. So generating from a saved DB loses the parent linkage,
+    // `synthetic_parent_source_file_id` returns None, and every shared esbuild
+    // helper alias (`We`/`St`/…) the child reads trips a false `MissingDefinition`.
+    // Those aliases live ONLY in the parent bundle's prelude, so when the parent
+    // is unrecoverable accept the binding if ANY bundle runtime prelude defines
+    // it — the same lowering erases the call in emission either way.
+    if parent_id.is_none() && source_path.is_some_and(is_persisted_synthetic_source_path) {
+        return model
+            .graph()
+            .runtime_preludes()
+            .values()
+            .any(|prelude| prelude.bindings.contains_key(binding));
+    }
+    false
+}
+
+/// Detect the persisted shape of a matcher-synthesized source file (written by
+/// `materialize_source_file`): a `source-<id>.js` basename under a
+/// `.reverts-synthetic-sources` directory. The in-memory pre-persistence path is
+/// `__reverts_synthetic__/<parent>/…` instead, so this matches only DBs whose
+/// synthetic sources have already round-tripped through disk.
+fn is_persisted_synthetic_source_path(path: &str) -> bool {
+    path.contains(".reverts-synthetic-sources")
+        && std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("source-") && name.ends_with(".js"))
 }
 
 fn audit_def_use_graph(model: &ProgramModel) -> AuditReport {
@@ -2219,6 +2252,68 @@ NativeModuleType();
                     && finding.binding.as_deref() == Some("St")
             }),
             "St (prelude-classified CommonJsWrapper) must not be flagged as missing: {:#?}",
+            output.audit.findings()
+        );
+    }
+
+    #[test]
+    fn persisted_synthetic_child_reading_a_parent_helper_is_not_missing() {
+        // Regression: `match-packages` persists a synthetic source to disk as
+        // `…/.reverts-synthetic-sources/project-<n>/source-<id>.js`, dropping the
+        // in-memory `__reverts_synthetic__/<parent>/…` path. So a saved DB loses
+        // the parent linkage and a child's read of a parent-bundle helper (`St`)
+        // would falsely trip `MissingDefinition`. The persisted-synthetic fallback
+        // checks the bundle preludes and suppresses it — while a GENUINELY missing
+        // binding in the same child still fires.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        // Parent bundle: the `St` helper sits OUTSIDE the module span, so it is a
+        // prelude binding keyed under source 1 in `runtime_preludes`.
+        let bundle_source = "var St=(e,A)=>()=>(A||e((A={exports:{}}).exports,A),A.exports);\nvar app=St((exports,module)=>{module.exports=1});";
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(bundle_source.into())));
+        let span_start = bundle_source
+            .find("var app=")
+            .expect("fixture contains `var app=`") as u32;
+        rows.modules.push(
+            ModuleInput::application(ModuleId(10), "esbuild:app", "esbuild:app")
+                .with_source_file(1)
+                .with_source_span(reverts_input::SourceSpan::new(
+                    span_start,
+                    bundle_source.len() as u32,
+                )),
+        );
+        // Persisted synthetic child (note the flat `source-2.js` path under
+        // `.reverts-synthetic-sources`, with NO `__reverts_synthetic__/` prefix):
+        // it reads the parent helper `St` and a genuinely-undefined `trulyMissing`.
+        let child_source = "St(()=>1);\ntrulyMissing();";
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "/db/.reverts-synthetic-sources/project-1/source-2.js",
+            Some(child_source.into()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(20), "esbuild:child", "esbuild:child")
+                .with_source_file(2)
+                .with_source_span(reverts_input::SourceSpan::new(0, child_source.len() as u32)),
+        );
+
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(
+            !output.audit.findings().iter().any(|finding| {
+                finding.code == FindingCode::MissingDefinition
+                    && finding.binding.as_deref() == Some("St")
+            }),
+            "parent-bundle helper St must be suppressed for the persisted synthetic child: {:#?}",
+            output.audit.findings()
+        );
+        assert!(
+            output.audit.findings().iter().any(|finding| {
+                finding.code == FindingCode::MissingDefinition
+                    && finding.binding.as_deref() == Some("trulyMissing")
+            }),
+            "a genuinely missing binding must still be flagged: {:#?}",
             output.audit.findings()
         );
     }
