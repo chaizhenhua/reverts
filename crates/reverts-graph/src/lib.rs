@@ -6,6 +6,9 @@ pub use fingerprint::{
     identifier_streams,
 };
 
+pub mod cjs_island_modules;
+pub use cjs_island_modules::{RecognizedCjsModule, recognize_cjs_island_modules};
+
 mod function_call_graph;
 pub use function_call_graph::FunctionCallGraph;
 mod module_init_graph;
