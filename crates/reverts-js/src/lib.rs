@@ -123,6 +123,14 @@ pub struct GeneratedRename {
     /// proved safe to rename project-wide; the wire pass still only touches a
     /// specifier whose local was actually renamed.
     pub wire: bool,
+    /// For an *import-side* wire rename, the emitted output path of the symbol's
+    /// DEFINING module (e.g. `modules/247-util/child-process-exec.ts`). It lets
+    /// the wire pass rewrite an aliased import (`import { o as v }`, whose local
+    /// is the importer's own name, not the semantic) by matching the import's
+    /// `from` source to the defining module — the only safe signal when the same
+    /// minified name is imported from several modules. `None` on export-side and
+    /// shorthand renames, which are matched by `local == renamed`.
+    pub wire_source: Option<String>,
 }
 
 impl GeneratedRename {
@@ -133,6 +141,7 @@ impl GeneratedRename {
             renamed: renamed.into(),
             scope: GeneratedRenameScope::Module,
             wire: false,
+            wire_source: None,
         }
     }
 
@@ -143,6 +152,7 @@ impl GeneratedRename {
             renamed: renamed.into(),
             scope: GeneratedRenameScope::All,
             wire: false,
+            wire_source: None,
         }
     }
 
@@ -157,6 +167,7 @@ impl GeneratedRename {
             renamed: renamed.into(),
             scope: GeneratedRenameScope::BindingIndex(binding_index),
             wire: false,
+            wire_source: None,
         }
     }
 
@@ -164,6 +175,13 @@ impl GeneratedRename {
     #[must_use]
     pub fn with_wire(mut self) -> Self {
         self.wire = true;
+        self
+    }
+
+    /// Record the defining module's emitted path for an import-side wire rename.
+    #[must_use]
+    pub fn with_wire_source(mut self, source: impl Into<String>) -> Self {
+        self.wire_source = Some(source.into());
         self
     }
 }

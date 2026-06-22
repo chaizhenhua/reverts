@@ -272,7 +272,7 @@ pub fn format_source_with_module_items_request_with_report(
             .filter(|rename| rename.wire)
             .cloned()
             .collect::<Vec<_>>();
-        apply_wire_export_import_renames(&allocator, &mut parsed.program, &wire_renames);
+        apply_wire_export_import_renames(&allocator, &mut parsed.program, &wire_renames, path_hint);
         apply_emit_safety_renames(&allocator, &mut parsed.program, &mut report);
         apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
         normalize_imports_after_emit(&mut parsed.program, &builder);

@@ -115,6 +115,9 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
             if rename.wire {
                 generated = generated.with_wire();
             }
+            if let Some(source) = rename.wire_source.as_deref() {
+                generated = generated.with_wire_source(source);
+            }
             generated
         })
         .collect::<Vec<_>>();

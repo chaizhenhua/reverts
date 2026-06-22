@@ -300,6 +300,10 @@ pub struct PlannedRename {
     /// `import { semantic }`). Set only for bindings the planner proved safe to
     /// rename project-wide; see `wire_export_renames`.
     pub wire: bool,
+    /// For an import-side wire rename, the defining module's emitted output path
+    /// (so the emitter can rewrite an aliased `import { o as v }` by matching the
+    /// import source). `None` for export-side / shorthand renames.
+    pub wire_source: Option<String>,
 }
 
 impl PlannedRename {
@@ -310,6 +314,7 @@ impl PlannedRename {
             renamed,
             scope: PlannedRenameScope::Module,
             wire: false,
+            wire_source: None,
         }
     }
 
@@ -320,6 +325,7 @@ impl PlannedRename {
             renamed,
             scope: PlannedRenameScope::All,
             wire: false,
+            wire_source: None,
         }
     }
 
@@ -334,6 +340,7 @@ impl PlannedRename {
             renamed,
             scope: PlannedRenameScope::BindingIndex(binding_index),
             wire: false,
+            wire_source: None,
         }
     }
 
@@ -341,6 +348,13 @@ impl PlannedRename {
     #[must_use]
     pub fn with_wire(mut self) -> Self {
         self.wire = true;
+        self
+    }
+
+    /// Record the defining module's emitted path for an import-side wire rename.
+    #[must_use]
+    pub fn with_wire_source(mut self, source: impl Into<String>) -> Self {
+        self.wire_source = Some(source.into());
         self
     }
 }

@@ -726,6 +726,7 @@ pub(crate) fn apply_wire_export_import_renames<'a>(
     allocator: &'a Allocator,
     program: &mut Program<'a>,
     wire_renames: &[GeneratedRename],
+    importer_path: Option<&std::path::Path>,
 ) {
     let by_wire: BTreeMap<&str, &str> = wire_renames
         .iter()
@@ -734,23 +735,78 @@ pub(crate) fn apply_wire_export_import_renames<'a>(
     if by_wire.is_empty() {
         return;
     }
+    // Import-side renames that carry the defining module's path: these rewrite an
+    // *aliased* import (`import { o as v }`, local != renamed) by matching the
+    // import's `from` source to that module. The dir the importer lives in is
+    // needed to resolve relative sources.
+    let importer_dir = importer_path.and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let module_wire: Vec<(&str, &str, String)> = wire_renames
+        .iter()
+        .filter_map(|rename| {
+            rename.wire_source.as_deref().map(|source| {
+                (
+                    rename.original.as_str(),
+                    rename.renamed.as_str(),
+                    strip_source_extension(source),
+                )
+            })
+        })
+        .collect();
     let mut renamer = WireRenamer {
         builder: AstBuilder::new(allocator),
         by_wire,
+        module_wire,
+        importer_dir,
     };
     renamer.visit_program(program);
+}
+
+/// Lexically resolve `specifier` (a relative import, e.g. `../a/b.js`) against
+/// `base_dir` and strip the extension, so it can be compared to a defining
+/// module's recorded path. No filesystem access; `.`/`..` segments are folded.
+fn resolved_import_module(base_dir: Option<&std::path::Path>, specifier: &str) -> Option<String> {
+    if !specifier.starts_with('.') {
+        return None; // bare/package import — not a first-party module path
+    }
+    let base = base_dir?;
+    let joined = base.join(specifier);
+    let mut parts: Vec<&str> = Vec::new();
+    for comp in joined.to_str()?.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    Some(strip_source_extension(&parts.join("/")))
+}
+
+fn strip_source_extension(path: &str) -> String {
+    for ext in [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".d.ts"] {
+        if let Some(stripped) = path.strip_suffix(ext) {
+            return stripped.to_string();
+        }
+    }
+    path.to_string()
 }
 
 struct WireRenamer<'a, 'm> {
     builder: AstBuilder<'a>,
     by_wire: BTreeMap<&'m str, &'m str>,
+    module_wire: Vec<(&'m str, &'m str, String)>,
+    importer_dir: Option<std::path::PathBuf>,
 }
 
 impl<'a> VisitMut<'a> for WireRenamer<'a, '_> {
     fn visit_import_declaration(&mut self, declaration: &mut ImportDeclaration<'a>) {
+        let source = declaration.source.value.as_str().to_string();
         let Some(specifiers) = declaration.specifiers.as_mut() else {
             return;
         };
+        // The module this import reads from, resolved against the importer's dir.
+        let from_module = resolved_import_module(self.importer_dir.as_deref(), source.as_str());
         for specifier in specifiers.iter_mut() {
             let ImportDeclarationSpecifier::ImportSpecifier(import) = specifier else {
                 continue;
@@ -758,8 +814,25 @@ impl<'a> VisitMut<'a> for WireRenamer<'a, '_> {
             let Some(imported) = module_export_name_text(&import.imported) else {
                 continue;
             };
+            // Shorthand collapse: the local was readability-renamed to the
+            // semantic name, so `import { o as s }` → `import { s }`. Safe by the
+            // `local == s` signal alone (no module match needed).
             if let Some(renamed) = self.by_wire.get(imported.as_str())
                 && import.local.name.as_str() == *renamed
+            {
+                import.imported = self
+                    .builder
+                    .module_export_name_identifier_name(SPAN, *renamed);
+                continue;
+            }
+            // Aliased import (`import { o as v }`, local is the importer's own
+            // name): rewrite the imported name only when the import's source
+            // module is the one whose export was collapsed to the semantic name.
+            if let Some(from) = from_module.as_deref()
+                && let Some((_, renamed, _)) = self
+                    .module_wire
+                    .iter()
+                    .find(|(o, _, src)| *o == imported.as_str() && src == from)
             {
                 import.imported = self
                     .builder

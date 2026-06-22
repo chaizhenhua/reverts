@@ -297,10 +297,14 @@ pub(crate) fn propagate_imported_binding_semantic_name(
         .binding_name(defining_module, binding.as_str())
         && semantic != binding
     {
-        file.add_readability_rename(PlannedRename::new_all_scopes(
-            binding.clone(),
-            semantic.clone(),
-        ));
+        let mut rename = PlannedRename::new_all_scopes(binding.clone(), semantic.clone());
+        // Tag the import-side rename with the defining module's emitted path so the
+        // wire pass can rewrite an aliased import (`import { o as v }`, local != s)
+        // by matching the import source — not just the `local == s` shorthand.
+        if let Some(source) = module_output_path(program, defining_module) {
+            rename = rename.with_wire_source(source);
+        }
+        file.add_readability_rename(rename);
     }
 }
 
