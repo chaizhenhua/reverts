@@ -22,7 +22,7 @@ that no template matches. The legacy `reverts` codebase encodes these in
 webcrack and wakaru handle a subset with per-bundler templates; academic
 systems such as Pollux and JSAnalyzer cover one bundler with high precision.
 
-The reverts-next pipeline currently has no equivalent. Bundle source files
+The reverts pipeline currently has no equivalent. Bundle source files
 flow through the cascade matcher as a single module, which collapses
 function-level attribution and breaks bundle-vs-source verification.
 

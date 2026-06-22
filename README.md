@@ -51,18 +51,41 @@ Full write-ups live in [`docs/research/`](docs/research/).
 
 ## Getting started
 
-One command installs the pre-compiled `reverts-cli` binary and the skill
-bundle — no Node toolchain and no MCP server required:
+A ReverTS release is two things: the pre-compiled **`reverts-cli` binary** and
+the **skill bundle** that drives it. One command installs both — no Node
+toolchain and no MCP server required:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chaizhenhua/reverts-next/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/chaizhenhua/reverts/main/install.sh | sh
 ```
 
-This downloads the binary from [GitHub Releases](https://github.com/chaizhenhua/reverts-next/releases)
-into `~/.reverts/bin` and installs the skills into `~/.claude/skills` (and
-`~/.codex/skills` when present). Supported platforms: Linux and macOS on x86_64
-and aarch64. Override the install with `REVERTS_VERSION`, `REVERTS_HOME`,
-`REVERTS_SKILLS_DIR`, or `REVERTS_NO_SKILLS=1` (see [`install.sh`](install.sh)).
+This downloads the platform tarball from
+[GitHub Releases](https://github.com/chaizhenhua/reverts/releases), installs the
+binary into `~/.reverts/bin`, and installs the skills into `~/.claude/skills`
+(and `~/.codex/skills` when present). **Supported platforms:** Linux and macOS,
+on x86_64 and aarch64.
+
+### Install options
+
+The installer is configured entirely through environment variables:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `REVERTS_VERSION` | `latest` | Release tag to install, e.g. `v0.1.0`. |
+| `REVERTS_HOME` | `~/.reverts` | Install prefix; the binary lands in `$REVERTS_HOME/bin`. |
+| `REVERTS_SKILLS_DIR` | `~/.claude/skills` | Skill install dir. When unset, also installs into `~/.codex/skills` if it exists. |
+| `REVERTS_NO_SKILLS` | unset | Set to `1` to install only the binary. |
+| `REVERTS_BASE_URL` | (GitHub) | Override the asset base URL — a mirror, or a local `file://…/dist` dir for offline/air-gapped installs. |
+
+```bash
+# pin a version, install binary only, into a custom prefix
+REVERTS_VERSION=v0.1.0 REVERTS_HOME=/opt/reverts REVERTS_NO_SKILLS=1 \
+  curl -fsSL https://raw.githubusercontent.com/chaizhenhua/reverts/main/install.sh | sh
+```
+
+The installer verifies the published `.sha256` checksum before installing, is
+idempotent (re-running updates an existing install in place), and never
+overwrites a skill directory you authored yourself — only ones it manages.
 
 After installing, restart your Claude/Codex session so the skill registry
 rebinds. The skills appear under the `reverts:` namespace:
@@ -73,10 +96,21 @@ rebinds. The skills appear under the `reverts:` namespace:
 - `reverts:decompile` — the core webpack/esbuild bundle decompilation pipeline
 - `reverts:reverts-decompile` — post-export install / `tsc` / startup validation
 
+### Update / uninstall
+
+Re-run the install command to update to the latest release. To remove the
+binary, delete `~/.reverts`; to remove the skills, run `./skills/install
+--uninstall` (or delete the dirs under `~/.claude/skills`).
+
+### Build from source
+
 The skills drive `reverts-cli` directly; see [`skills/README.md`](skills/README.md)
-for the skill layout. To install from source instead, build with
-`cargo build --release --bin reverts-cli` and symlink the skills with
-`./skills/install`.
+for the skill layout. To install from source instead of a release:
+
+```bash
+cargo build --release --bin reverts-cli   # → target/release/reverts-cli
+./skills/install                          # symlink the skills into ~/.claude/skills
+```
 
 ### Core CLI
 
@@ -128,6 +162,35 @@ Git hooks live in `lefthook.yml` (install once via `scripts/install-hooks.sh`).
 The hooks enforce `rustfmt --edition 2024` and `cargo check` on commit, and
 `cargo clippy -D warnings` + `cargo test` on push. The same checks run in CI on
 every push and pull request to `main` (`.github/workflows/ci.yml`).
+
+### Releasing
+
+Releases are cut by **pushing a `v*` tag**; `.github/workflows/release.yml` then
+builds `reverts-cli` natively on each platform runner, packages the binary +
+skill bundle into `reverts-<target>.tar.gz` (with a `.sha256`), and publishes
+them as GitHub Release assets that `install.sh` consumes.
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0     # → triggers the release workflow
+```
+
+Targets built: `{x86_64,aarch64}-{unknown-linux-gnu,apple-darwin}`. To produce
+and test the exact same artifacts locally before tagging, use the cross-build
+script — it mirrors the CI packaging into `dist/`:
+
+```bash
+scripts/cross-build.sh            # host target only (native cargo build)
+scripts/cross-build.sh --all      # every target (non-host needs `cross` installed)
+```
+
+You can then dry-run the installer against those local artifacts without
+touching GitHub:
+
+```bash
+REVERTS_BASE_URL="file://$PWD/dist" REVERTS_HOME=/tmp/reverts-test \
+  REVERTS_SKILLS_DIR=/tmp/reverts-skills sh install.sh
+/tmp/reverts-test/bin/reverts-cli --version
+```
 
 ## Architecture decisions
 

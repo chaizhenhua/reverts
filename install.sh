@@ -3,7 +3,7 @@
 # skill bundle from GitHub Releases and installs both locally. No `reverts-mcp`
 # server is involved: the skills drive `reverts-cli` directly.
 #
-#   curl -fsSL https://raw.githubusercontent.com/chaizhenhua/reverts-next/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/chaizhenhua/reverts/main/install.sh | sh
 #
 # Environment overrides:
 #   REVERTS_VERSION   release tag to install (default: latest)
@@ -11,9 +11,12 @@
 #   REVERTS_SKILLS_DIR  skill install dir (default: ~/.claude/skills; also
 #                       installs into ~/.codex/skills when that dir exists)
 #   REVERTS_NO_SKILLS=1 install only the binary, skip skills
+#   REVERTS_BASE_URL  override the asset base URL (e.g. a mirror, or a local
+#                     file://… dir holding reverts-<target>.tar.gz for testing);
+#                     when set, REVERTS_VERSION is ignored.
 set -eu
 
-REPO="chaizhenhua/reverts-next"
+REPO="chaizhenhua/reverts"
 VERSION="${REVERTS_VERSION:-latest}"
 REVERTS_HOME="${REVERTS_HOME:-${HOME}/.reverts}"
 BIN_DIR="${REVERTS_HOME}/bin"
@@ -51,7 +54,9 @@ esac
 target="${arch_part}-${os_part}"
 
 asset="reverts-${target}.tar.gz"
-if [ "$VERSION" = "latest" ]; then
+if [ -n "${REVERTS_BASE_URL:-}" ]; then
+    base="${REVERTS_BASE_URL%/}"
+elif [ "$VERSION" = "latest" ]; then
     base="https://github.com/${REPO}/releases/latest/download"
 else
     base="https://github.com/${REPO}/releases/download/${VERSION}"
@@ -100,7 +105,7 @@ if [ "${REVERTS_NO_SKILLS:-0}" != "1" ] && [ -d "${extracted}/skills" ]; then
             [ -f "${entry}SKILL.md" ] || continue
             name="$(basename "$entry")"
             link="${dest}/${name}"
-            if [ -e "$link" ] && [ ! -L "$link" ] && [ ! -d "$link/.reverts-managed" ]; then
+            if [ -e "$link" ] && [ ! -L "$link" ] && [ ! -e "$link/.reverts-managed" ]; then
                 info "skip: ${link} exists and is not managed by this installer"
                 continue
             fi

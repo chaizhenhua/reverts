@@ -190,7 +190,7 @@ divergences (e.g. a dropped side-effecting top-level statement) that `tsc` canno
 
 The smoke surfaced three distinct scope-hoisting defects on a large branded
 desktop main bundle, each advancing the original-vs-recovered frontier when fixed;
-all are now repaired in `reverts-next` with self-contained regression tests. They
+all are now repaired in `reverts` with self-contained regression tests. They
 recur on any large esbuild bundle, so the smoke remains the gate.
 
 1. **Dropped side-effecting top-level statement** (`Cannot read properties of

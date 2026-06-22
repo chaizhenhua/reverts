@@ -1,6 +1,6 @@
 # Architecture refactor roadmap
 
-Captures the architectural debts in reverts-next and a phased plan for
+Captures the architectural debts in reverts and a phased plan for
 addressing them. Each phase lists concrete extractions, expected line moves,
 test-gate impact, and what it unblocks. Phases are independent — each can
 land on its own and unblocks downstream work, but they're ordered by

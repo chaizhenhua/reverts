@@ -28,6 +28,56 @@ Each skill directory contains:
 - `bin/` — optional collector/utility scripts the skill invokes.
 - `agents/` — optional sub-agent prompt templates.
 
+## How the skills fit together
+
+The skills fall into three roles. **Collectors** turn one input family into a
+ReverTS artifact manifest and ingest it into a SQLite facts database; the single
+**core engine** decompiles those facts into a readable TypeScript project; the
+**validator** proves the result installs, compiles, and runs — looping failures
+back to the engine.
+
+| Role | Skill | Handles | Produces |
+|------|-------|---------|----------|
+| **Collect** | `electron-collector` | `.dmg`, `.app`, `Resources/`, ASAR | manifest + facts DB |
+| **Collect** | `browser-extension-collector` | CRX, XPI, unpacked, installed | manifest + facts DB |
+| **Collect** | `website-collector` | live URL, HAR, asset directory | manifest + facts DB |
+| **Decompile** | `decompile` | facts DB | readable TypeScript project |
+| **Validate** | `reverts-decompile` | generated project | install / `tsc` / runtime / UI verdict |
+
+Pick exactly one collector for your input; everything downstream is shared:
+
+```mermaid
+flowchart TD
+    E["electron-collector<br/>.dmg · .app · ASAR"]
+    B["browser-extension-collector<br/>CRX · XPI · unpacked"]
+    W["website-collector<br/>URL · HAR · asset dir"]
+
+    E --> M
+    B --> M
+    W --> M
+    M["Artifact manifest<br/>+ SQLite facts DB"]
+
+    M --> D
+    D["decompile (core engine)<br/>module split → externalize →<br/>semantic naming → structural audit →<br/>generate-project-v2"]
+
+    D --> P["Readable TypeScript project"]
+    P --> V
+    V["reverts-decompile<br/>install · tsc · runtime · UI"]
+
+    V -->|pass| OK(["Runnable, behaviorally<br/>equivalent project"])
+    V -->|fail| D
+```
+
+This is the **universal ReverTS pipeline** — it is the same for every input. The
+only thing that varies is which collector you enter through; the engine and the
+validator are shared. The Claude desktop app, for instance, is simply one
+`electron-collector` input; a Chrome extension enters through
+`browser-extension-collector` and an SPA through `website-collector`, then both
+follow the exact same `decompile → reverts-decompile` path.
+
+Each step is a `reverts-cli` invocation — the skills sequence and gate them; see
+each `SKILL.md` for the exact commands and completion criteria.
+
 ## Install
 
 The skills shell out to the `reverts-cli` binary; they are not MCP tools.
