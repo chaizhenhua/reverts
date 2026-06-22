@@ -143,13 +143,23 @@ pub fn anchor_island_cjs_modules(
     prelude: &RuntimePrelude,
     package_sources: &[PackageSource],
 ) -> Vec<PreludeBindingAnchor> {
+    let debug_timing = std::env::var_os("REVERTS_DEBUG_ISLAND_PKG").is_some();
+    let t0 = std::time::Instant::now();
     let units = recognize_cjs_island_modules(&prelude.source);
     if units.is_empty() || package_sources.is_empty() {
         return Vec::new();
     }
+    if debug_timing {
+        eprintln!(
+            "island-anchor: recognized {} CJS units in {:.1}s",
+            units.len(),
+            t0.elapsed().as_secs_f64()
+        );
+    }
 
     // Fingerprint each unit's INIT body under its own synthetic module id (its
     // index in `units`), so an ownership match maps back to the originating unit.
+    let t1 = std::time::Instant::now();
     let mut subjects: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
     for (index, unit) in units.iter().enumerate() {
         let (start, end) = (unit.body_span.0 as usize, unit.body_span.1 as usize);
@@ -165,8 +175,23 @@ pub fn anchor_island_cjs_modules(
     if subjects.is_empty() {
         return Vec::new();
     }
+    if debug_timing {
+        eprintln!(
+            "island-anchor: fingerprinted {} units in {:.1}s",
+            subjects.len(),
+            t1.elapsed().as_secs_f64()
+        );
+    }
 
+    let t2 = std::time::Instant::now();
     let report = match_with_cascade(&subjects, package_sources);
+    if debug_timing {
+        eprintln!(
+            "island-anchor: match_with_cascade ({} sources) in {:.1}s",
+            package_sources.len(),
+            t2.elapsed().as_secs_f64()
+        );
+    }
     let mut anchors = Vec::new();
     for ownership in report.ownership_matches {
         let Some(unit) = units.get(ownership.module_id.0 as usize) else {

@@ -66,88 +66,170 @@ pub fn match_with_cascade(
     package_sources: &[PackageSource],
 ) -> CascadeMatchReport {
     let mut audit = AuditReport::default();
+    let debug_timing = std::env::var_os("REVERTS_DEBUG_ISLAND_PKG").is_some();
+    let ti = std::time::Instant::now();
     let index = build_index(package_sources, &mut audit);
+    if debug_timing {
+        eprintln!(
+            "cascade: build_index({} sources) in {:.1}s",
+            package_sources.len(),
+            ti.elapsed().as_secs_f64()
+        );
+    }
 
+    let tm = std::time::Instant::now();
+    // Each subject (one inlined module / island unit) is assigned INDEPENDENTLY
+    // against the shared read-only index, so the per-subject work parallelizes
+    // cleanly. On a real bundle this is ~1.4k subjects × a per-subject Hungarian
+    // assignment — the dominant cost of island anchoring (tens of minutes
+    // single-threaded). Fan it out across cores; results are merged
+    // deterministically (subjects iterate in BTreeMap key order within chunks,
+    // and chunks concatenate in order).
+    let subjects: Vec<(ModuleId, &Vec<FunctionFingerprint>)> = fingerprints_by_module
+        .iter()
+        .map(|(module_id, fps)| (*module_id, fps))
+        .collect();
+    let thread_count = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(subjects.len().max(1));
+    let chunk_size = subjects.len().div_ceil(thread_count).max(1);
+    type SubjectOutput = (
+        Vec<CascadeOwnershipMatch>,
+        Vec<PackageAttributionInput>,
+        Vec<AuditFinding>,
+    );
+    let index_ref = &index;
+    let chunk_outputs: Vec<SubjectOutput> = std::thread::scope(|scope| {
+        let handles: Vec<_> = subjects
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    let mut ownership = Vec::new();
+                    let mut attrs = Vec::new();
+                    let mut findings = Vec::new();
+                    for (module_id, fps) in chunk {
+                        assign_subject(
+                            *module_id,
+                            fps,
+                            index_ref,
+                            &mut ownership,
+                            &mut attrs,
+                            &mut findings,
+                        );
+                    }
+                    (ownership, attrs, findings)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("cascade subject thread panicked"))
+            .collect()
+    });
     let mut attributions = Vec::new();
     let mut ownership_matches = Vec::new();
-    for (module_id, fps) in fingerprints_by_module {
-        let assignments = assign_globally(fps, &index);
-        for assignment in assignments {
-            // Per-fp acceptance decision is computed from the full cascade
-            // candidate list — including runner-ups — so the classifier can
-            // see the margin between the top tier and the next-best. The
-            // Hungarian-chosen candidate (which may not be the top of the
-            // list, if cross-package collisions forced a swap) supplies the
-            // actual attribution row.
-            let decision = classify(&assignment.candidates);
-            let fn_id = assignment.function_id;
-            match decision {
-                AcceptanceDecision::Accepted { confidence } => {
-                    let Some(chosen) = assignment.chosen else {
-                        continue;
-                    };
-                    let candidate = &chosen.candidate;
-                    ownership_matches.push(build_ownership_match(
-                        *module_id,
-                        fn_id,
-                        candidate,
-                        confidence.clone(),
-                    ));
-                    if candidate.owner.external_importable {
-                        attributions
-                            .push(build_attribution(*module_id, fn_id, candidate, confidence));
-                    }
-                }
-                AcceptanceDecision::AcceptedWithCaveat { confidence } => {
-                    let Some(chosen) = assignment.chosen else {
-                        continue;
-                    };
-                    let cand = &chosen.candidate;
-                    ownership_matches.push(build_ownership_match(
-                        *module_id,
-                        fn_id,
-                        cand,
-                        confidence.clone(),
-                    ));
-                    if cand.owner.external_importable {
-                        attributions.push(build_attribution(*module_id, fn_id, cand, confidence));
-                    }
-                    audit.push(
-                        AuditFinding::warning(
-                            FindingCode::LowConfidenceAttribution,
-                            "cascade function attribution accepted with low margin",
-                        )
-                        .with_module(module_id.0.to_string())
-                        .with_binding(cand.owner.package.name.clone()),
-                    );
-                }
-                AcceptanceDecision::Ambiguous { .. } => {
-                    // Use the top candidate's package name for the binding
-                    // tag; we are not emitting an attribution row because
-                    // the matcher cannot pick decisively.
-                    let binding = assignment
-                        .candidates
-                        .first()
-                        .map(|m| m.candidate.owner.package.name.clone())
-                        .unwrap_or_default();
-                    audit.push(
-                        AuditFinding::error(
-                            FindingCode::AmbiguousPackageMatch,
-                            "cascade function match has ambiguous tier",
-                        )
-                        .with_module(module_id.0.to_string())
-                        .with_binding(binding),
-                    );
-                }
-                AcceptanceDecision::NoMatch => {}
-            }
+    for (ownership, attrs, findings) in chunk_outputs {
+        ownership_matches.extend(ownership);
+        attributions.extend(attrs);
+        for finding in findings {
+            audit.push(finding);
         }
+    }
+    if debug_timing {
+        eprintln!(
+            "cascade: matched {} subjects in {:.1}s ({thread_count} threads)",
+            fingerprints_by_module.len(),
+            tm.elapsed().as_secs_f64()
+        );
     }
 
     CascadeMatchReport {
         attributions,
         ownership_matches,
         audit,
+    }
+}
+
+/// Assign one subject's function fingerprints against the shared index and
+/// append its ownership matches / attributions / audit findings. Pure per-subject
+/// work (reads only the index), so it runs safely in parallel across subjects.
+fn assign_subject(
+    module_id: ModuleId,
+    fps: &[FunctionFingerprint],
+    index: &FingerprintIndex,
+    ownership_matches: &mut Vec<CascadeOwnershipMatch>,
+    attributions: &mut Vec<PackageAttributionInput>,
+    findings: &mut Vec<AuditFinding>,
+) {
+    let assignments = assign_globally(fps, index);
+    for assignment in assignments {
+        // Per-fp acceptance decision is computed from the full cascade candidate
+        // list — including runner-ups — so the classifier can see the margin
+        // between the top tier and the next-best. The Hungarian-chosen candidate
+        // (which may not be the top of the list, if cross-package collisions
+        // forced a swap) supplies the actual attribution row.
+        let decision = classify(&assignment.candidates);
+        let fn_id = assignment.function_id;
+        match decision {
+            AcceptanceDecision::Accepted { confidence } => {
+                let Some(chosen) = assignment.chosen else {
+                    continue;
+                };
+                let candidate = &chosen.candidate;
+                ownership_matches.push(build_ownership_match(
+                    module_id,
+                    fn_id,
+                    candidate,
+                    confidence.clone(),
+                ));
+                if candidate.owner.external_importable {
+                    attributions.push(build_attribution(module_id, fn_id, candidate, confidence));
+                }
+            }
+            AcceptanceDecision::AcceptedWithCaveat { confidence } => {
+                let Some(chosen) = assignment.chosen else {
+                    continue;
+                };
+                let cand = &chosen.candidate;
+                ownership_matches.push(build_ownership_match(
+                    module_id,
+                    fn_id,
+                    cand,
+                    confidence.clone(),
+                ));
+                if cand.owner.external_importable {
+                    attributions.push(build_attribution(module_id, fn_id, cand, confidence));
+                }
+                findings.push(
+                    AuditFinding::warning(
+                        FindingCode::LowConfidenceAttribution,
+                        "cascade function attribution accepted with low margin",
+                    )
+                    .with_module(module_id.0.to_string())
+                    .with_binding(cand.owner.package.name.clone()),
+                );
+            }
+            AcceptanceDecision::Ambiguous { .. } => {
+                // Use the top candidate's package name for the binding tag; we are
+                // not emitting an attribution row because the matcher cannot pick
+                // decisively.
+                let binding = assignment
+                    .candidates
+                    .first()
+                    .map(|m| m.candidate.owner.package.name.clone())
+                    .unwrap_or_default();
+                findings.push(
+                    AuditFinding::error(
+                        FindingCode::AmbiguousPackageMatch,
+                        "cascade function match has ambiguous tier",
+                    )
+                    .with_module(module_id.0.to_string())
+                    .with_binding(binding),
+                );
+            }
+            AcceptanceDecision::NoMatch => {}
+        }
     }
 }
 
