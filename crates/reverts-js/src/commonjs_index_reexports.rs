@@ -94,8 +94,9 @@ impl PackageIndexReexports {
 }
 
 /// Normalize a `require` argument or anchor `export_specifier` to a comparable
-/// submodule key: drop a leading `./`/`../`, a `<pkg>/` prefix is the caller's
-/// job, and strip a trailing `.js`/`.cjs`/`.mjs`/`.json` and `/index`.
+/// submodule key: drop a leading `./`/`../`, a leading `esm/`/`cjs/` dual-build
+/// output root, a `<pkg>/` prefix is the caller's job, and strip a trailing
+/// `.js`/`.cjs`/`.mjs`/`.json` and `/index`.
 #[must_use]
 pub fn normalize_submodule_relpath(path: &str) -> String {
     let mut value = path.trim();
@@ -104,6 +105,17 @@ pub fn normalize_submodule_relpath(path: &str) -> String {
         .or_else(|| value.strip_prefix("../"))
     {
         value = rest;
+    }
+    // A dual-build package ships the SAME submodule under both `esm/<sub>` (ESM)
+    // and `<sub>` / `cjs/<sub>` (CJS); the barrel re-exports the canonical path, so
+    // an anchor matched to the `esm/`/`cjs/` build variant must normalize to it
+    // (e.g. `esm/renderer/integrations/scope-to-main` → `renderer/integrations/…`).
+    // Only these two roots — never real submodule roots like `lib`/`internal`.
+    for build_root in ["esm/", "cjs/"] {
+        if let Some(stripped) = value.strip_prefix(build_root) {
+            value = stripped;
+            break;
+        }
     }
     for ext in [".js", ".cjs", ".mjs", ".json"] {
         if let Some(stripped) = value.strip_suffix(ext) {
@@ -496,5 +508,25 @@ mod tests {
             "classes/range"
         );
         assert_eq!(normalize_submodule_relpath("./a/b/index.js"), "a/b");
+    }
+
+    #[test]
+    fn normalize_strips_esm_cjs_build_variant_root() {
+        // The ESM/CJS dual-build variant prefix collapses to the canonical path so
+        // an anchor matched to the `esm/` build maps to the barrel's re-export.
+        assert_eq!(
+            normalize_submodule_relpath("esm/renderer/integrations/scope-to-main.js"),
+            "renderer/integrations/scope-to-main"
+        );
+        assert_eq!(
+            normalize_submodule_relpath("./cjs/main/sdk.js"),
+            "main/sdk"
+        );
+        // Real submodule roots that merely LOOK build-ish are NOT stripped.
+        assert_eq!(normalize_submodule_relpath("internal/re.js"), "internal/re");
+        assert_eq!(normalize_submodule_relpath("lib/websocket.js"), "lib/websocket");
+        // `esm`/`cjs` only strip as a path ROOT, not mid-path or as a bare name.
+        assert_eq!(normalize_submodule_relpath("a/esm/b.js"), "a/esm/b");
+        assert_eq!(normalize_submodule_relpath("esmodule/x.js"), "esmodule/x");
     }
 }
