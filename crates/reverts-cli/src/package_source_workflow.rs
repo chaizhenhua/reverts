@@ -656,7 +656,19 @@ pub(crate) fn load_package_sources_with_fingerprint_stats(
         .map_err(MatchPackagesError::QueryPackageSources)?;
     if !has_package_source_cache && package_source_roots.is_empty() && !materialize_package_sources
     {
-        return Err(MatchPackagesError::MissingTable("package_source_cache"));
+        // Bare package imports were discovered, but no package source is
+        // available (no cache table, no `--package-source-root`, no
+        // `--materialize-package-sources`). There is nothing to match against,
+        // so skip package matching and return an empty result — exactly as the
+        // empty-`expanded_package_names` case above. Erroring here would abort
+        // the caller before it persists the bundle-module extraction; structural
+        // decompilation must not depend on package-source provisioning. Re-run
+        // with a package source to externalize these imports.
+        eprintln!(
+            "match-packages: no package source available ({} bare package import(s) discovered, but no cache, --package-source-root, or --materialize-package-sources); skipping package matching",
+            expanded_package_names.len()
+        );
+        return Ok(LoadedPackageSources::default());
     }
 
     let stale_cache_versions = if has_package_source_cache && materialize_package_sources {
