@@ -656,6 +656,26 @@ fn sanitize_namespace_alias(specifier: &str) -> String {
     alias
 }
 
+/// Recover the package's full export surface (the object the original inlined
+/// CJS barrel exposed) from an `import * as <alias>` namespace.
+///
+/// `<alias>.default ?? <alias>` is WRONG for a dual ESM/CJS package whose ESM
+/// build ships a *curated partial* default export: e.g. `@opentelemetry/api`'s
+/// default is only `{context, diag, metrics, propagation, trace}`, so taking it
+/// drops named exports like `createContextKey` that the consumer reads —
+/// `de.createContextKey is not a function` at runtime. The named exports always
+/// live on the namespace, so when the default is a namespace-style object, merge
+/// the namespace OVER the default (named exports win, the default's own props
+/// fill any gap). When the default is a function or primitive (a package whose
+/// whole surface IS its default), keep the `default ?? namespace` unwrap so the
+/// callable/value identity is preserved.
+fn package_namespace_surface_expr(alias: &str) -> String {
+    format!(
+        "{alias}.default && typeof {alias}.default == \"object\" \
+         ? {{ ...{alias}.default, ...{alias} }} : {alias}.default ?? {alias}"
+    )
+}
+
 /// The island after inlined packages were replaced with bare imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IslandExternalization {
@@ -777,18 +797,19 @@ pub(crate) fn externalize_island_packages(
 
         if package.synthesized_members.is_empty() {
             // RECOVERED barrel: bind its exports object to the real package via a
-            // CJS-interop import. `ns.default ?? ns` yields the `module.exports`
-            // object whether the package is CommonJS or ESM. The namespace import +
-            // const go at the top (imports hoist; the const initializes before the
-            // island body reads `<exports>`); the init shim is a hoisted function.
+            // CJS-interop import that recovers the FULL export surface (see
+            // `package_namespace_surface_expr`). The namespace import + const go at
+            // the top (imports hoist; the const initializes before the island body
+            // reads `<exports>`); the init shim is a hoisted function.
             let namespace_alias = format!("{}__ext", package.entry_exports.as_str());
             imports.push(format!(
                 "import * as {namespace_alias} from '{}';",
                 package.import_specifier
             ));
             imports.push(format!(
-                "const {} = {namespace_alias}.default ?? {namespace_alias};",
-                package.entry_exports.as_str()
+                "const {} = {};",
+                package.entry_exports.as_str(),
+                package_namespace_surface_expr(&namespace_alias)
             ));
             shims.push_str(&format!(
                 "function {}() {{ return {}; }}\n",
@@ -799,14 +820,19 @@ pub(crate) fn externalize_island_packages(
         } else {
             // SYNTHESIZED barrel: the in-bundle barrel was tree-shaken, so rebind
             // each member unit's exports object to its namespace member(s) and shim
-            // its init thunk. `ns.default ?? ns` unwraps CJS/ESM interop once.
+            // its init thunk. Recover the full surface once (see
+            // `package_namespace_surface_expr`) so member lookups never miss a
+            // named export that the partial default omits.
             let alias = sanitize_namespace_alias(&package.import_specifier);
             let unwrapped = format!("{alias}_d");
             imports.push(format!(
                 "import * as {alias} from '{}';",
                 package.import_specifier
             ));
-            imports.push(format!("const {unwrapped} = {alias}.default ?? {alias};"));
+            imports.push(format!(
+                "const {unwrapped} = {};",
+                package_namespace_surface_expr(&alias)
+            ));
             for member in &package.synthesized_members {
                 let value = match member.namespace_members.as_slice() {
                     [(key, name)] if key.is_empty() => format!("{unwrapped}.{name}"),
@@ -941,7 +967,7 @@ mod tests {
             result.imports,
             vec![
                 "import * as eIdx__ext from 'pkg-x';".to_string(),
-                "const eIdx = eIdx__ext.default ?? eIdx__ext;".to_string(),
+                "const eIdx = eIdx__ext.default && typeof eIdx__ext.default == \"object\" ? { ...eIdx__ext.default, ...eIdx__ext } : eIdx__ext.default ?? eIdx__ext;".to_string(),
             ]
         );
         // All unit declarations removed; the consumer survives.
@@ -1041,7 +1067,7 @@ var theApi = apiInit();
             result.imports,
             vec![
                 "import * as apiExports__ext from '@scope/api';".to_string(),
-                "const apiExports = apiExports__ext.default ?? apiExports__ext;".to_string(),
+                "const apiExports = apiExports__ext.default && typeof apiExports__ext.default == \"object\" ? { ...apiExports__ext.default, ...apiExports__ext } : apiExports__ext.default ?? apiExports__ext;".to_string(),
             ]
         );
         // GOLDEN: the surviving island body (whitespace-normalized) — only the
@@ -1226,7 +1252,9 @@ var theApi = apiInit();
             imports.contains("import * as _pkg_semver from 'semver';"),
             "{imports}"
         );
-        assert!(imports.contains("const _pkg_semver_d = _pkg_semver.default ?? _pkg_semver;"));
+        assert!(imports.contains(
+            "const _pkg_semver_d = _pkg_semver.default && typeof _pkg_semver.default == \"object\" ? { ..._pkg_semver.default, ..._pkg_semver } : _pkg_semver.default ?? _pkg_semver;"
+        ));
         assert!(
             imports.contains("const eRange = _pkg_semver_d.Range;"),
             "{imports}"
@@ -1244,6 +1272,26 @@ var theApi = apiInit();
         // The member units' own declarations are gone; the consumer call survives.
         assert!(!result.source.contains("var gRange;"), "{}", result.source);
         assert!(result.source.contains("var keep = iRange();"));
+    }
+
+    #[test]
+    fn namespace_surface_expr_merges_named_exports_over_partial_default() {
+        // Regression for the real-Electron crash `de.createContextKey is not a
+        // function`: `@opentelemetry/api`'s ESM build ships a curated PARTIAL
+        // default (`{context, diag, metrics, propagation, trace}`), so the old
+        // `ns.default ?? ns` dropped `createContextKey` and friends. The recovered
+        // surface must merge the namespace's named exports OVER the default object,
+        // and still keep the `default ?? ns` unwrap for a function/primitive default.
+        let expr = super::package_namespace_surface_expr("api__ext");
+        assert_eq!(
+            expr,
+            "api__ext.default && typeof api__ext.default == \"object\" \
+             ? { ...api__ext.default, ...api__ext } : api__ext.default ?? api__ext"
+        );
+        // Named exports win the merge (so `createContextKey` survives a partial
+        // default), and the non-object branch preserves the bare unwrap.
+        assert!(expr.contains("...api__ext.default, ...api__ext"));
+        assert!(expr.contains("api__ext.default ?? api__ext"));
     }
 
     #[test]
