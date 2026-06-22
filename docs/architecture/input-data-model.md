@@ -159,10 +159,10 @@ Invariants:
 `ws` or `rxjs/operators`. These rows are consumed by package-surface resolution
 and must not be inferred from emitted strings after writing output. Agent
 `accept_surface` proposals may create these rows only through the
-`package-surface-decisions --apply` CLI gate. Agent `reject_surface` and
+`package surface --apply` CLI gate. Agent `reject_surface` and
 `block_surface` proposals remain in the `package_surface_decisions` ledger and
-are consumed by `match-packages` before new surfaces are persisted. See
-[package-surface-decisions.md](package-surface-decisions.md).
+are consumed by `match` before new surfaces are persisted. See
+[package surface.md](package surface.md).
 
 Invariants:
 

@@ -83,11 +83,24 @@ step with the binary:
    demos keep the name they actually ran for the record.
 4. Remove the alias after one or two releases.
 
-## Status
+## Status — shipped
 
-`generate-project-v2 → generate` has shipped under this discipline (clap alias +
-help-topic alias; skills and architecture docs updated). The remaining rows are
-mechanical but touch the hand-rolled help system (topic enum, per-command help
-strings) and are best done as one focused pass rather than piecemeal, because
-nesting (`reverts package cache audit`) requires restructuring `command_topic`
-and the help-topic table together.
+The full surface above is live. Rather than restructure clap into nested
+subcommand enums (which would force a rewrite of the hand-rolled help system),
+the grouped/renamed forms are translated to the canonical flat command by a
+front-end `normalize_command` pass in `CliCommand::parse`, and three group help
+topics (`name`, `package`, `report`) render the grouped overviews. This keeps a
+single dispatch path and preserves every legacy flat name as a working alias.
+
+- `reverts name symbols`, `reverts package cache audit`, `reverts report
+  coverage`, `reverts import|match|classify|generate`, `reverts assets extract`,
+  `reverts dev recall` all resolve.
+- `reverts name` / `reverts help package` / `reverts report --help` show group
+  help; `reverts help name symbols` resolves to the subject command.
+- Legacy flat names (`symbol-names`, `generate-project-v2`, ...) still work.
+- Covered by `grouped_command_surface_normalizes_to_flat_commands` and
+  `group_names_and_grouped_help_resolve` in `reverts-cli/src/tests.rs`.
+
+Not yet done (optional follow-ups): per-command `--help` bodies still print the
+canonical flat name in their USAGE header, and the global `--db`/`--project`
+args are not yet hoisted to the top level.

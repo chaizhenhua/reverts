@@ -472,6 +472,55 @@ fn parses_command_specific_help_without_running_command() {
 }
 
 #[test]
+fn grouped_command_surface_normalizes_to_flat_commands() {
+    let cases: &[(&[&str], &[&str])] = &[
+        (&["import", "--input", "x"], &["import-unpacked", "--input", "x"]),
+        (&["match", "--apply"], &["match-packages", "--apply"]),
+        (&["classify"], &["module-classify"]),
+        (&["name", "symbols", "--list"], &["symbol-names", "--list"]),
+        (&["name", "plan"], &["naming-plan"]),
+        (&["name", "from-package"], &["ownership-source-names"]),
+        (&["package", "candidates"], &["island-package-candidates"]),
+        (&["package", "versions"], &["package-version-diagnostics"]),
+        (&["package", "cache", "audit", "--input", "x"], &["package-cache-audit", "--input", "x"]),
+        (&["package", "cache", "prune"], &["package-cache-prune-stale"]),
+        (&["report", "coverage"], &["coverage-ledger"]),
+        (&["report", "packages"], &["match-packages-report"]),
+        (&["assets", "extract"], &["extract-assets"]),
+        (&["dev", "recall"], &["match-modules-recall"]),
+        // Legacy flat names pass through unchanged.
+        (&["symbol-names", "--list"], &["symbol-names", "--list"]),
+        (&["generate", "--input", "db"], &["generate", "--input", "db"]),
+    ];
+    for (input, expected) in cases {
+        let got = crate::normalize_command(input.iter().map(|token| token.to_string()).collect());
+        let want: Vec<String> = expected.iter().map(|token| token.to_string()).collect();
+        assert_eq!(got, want, "normalize {input:?}");
+    }
+}
+
+#[test]
+fn group_names_and_grouped_help_resolve() {
+    assert_eq!(
+        CliCommand::parse(["name".to_string()]).expect("bare name group"),
+        CliCommand::Help(HelpTopic::NameGroup)
+    );
+    assert_eq!(
+        CliCommand::parse(["help".to_string(), "package".to_string()]).expect("package group help"),
+        CliCommand::Help(HelpTopic::PackageGroup)
+    );
+    assert_eq!(
+        CliCommand::parse(["report".to_string(), "--help".to_string()]).expect("report group help"),
+        CliCommand::Help(HelpTopic::ReportGroup)
+    );
+    assert_eq!(
+        CliCommand::parse(["help".to_string(), "name".to_string(), "symbols".to_string()])
+            .expect("name symbols help"),
+        CliCommand::Help(HelpTopic::SymbolNames)
+    );
+}
+
+#[test]
 fn help_and_version_commands_return_ok() {
     run(["--help".to_string()]).expect("top-level help should not require a database");
     run(["help".to_string(), "extract-assets".to_string()])
@@ -481,8 +530,12 @@ fn help_and_version_commands_return_ok() {
 
 #[test]
 fn help_text_documents_commands_and_options() {
-    assert!(help_text(HelpTopic::TopLevel).contains("extract-assets"));
-    assert!(help_text(HelpTopic::TopLevel).contains("package-surface-decisions"));
+    assert!(help_text(HelpTopic::TopLevel).contains("name <subject>"));
+    assert!(help_text(HelpTopic::TopLevel).contains("package <command>"));
+    assert!(help_text(HelpTopic::TopLevel).contains("assets extract"));
+    assert!(help_text(HelpTopic::NameGroup).contains("from-package"));
+    assert!(help_text(HelpTopic::PackageGroup).contains("cache prune"));
+    assert!(help_text(HelpTopic::ReportGroup).contains("coverage"));
     assert!(help_text(HelpTopic::GenerateProjectV2).contains("--output <DIR>"));
     assert!(help_text(HelpTopic::MatchPackages).contains("--package-name <NAME>"));
     assert!(help_text(HelpTopic::MatchPackages).contains("--package-source-root <DIR>"));

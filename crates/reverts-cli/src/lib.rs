@@ -144,6 +144,20 @@ impl CliCommand {
         if args.is_empty() {
             return Ok(Self::Help(HelpTopic::TopLevel));
         }
+        // Translate the grouped/renamed surface (`name symbols`, `package cache
+        // audit`, `import`, ...) into the canonical flat command tokens, so the
+        // rest of the parser and the legacy flat names share one code path.
+        let args = normalize_command(args);
+        // A bare group name (`reverts name`) shows that group's help.
+        if args.len() == 1
+            && let Some(topic) = help::command_topic(&args[0])
+            && matches!(
+                topic,
+                HelpTopic::NameGroup | HelpTopic::PackageGroup | HelpTopic::ReportGroup
+            )
+        {
+            return Ok(Self::Help(topic));
+        }
         if matches!(args.first().map(String::as_str), Some(argument) if is_help_flag(argument)) {
             return parse_top_level_help(args.as_slice());
         }
@@ -365,20 +379,88 @@ fn validate_package_surface_decisions_for_cli(
     args::validate_package_surface_decisions_args(args)
 }
 
-fn parse_top_level_help(args: &[String]) -> Result<CliCommand, CliError> {
-    match args {
-        [_] => Ok(CliCommand::Help(HelpTopic::TopLevel)),
-        [_, command] => parse_named_help_topic(command.as_str()).map(CliCommand::Help),
-        [_, extra, ..] => Err(CliError::UnknownArgument(extra.clone())),
-        [] => Ok(CliCommand::Help(HelpTopic::TopLevel)),
+/// Translate the grouped/renamed command surface into the canonical flat
+/// command name that the parser and help system already understand. Legacy flat
+/// names and bare group names pass through unchanged.
+fn normalize_command(args: Vec<String>) -> Vec<String> {
+    let head = args.first().map(String::as_str).unwrap_or("");
+    let sub = args.get(1).map(String::as_str);
+    let sub2 = args.get(2).map(String::as_str);
+
+    // Three-token group: `package cache <audit|prune>`.
+    let flat3 = match (head, sub, sub2) {
+        ("package", Some("cache"), Some("audit")) => Some("package-cache-audit"),
+        ("package", Some("cache"), Some("prune")) => Some("package-cache-prune-stale"),
+        _ => None,
+    };
+    if let Some(flat) = flat3 {
+        let mut out = vec![flat.to_string()];
+        out.extend(args.into_iter().skip(3));
+        return out;
     }
+
+    // Two-token group: `<group> <subject>`.
+    let flat2 = match (head, sub) {
+        ("name", Some("symbols")) => Some("symbol-names"),
+        ("name", Some("bindings")) => Some("binding-names"),
+        ("name", Some("modules")) => Some("module-names"),
+        ("name", Some("clusters")) => Some("cluster-names"),
+        ("name", Some("plan")) => Some("naming-plan"),
+        ("name", Some("progress")) => Some("naming-progress"),
+        ("name", Some("from-reference")) => Some("reference-source-names"),
+        ("name", Some("from-package")) => Some("ownership-source-names"),
+        ("package", Some("candidates")) => Some("island-package-candidates"),
+        ("package", Some("hints")) => Some("package-externalization-hints"),
+        ("package", Some("surface")) => Some("package-surface-decisions"),
+        ("package", Some("versions")) => Some("package-version-diagnostics"),
+        ("report", Some("coverage")) => Some("coverage-ledger"),
+        ("report", Some("inventory")) => Some("full-inventory"),
+        ("report", Some("identifiers")) => Some("identifier-inventory"),
+        ("report", Some("runtime")) => Some("runtime-inventory"),
+        ("report", Some("packages")) => Some("match-packages-report"),
+        ("assets", Some("extract")) => Some("extract-assets"),
+        ("dev", Some("recall")) => Some("match-modules-recall"),
+        _ => None,
+    };
+    if let Some(flat) = flat2 {
+        let mut out = vec![flat.to_string()];
+        out.extend(args.into_iter().skip(2));
+        return out;
+    }
+
+    // Single-token verb renames.
+    let flat1 = match head {
+        "import" => Some("import-unpacked"),
+        "match" => Some("match-packages"),
+        "classify" => Some("module-classify"),
+        _ => None,
+    };
+    if let Some(flat) = flat1 {
+        let mut out = vec![flat.to_string()];
+        out.extend(args.into_iter().skip(1));
+        return out;
+    }
+
+    args
+}
+
+fn parse_top_level_help(args: &[String]) -> Result<CliCommand, CliError> {
+    help_topic_for_tokens(args.get(1..).unwrap_or(&[]))
 }
 
 fn parse_help_command(args: &[String]) -> Result<CliCommand, CliError> {
-    match args {
-        [_] => Ok(CliCommand::Help(HelpTopic::TopLevel)),
-        [_, command] => parse_named_help_topic(command.as_str()).map(CliCommand::Help),
-        [_, _, extra, ..] => Err(CliError::UnknownArgument(extra.clone())),
+    help_topic_for_tokens(args.get(1..).unwrap_or(&[]))
+}
+
+/// Resolve `help`/`--help` topic tokens (which may use the grouped surface,
+/// e.g. `name symbols`) into a `Help` command.
+fn help_topic_for_tokens(tokens: &[String]) -> Result<CliCommand, CliError> {
+    if tokens.is_empty() {
+        return Ok(CliCommand::Help(HelpTopic::TopLevel));
+    }
+    match normalize_command(tokens.to_vec()).as_slice() {
+        [command] => parse_named_help_topic(command).map(CliCommand::Help),
+        [_command, extra, ..] => Err(CliError::UnknownArgument(extra.clone())),
         [] => Ok(CliCommand::Help(HelpTopic::TopLevel)),
     }
 }

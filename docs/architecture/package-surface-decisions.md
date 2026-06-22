@@ -12,7 +12,7 @@ matching alone.
   `accept_surface`, `reject_surface`, or `block_surface` TSV rows with evidence.
   They may derive package/version candidates from code, but their output is a
   proposal.
-- **Reverts CLI** owns validation and persistence. `package-surface-decisions`
+- **Reverts CLI** owns validation and persistence. `package surface`
   validates TSV rows, records an append-only decision ledger, and writes accepted
   `package_surfaces` only through the same SQLite gate used by deterministic
   matching.
@@ -26,10 +26,10 @@ matching alone.
 | --- | --- | --- |
 | `package_attributions` | Module-level package ownership and external-import decisions. | `reverts-input`, analyzer, planner, emitter |
 | `package_surfaces` | Accepted project-level import surfaces that may satisfy bare imports such as `ws` or `rxjs/operators`. | `PackageSurfaceIndex` during analysis |
-| `package_surface_decisions` | Append-only Agent/Reverts ledger for source-backed package surface decisions. | `package-surface-decisions`, `match-packages` |
+| `package_surface_decisions` | Append-only Agent/Reverts ledger for source-backed package surface decisions. | `package surface`, `match` |
 
 `package_surface_decisions` is not a post-write repair layer. It is consumed
-before `match-packages` persists new accepted surfaces, so rejected or blocked
+before `match` persists new accepted surfaces, so rejected or blocked
 specifiers do not get reintroduced by a later deterministic pass.
 
 ## TSV contract
@@ -62,7 +62,7 @@ The decision ledger is append-only. Consumption uses **latest decision wins** pe
 
 - Latest `accept_surface`: accepted by the CLI gate and written to
   `package_surfaces`.
-- Latest `reject_surface`: future `match-packages` runs suppress matching output
+- Latest `reject_surface`: future `match` runs suppress matching output
   for that specifier and emit `PackageSurfaceDecisionBlocked` audit evidence.
 - Latest `block_surface`: same suppression behavior as reject, reserved for hard
   blockers such as package/runtime incompatibility or unsafe API shape.
@@ -72,7 +72,7 @@ This policy lets an Agent correct an earlier rejection by applying a later
 
 ## Worklist and candidate generation
 
-`reverts-cli package-surface-decisions --list` prints source-backed import sites
+`reverts-cli package surface --list` prints source-backed import sites
 with:
 
 - package name;
@@ -88,7 +88,7 @@ final TSV and is the only component that mutates package-surface tables.
 
 ## Relationship to safety filtering
 
-`match-packages` can generate cache-anchored public surfaces from accepted
+`match` can generate cache-anchored public surfaces from accepted
 attributions. The CLI safety filter may later remove unsafe attributions. After
 that filter, cache-anchored surfaces whose supporting accepted attribution is no
 longer present are removed before persistence. Source-backed surfaces remain

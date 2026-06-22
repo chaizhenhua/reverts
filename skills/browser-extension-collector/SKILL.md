@@ -115,17 +115,17 @@ The manifest always records source units and edges; `--ingest-include` /
 1. Run the collector script and inspect the JSON report (`name`/`version`
    from the parsed `manifest.json` are written to manifest metadata).
 2. Import the artifact with
-   `reverts-cli import-unpacked --input <artifact_root> --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>`.
+   `reverts-cli import --input <artifact_root> --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>`.
    This creates the project, registers source units, and discovers modules
    in one step (import always discovers). Note the printed `project-id`.
 3. Validate inventory with
-   `reverts-cli full-inventory --input <db.sqlite> --project-id <id>`
+   `reverts-cli report inventory --input <db.sqlite> --project-id <id>`
    (add `--json <file>` to capture the report).
 4. Run the standard ReverTS recovery phases (generation, validation,
    quality reporting).
 5. After mechanical recovery is structurally valid, use
    [decompile](../decompile/SKILL.md) for the rename worklist
-   (`reverts-cli naming-progress` / `naming-plan` / `generate`)
+   (`reverts-cli name progress` / `name plan` / `generate`)
    and [reverts-decompile](../reverts-decompile/SKILL.md) for export
    validation.
 
@@ -146,8 +146,8 @@ following hold:
    `css[*]` paths resolve to source units with role `content_script` /
    `content_style`.
 6. After
-   `reverts-cli import-unpacked --input <artifact_root> --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>`,
-   `reverts-cli full-inventory --input <db.sqlite> --project-id <id>` reports
+   `reverts-cli import --input <artifact_root> --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>`,
+   `reverts-cli report inventory --input <db.sqlite> --project-id <id>` reports
    the same source-unit count as the manifest. Mismatch indicates an import
    bug — file as a ReverTS issue, do not retry blindly.
 
@@ -167,7 +167,7 @@ the manifest or hand-edit the stage directory to make a bad run look good.
 | `manifest_version` outside {2, 3} | manifest field is missing or odd | warn and continue with role `manifest` (no version suffix); MV1 is unsupported, MV4 is forward-incompatible |
 | Manifest references a missing file | e.g. `background.service_worker: "missing.js"` | record it in manifest `metadata.unresolved_manifest_references`; do NOT fabricate the file and do NOT emit a source-unit edge without a real target |
 | Stage dir not writable | extraction fails with `EACCES` / `EROFS` | pass `--stage-dir` to a writable path and retry |
-| `import-unpacked` rejects manifest | command exits non-zero with a manifest/coverage validation error | file as a ReverTS bug with the manifest attached; do NOT mutate JSON to satisfy validator |
+| `import` rejects manifest | command exits non-zero with a manifest/coverage validation error | file as a ReverTS bug with the manifest attached; do NOT mutate JSON to satisfy validator |
 | `reverts-cli` not built / not on PATH | command not found, or stale binary missing a subcommand/flag | run `cargo build --release --bin reverts-cli` and put it on `PATH` (or invoke `./target/release/reverts-cli`) |
 
 If extraction succeeds but no JS/TS source units have `ingest=true`, the
@@ -177,7 +177,7 @@ user; ReverTS has nothing to decompile.
 
 ## Output Contract
 
-The script writes a manifest accepted by `reverts-cli import-unpacked --manifest`:
+The script writes a manifest accepted by `reverts-cli import --manifest`:
 
 ```json
 {

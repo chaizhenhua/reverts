@@ -5,6 +5,9 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpTopic {
     TopLevel,
+    NameGroup,
+    PackageGroup,
+    ReportGroup,
     GenerateProjectV2,
     ImportUnpacked,
     MatchPackages,
@@ -201,6 +204,12 @@ pub fn command_topic(command: &str) -> Option<HelpTopic> {
     } else {
         command
     };
+    match command {
+        "name" => return Some(HelpTopic::NameGroup),
+        "package" => return Some(HelpTopic::PackageGroup),
+        "report" => return Some(HelpTopic::ReportGroup),
+        _ => {}
+    }
     COMMAND_SPECS
         .iter()
         .find(|spec| spec.name == command)
@@ -216,7 +225,16 @@ pub fn version_text() -> String {
 pub fn help_text(topic: HelpTopic) -> &'static str {
     match topic {
         HelpTopic::TopLevel => {
-            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    import-unpacked                  Import unpack Skill evidence into Reverts SQLite facts\n    match-packages                   Populate package_attributions/package_surfaces in SQLite\n    match-packages-report            Report package match, externalization, and source-elimination rates across projects\n    package-version-diagnostics      Diagnose rejected package-version matches without writing SQLite\n    package-cache-audit              Audit package_source_cache freshness and validity\n    package-cache-prune-stale        Delete invalid/stale package_source_cache rows with --apply\n    package-externalization-hints    Generate verified package externalization hint rows\n    package-surface-decisions        Apply Agent-resolved package surface decisions\n    extract-assets                   Populate project_assets from asset references in source slices\n    generate                         Generate a TypeScript project from SQLite input\n    full-inventory                   Write a full decompile inventory and coverage report\n    coverage-ledger                  Write the unified decompile coverage ledger\n    identifier-inventory             Count AST identifier sites in every generated JS/TS output file\n    runtime-inventory                Measure emitted runtime helpers and generated internal names\n    binding-names                    Accept generated-output local binding semantic names\n    reference-source-names           Name modules/exports/bindings from a historical first-party source tree\n    symbol-names                     List, propose, or accept symbol semantic names in SQLite\n    naming-progress                  Report semantic-naming completion across public-surface/declarations/full tiers\n    naming-plan                      Emit the JSON work list of unnamed symbols (by tier) for a naming agent\n    module-classify                  Classify modules (application/third-party/runtime-glue) to refine the naming denominator\n    match-modules-recall             Measure cross-project module match recall against a ground-truth project\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
+            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli <GROUP> <SUBCOMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nPIPELINE:\n    import       Import unpack evidence into Reverts SQLite facts\n    match        Populate package attributions and surfaces\n    classify     Classify modules to refine the naming denominator\n    name         Assign semantic names (see `reverts-cli help name`)\n    generate     Generate a TypeScript project from SQLite input\n\nGROUPS:\n    name <subject>     symbols | bindings | modules | clusters | plan | progress | from-reference | from-package\n    package <command>  candidates | hints | surface | versions | cache {audit,prune}\n    report <what>      coverage | inventory | identifiers | runtime | packages\n\nOTHER:\n    assets extract     Populate project_assets from asset references in source slices\n    dev recall         Measure cross-project module match recall (evaluation)\n\nUse `reverts-cli help <COMMAND>` for command-specific help.\nLegacy flat names (symbol-names, generate-project-v2, ...) remain accepted as aliases."
+        }
+        HelpTopic::NameGroup => {
+            "reverts-cli name <subject>\n\nUSAGE:\n    reverts-cli name <subject> [OPTIONS]\n\nAssign semantic names. Dry-run by default; pass --apply to persist.\n\nSUBJECTS:\n    symbols          List/propose/accept symbol semantic names      (alias: symbol-names)\n    bindings         Accept generated-output local binding names     (alias: binding-names)\n    modules          Accept semantic file paths for first-party modules (alias: module-names)\n    clusters         Accept semantic file paths for island clusters  (alias: cluster-names)\n    plan             Emit the JSON work list of unnamed symbols      (alias: naming-plan)\n    progress         Report semantic-naming completion               (alias: naming-progress)\n    from-reference   Name from a historical first-party source tree  (alias: reference-source-names)\n    from-package     Name owned-but-inlined package modules from source (alias: ownership-source-names)\n\nUse `reverts-cli name <subject> --help` for subject-specific options."
+        }
+        HelpTopic::PackageGroup => {
+            "reverts-cli package <command>\n\nUSAGE:\n    reverts-cli package <command> [OPTIONS]\n\nCOMMANDS:\n    candidates       Record Agent-proposed island package names      (alias: island-package-candidates)\n    hints            Generate verified externalization hint rows      (alias: package-externalization-hints)\n    surface          Apply Agent-resolved package surface decisions   (alias: package-surface-decisions)\n    versions         Diagnose rejected package-version matches        (alias: package-version-diagnostics)\n    cache audit      Audit package_source_cache freshness and validity (alias: package-cache-audit)\n    cache prune      Delete invalid/stale package_source_cache rows   (alias: package-cache-prune-stale)\n\nUse `reverts-cli package <command> --help` for command-specific options."
+        }
+        HelpTopic::ReportGroup => {
+            "reverts-cli report <what>\n\nUSAGE:\n    reverts-cli report <what> [OPTIONS]\n\nREPORTS:\n    coverage         Unified decompile coverage ledger               (alias: coverage-ledger)\n    inventory        Full decompile inventory and coverage report    (alias: full-inventory)\n    identifiers      Count AST identifier sites in generated output   (alias: identifier-inventory)\n    runtime          Measure emitted runtime helpers and internal names (alias: runtime-inventory)\n    packages         Package match/externalization/source rates       (alias: match-packages-report)\n\nUse `reverts-cli report <what> --help` for report-specific options."
         }
         HelpTopic::ImportUnpacked => {
             "reverts-cli import-unpacked\n\nUSAGE:\n    reverts-cli import-unpacked --input <UNPACKED_ROOT> --manifest <MANIFEST> --project-name <NAME> --output-db <DB> [--ignore-native-assets] [--max-source-bytes <N>] [--bundle-source-bytes <N>]\n\nOPTIONS:\n    --input <UNPACKED_ROOT>       Unpacked source root, for Electron usually Contents/Resources/app\n    --manifest <MANIFEST>         Authoritative reverts.import_evidence.v1 manifest; every input file must be covered and recorded size/hash evidence must match\n    --project-name <NAME>         Project name stored in Reverts SQLite\n    --output-db <DB>              SQLite database to create\n    --ignore-native-assets        Do not write native assets into project_assets after manifest validation\n    --max-source-bytes <N>        Defer source files larger than N bytes as project_assets instead of modules\n    --bundle-source-bytes <N>     Keep source files larger than N bytes as source_files without module rows so the pipeline can extract bundled modules\n\nOUTPUT:\n    Creates canonical Reverts facts: projects, source_files (with file_size), project_files, modules, module_dependencies, project_assets, and package_attributions."

@@ -1,8 +1,8 @@
 # Naming Universe
 
 This document defines what counts as a *nameable symbol* for the semantic-naming
-workflow, so the naming gate (`naming-progress`) and the agent work list
-(`naming-plan`) measure the same set and stay coherent.
+workflow, so the naming gate (`name progress`) and the agent work list
+(`name plan`) measure the same set and stay coherent.
 
 ## The universe is emitted- and graph-driven, not the `symbols` table
 
@@ -27,20 +27,20 @@ from the **emitted / reconstructed TypeScript**:
   excluded) and per-module export *names* from the graph's `import_export()`
   view — export names *do* survive reconstruction.
 - `classify_emitted_entry` is the single source of truth shared by both
-  `naming-progress` and `naming-plan`: it drops entries whose module is not
+  `name progress` and `name plan`: it drops entries whose module is not
   first-party, then tiers each entry (exported × function-like/value-like) and
   marks whether it is already named.
 
-`import-unpacked` populates modules and sources but not `symbols`; the `symbols`
+`import` populates modules and sources but not `symbols`; the `symbols`
 table is only the agent's `semantic_name` overlay used to key renamed bindings
 back to the database.
 
 ## Gate semantics
 
-- `naming-progress` measures named/total **over the emitted universe**, so the
+- `name progress` measures named/total **over the emitted universe**, so the
   denominator only includes bindings that were actually emitted into first-party
   files.
-- `naming-plan` lists the unnamed subset of that same universe, each entry
+- `name plan` lists the unnamed subset of that same universe, each entry
   carrying the emitted file and location so the agent can open and rename it.
 
 Because both commands flow through `emitted_universe` + `classify_emitted_entry`,
@@ -66,7 +66,7 @@ arm. So:
 
 Any name bound only through an emitted top-level object/array (or nested)
 pattern will not appear as a nameable target and will not count in the
-`naming-progress` denominator, which silently inflates the coverage percentage.
+`name progress` denominator, which silently inflates the coverage percentage.
 This is latent today because emitted top-level bindings are usually plain
 identifiers; it surfaces for targets whose reconstructed top level destructures.
 

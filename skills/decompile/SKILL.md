@@ -51,8 +51,8 @@ Playwright-backed UI interaction checks for browser or extension outputs.
 - Default to `cat:"app"`. Use `cat:"pkg"` only with exact npm package identity,
   npm-installable version (e.g. `"4.28.1"`, a concrete semver that
   `npm install pkg@ver` can resolve), and clear upstream-source confidence.
-  A package classification is not complete until `match-packages` (or, for
-  inlined island libraries, `island-package-candidates` + `match-packages`)
+  A package classification is not complete until `match` (or, for
+  inlined island libraries, `package candidates` + `match`)
   records the attribution with its import specifier/subpath and evidence, and
   the matcher's built-in deterministic confirm accepts it against the package
   source tree (`--package-source-root` / `--reference-source-root`).
@@ -60,8 +60,8 @@ Playwright-backed UI interaction checks for browser or extension outputs.
   exported symbols + owned globals **+ module file paths + module names**. The
   emitted file path and the module name are read by every importer and by anyone
   browsing the tree, so they are public surface too — rename them as part of the
-  public-surface pass, not as an afterthought (`module-names --accept
-  <MODULE_ID=path>` for paths; `reference-source-names` sets both automatically
+  public-surface pass, not as an afterthought (`name modules --accept
+  <MODULE_ID=path>` for paths; `name from-reference` sets both automatically
   when an upstream tree exists). The `public_surface` ratio must reach 100%.
 - Prioritize public surface first: module paths/names, exported symbols, owned
   globals, constructor/state fields, internal helpers, locals last.
@@ -91,7 +91,7 @@ Stop the control loop and report the blocker if any of the following holds:
 | Missing input | `$ARGUMENTS` empty and no project DB exists | Ask the user which bundle/project to decompile |
 | Permission denied | FS write fails (DB or output dir not writable) | Ask the user to grant the permission or relocate the output dir |
 | `reverts-cli` not built / not on PATH | command not found, or stale binary missing a subcommand/flag | Run `cargo build --release --bin reverts-cli` and put it on `PATH` (or invoke `./target/release/reverts-cli`); do NOT `pkill` |
-| Schema mismatch | a command exits non-zero with a schema/version error against the DB | Rebuild `reverts-cli` from the matching source and re-`import-unpacked` into a fresh DB |
+| Schema mismatch | a command exits non-zero with a schema/version error against the DB | Rebuild `reverts-cli` from the matching source and re-`import` into a fresh DB |
 | Same op fails 3× | The same `reverts-cli` command with the same args exits non-zero three consecutive times | Stop and surface the stderr; do not loop further |
 
 ## Phase 0: Resolve Input
@@ -117,7 +117,7 @@ Node ESM with explicit `.js` specifiers — `NodeNext` models that), a
 `package.json` `exports` map, `README.md` + `.gitignore`, and relocates pipeline
 metadata (`symbol-index.json`, `binding-name-index.json`) to a `.reverts/`
 sidecar so the source tree is clean. The flat layout (omit the flag) stays
-available for backward compatibility. The naming-plan/progress `--symbol-index`
+available for backward compatibility. The name plan/progress `--symbol-index`
 path then points at `.reverts/symbol-index.json`.
 
 ### User-specifiable knobs (don't hardcode; honor user requests)
@@ -128,12 +128,12 @@ assumptions:
 - **Layout / source root** — `--source-root <dir>` (default `src` when modern).
 - **Entry** — the runtime entrypoint is auto-detected, but its emitted export
   name is renamable through the binding channel (e.g. `zUt → runMain` via
-  `binding-names`); downstream tooling derives the entry from the generated
+  `name bindings`); downstream tooling derives the entry from the generated
   `cli.ts`, so it follows the rename.
-- **Module names / paths** — `module-names --accept <id=path>` (or
-  `reference-source-names`); the user's chosen paths win.
-- **Symbol / binding names** — `symbol-names` (module symbols) /
-  `binding-names` (island bindings); accept user-provided names verbatim,
+- **Module names / paths** — `name modules --accept <id=path>` (or
+  `name from-reference`); the user's chosen paths win.
+- **Symbol / binding names** — `name symbols` (module symbols) /
+  `name bindings` (island bindings); accept user-provided names verbatim,
   agent-proposals only fill the residue.
 
 ### Source argument
@@ -149,17 +149,17 @@ id, name FROM projects;'`).
 |----------|--------|
 | empty | Ask user which bundle files or directory to decompile |
 | number | Treat as `project_id`; verify against the DB `projects` table |
-| file path | Find/create the project DB, then `import-unpacked` if not yet imported |
-| directory | Find the unpacked root + import-evidence manifest, find/create the project DB, `import-unpacked` if needed |
+| file path | Find/create the project DB, then `import` if not yet imported |
+| directory | Find the unpacked root + import-evidence manifest, find/create the project DB, `import` if needed |
 | other string | Try matching a project name in the DB `projects` table |
 
 ### Resume detection
 
 After resolving `project_id`:
 
-1. Run `reverts-cli naming-progress --input <db> --project-id <id>` (add
-   `coverage-ledger` for the unified view).
-2. Run `reverts-cli naming-plan --input <db> --project-id <id> --target-level
+1. Run `reverts-cli name progress --input <db> --project-id <id>` (add
+   `report coverage` for the unified view).
+2. Run `reverts-cli name plan --input <db> --project-id <id> --target-level
    public-surface` to see the unnamed app worklist.
 3. If modules already exist, skip setup and enter the decision loop.
 
@@ -167,8 +167,8 @@ After resolving `project_id`:
 
 Repeat:
 
-1. `reverts-cli naming-progress --input <db> --project-id <id> [--json]`
-2. `reverts-cli naming-plan --input <db> --project-id <id> --target-level
+1. `reverts-cli name progress --input <db> --project-id <id> [--json]`
+2. `reverts-cli name plan --input <db> --project-id <id> --target-level
    public-surface` (the unnamed-module/symbol worklist)
 3. Match the first applicable rule below
 4. Dispatch parallel sub-agents
@@ -199,7 +199,7 @@ After each check, report:
 Status: public_surface={named}/{total} ({pct}%) | {unnamed} unnamed | {incomplete} incomplete | {mechanical} mechanical | {missing} missing -> dispatching {N} agents
 ```
 
-The `public_surface` field (from `naming-progress`) tracks public-surface symbol naming progress and must reach 100% before output generation.
+The `public_surface` field (from `name progress`) tracks public-surface symbol naming progress and must reach 100% before output generation.
 
 ## Naming to target: mechanism-first coverage
 
@@ -212,7 +212,7 @@ naming.
 > `public-surface` is the mandatory gate ([Phase 4](#phase-4-completion-gate));
 > `declarations` and `full` are optional and can be **5–7× larger** (real bundles
 > run to tens of thousands of bindings, dominated by low-value local names). After
-> step 1 (denominator) and step 2 (deterministic auto-name), run `naming-progress`
+> step 1 (denominator) and step 2 (deterministic auto-name), run `name progress`
 > per tier and **present the remaining counts to the user, then ask which tier to
 > drive to 100%** — do not silently grind to `full`. This is an explicit exception
 > to "don't ask routine questions": naming scope is a cost decision the user owns.
@@ -230,9 +230,9 @@ naming.
    agent naming:
    - run the full [Package matching & externalization](#package-matching--externalization-third-party)
      pass — **both** shape A (vendored `node_modules` modules) **and** shape B
-     (inlined island libraries via `island-package-candidates` →
-     `match-packages --materialize-package-sources`);
-   - then `module-classify --auto --apply` to mark package/runtime-glue modules.
+     (inlined island libraries via `package candidates` →
+     `match --materialize-package-sources`);
+   - then `classify --auto --apply` to mark package/runtime-glue modules.
 
    An inflated denominator makes 100% unreachable; a silently deflated one fakes
    it. Re-confirm denominator integrity per the
@@ -246,28 +246,28 @@ naming.
    available.** A historical/published source tree for the same app names
    modules, exports, AND bindings — including the entry island — by structural
    match, auto-accepting only high/medium-tier hits with recorded evidence
-   (`reference-source-names --reference-source-root <dir> --reference-version
+   (`name from-reference --reference-source-root <dir> --reference-version
    <ver> --apply [--min-tier high|medium]`). This is the largest coverage lever
    and the accepted names pass the naming gate by construction. Run it BEFORE
    spending any agent budget. It is precision-gated, so it never invents names;
    absence of a reference tree just means you skip to step 4.
 
-3. **Measure honestly, reusing the just-emitted index.** `naming-progress --json
-   --symbol-index <out>/symbol-index.json` (and `naming-plan` likewise) avoids a
+3. **Measure honestly, reusing the just-emitted index.** `name progress --json
+   --symbol-index <out>/symbol-index.json` (and `name plan` likewise) avoids a
    re-emit each loop iteration. Read the per-tier `named/total` and the per-file
    groups; verify the entry-island group (null `module_id`,
-   `rename_channel: "binding-names"`) is counted.
+   `rename_channel: "name bindings"`) is counted.
 
-4. **Plan the residue per tier.** `naming-plan --target-level <tier>
+4. **Plan the residue per tier.** `name plan --target-level <tier>
    --symbol-index <out>/symbol-index.json` emits the unnamed worklist grouped by
    file, each target carrying `evidence_tokens` and a `rename_channel`. Work the
    tiers in goal order: `public-surface` → `declarations` → `full`.
 
 5. **Agent-name the residue, routing accepts by `rename_channel`.** Module
    bindings accept through the module/symbol channel
-   (`symbol-names --batch --apply`, keyed by `module_id`); module-less
+   (`name symbols --batch --apply`, keyed by `module_id`); module-less
    entry-island bindings accept through the file-path channel
-   (`binding-names --batch --apply`, keyed by `file_path`). Always pass
+   (`name bindings --batch --apply`, keyed by `file_path`). Always pass
    `--evidence` so `origin=agent` names clear the naming gate on the first try;
    the worklist's `evidence_tokens` are the raw material for that evidence.
 
@@ -279,7 +279,7 @@ naming.
    semver regex ladder, lodash `getRawTag`/`isPlainObject`). When an agent finds a
    contiguous region that is a vendored package, it must **STOP naming that region
    and instead emit a package candidate** —
-   `island-package-candidates --accept <pkg> [--version <v>] --evidence "<the
+   `package candidates --accept <pkg> [--version <v>] --evidence "<the
    API/version anchors it saw>"` — so the next externalization pass removes the
    whole region from the denominator. Do NOT spend names on code that is about to
    be externalized. After each detection round, re-run shape-B externalization and
@@ -287,7 +287,7 @@ naming.
 
 6. **Name the module files, not just the symbols.** Readability also means the
    emitted file paths. Accept a semantic path per module
-   (`module-names --accept <MODULE_ID=path> --apply`, stored as a
+   (`name modules --accept <MODULE_ID=path> --apply`, stored as a
    `module_path_overrides` row); `generate` then moves the module's
    file to that path and recomputes every importing file's relative specifier.
    Reference-source matching can also set these automatically when an upstream
@@ -317,18 +317,18 @@ A binding is named through exactly one channel, decided by where it lives:
 
 | Where the binding lives | Channel / CLI | Key |
 |---|---|---|
-| First-party **module** symbol (has a `modules` row) | `symbol-names --batch` | DB `modules.id` |
-| **Module-less** island binding (`entrypoint.ts`, `island/cluster-*.ts`) | `binding-names --batch` | `file_path` |
-| Module **file path** | `module-names --accept <id=path>` | DB `modules.id` |
+| First-party **module** symbol (has a `modules` row) | `name symbols --batch` | DB `modules.id` |
+| **Module-less** island binding (`entrypoint.ts`, `island/cluster-*.ts`) | `name bindings --batch` | `file_path` |
+| Module **file path** | `name modules --accept <id=path>` | DB `modules.id` |
 
-Two id-spaces exist and are easy to confuse: `symbol-names`/`module-names`
+Two id-spaces exist and are easy to confuse: `name symbols`/`name modules`
 validate against **DB `modules.id`** (`module_belongs_to_project`), while
-`naming-plan` and emitted file prefixes use the **output module id** (the
+`name plan` and emitted file prefixes use the **output module id** (the
 `NNN-` prefix in `modules/NNN-….ts`). For vendored `node_modules` modules the
-two coincide (emitted prefix `== modules.id`), so `symbol-names --accept
+two coincide (emitted prefix `== modules.id`), so `name symbols --accept
 22:Orig=Sem` works directly. For main-bundle-extracted modules they may diverge;
 resolve the DB id via the `modules` table before accepting, or route island-level
-work through `binding-names`. A `module N does not belong to project` error means
+work through `name bindings`. A `module N does not belong to project` error means
 you handed an output id where a DB id was required.
 
 Renaming a module export's **wire** name (the all-or-nothing collapse of
@@ -355,11 +355,11 @@ be named and verified. There are two distinct shapes; run both.
 Libraries shipped as real files (`node_modules/ws/…`, `node_modules/node-pty/…`,
 private `@scope/*`) own `modules` rows and are matched deterministically.
 
-1. **Classify** — `module-classify --auto --apply` marks vendored
+1. **Classify** — `classify --auto --apply` marks vendored
    `node_modules` paths as third-party (deterministic; also refines the naming
    denominator). For ambiguous modules, an agent supplies verdicts via
-   `module-classify --batch <MODULE_ID<TAB>classification<TAB>evidence>`.
-2. **Match against local sources** — `match-packages --package-source-root
+   `classify --batch <MODULE_ID<TAB>classification<TAB>evidence>`.
+2. **Match against local sources** — `match --package-source-root
    <appRoot> --apply`. `<appRoot>` is the extracted app root whose
    `node_modules` holds the real package sources (and the merged
    `app.asar.unpacked` natives). The matcher fingerprints each module's surface
@@ -380,10 +380,10 @@ deterministic matching"):
 
 1. **Agent proposes candidate package names** from string anchors / API shapes
    visible in the island (`z.object`, `ZodError`; `cloneDeep`, lodash internals;
-   mermaid/d3 globals): `island-package-candidates --accept <pkg> [--version <v>]
+   mermaid/d3 globals): `package candidates --accept <pkg> [--version <v>]
    --evidence "<anchors>" --apply`. A wrong guess is harmless — it just fails to
    match and anchors nothing.
-2. **Deterministic confirm** — `match-packages --reference-source-root <appRoot>
+2. **Deterministic confirm** — `match --reference-source-root <appRoot>
    --materialize-package-sources --apply`. This reads accepted candidates (and
    reference `package.json` devDependencies — bundled libs live there, not in
    shipped deps), downloads only concrete compatible versions into the package
@@ -397,16 +397,16 @@ deterministic matching"):
      the island happens first** — cluster, then match at module granularity.
    - The step-A command already runs island anchoring opportunistically: when
      `<appRoot>` ships the inlined libs' sources (under its `node_modules` or as
-     reference `devDependencies`), `match-packages --package-source-root <appRoot>`
+     reference `devDependencies`), `match --package-source-root <appRoot>`
      builds an "island corpus" and anchors in the same pass — no separate
-     candidate step needed. Use the explicit `island-package-candidates` +
+     candidate step needed. Use the explicit `package candidates` +
      `--materialize-package-sources` flow only for libs whose sources are NOT
      on disk and must be fetched from the registry.
 
 3. **Invalid / missing version → Agent re-analyzes and re-proposes.** When
    materialization logs `skipping … : no matching npm version` (or a candidate has
    no version), the hint was wrong and that package will NOT anchor. Do **not**
-   give up — `match-packages` now prints the next step inline. Dispatch an Agent
+   give up — `match` now prints the next step inline. Dispatch an Agent
    to determine a **real** npm version:
    - List actual versions: `npm view <pkg> versions --json`. Never propose a
      version absent from this list.
@@ -419,13 +419,13 @@ deterministic matching"):
    - Beware version-line confusion: a `VERSION` string lifted from one module may
      belong to a *different* package in the same family (OTel's experimental line
      `0.2xx` vs the stable `2.x` line for `core`/`sdk-trace-base`).
-   - Re-propose with the corrected version: `island-package-candidates --accept
+   - Re-propose with the corrected version: `package candidates --accept
      <pkg> --version <real> --evidence "<dating chain>" --apply`, then re-run
-     `match-packages`. A wrong re-guess is still harmless (no anchor).
+     `match`. A wrong re-guess is still harmless (no anchor).
 
 ### Report quirk: verify the *output*, not just the metric
 
-`match-packages` can log `0 package source eliminated (0.00%)` while still
+`match` can log `0 package source eliminated (0.00%)` while still
 writing valid attributions/surfaces and producing bare imports — the elimination
 % is a source-byte metric that lags single-pass runs. Do NOT conclude
 externalization failed from that line. Confirm against the regenerated output:
@@ -437,7 +437,7 @@ uninstalled *optional* native deps (e.g. `bufferutil`, `utf-8-validate`,
 
 ### Verify (both shapes)
 
-`match-packages-report --all-projects` (or per-project) shows match,
+`report packages --all-projects` (or per-project) shows match,
 externalization, and source-elimination rates. After regenerating, confirm bare
 imports are present, `tsc -p tsconfig.runtime.json --noEmit` still exits 0, and
 the equivalence trace is unchanged (externalized package calls become stubbed
@@ -470,7 +470,7 @@ name reflects the recognized package, so the output is honest about provenance:
 
 1. The agent reading the cluster recognizes the library (string anchors, API
    shapes, `VERSION`, known class names) and assigns a path via
-   `cluster-names --accept <fingerprint>=vendor/<package-or-submodule> --evidence
+   `name clusters --accept <fingerprint>=vendor/<package-or-submodule> --evidence
    "<what it saw>" --apply` (keyed by the cluster's stable content fingerprint,
    `origin=agent`). Examples already in use: `vendor/zod-checks-string`,
    `vendor/ajv-formats`, `vendor/opentelemetry-instrumentation-koa`.
@@ -483,7 +483,7 @@ name reflects the recognized package, so the output is honest about provenance:
    Only genuinely first-party clusters get binding/symbol names.
 
 Decision order per recognized third-party region: **externalize (A or B) first;
-only if that is impossible, relocate to `vendor/` via `cluster-names`.** The end
+only if that is impossible, relocate to `vendor/` via `name clusters`.** The end
 state is N externalized `import 'pkg'` + a `vendor/` tree that mirrors the
 remaining inlined libraries by package, leaving only true first-party code as
 anonymous/named clusters.
@@ -495,14 +495,14 @@ Only for fresh projects:
 1. Check whether a project DB already exists; if so, read its id from the
    `projects` table.
 2. Import the unpacked bundle in one step:
-   `reverts-cli import-unpacked --input <unpacked-root> --manifest
+   `reverts-cli import --input <unpacked-root> --manifest
    <reverts-import-evidence.json> --project-name <name> --output-db <db.sqlite>`.
    This creates `projects`, `source_files`, `modules`, `module_dependencies`,
    `project_assets`, and `package_attributions`; module/dependency discovery is
    part of the import.
-3. Runtime helpers are detected deterministically by `import-unpacked` and
+3. Runtime helpers are detected deterministically by `import` and
    `generate` — there is no manual confirm step. Inspect them with
-   `reverts-cli runtime-inventory --input <db> --project-id <id>`.
+   `reverts-cli report runtime --input <db> --project-id <id>`.
 
 Helper detection is automatic, so naming/fix agents read the runtime inventory
 rather than receiving a hand-confirmed mapping.
@@ -516,13 +516,13 @@ Classification and symbol naming happen in ONE pass per agent. Each agent reads 
 - Batch **50-80 modules** per agent
 - Dispatch **3-5 agents** (NOT 8-10 — SQLite lock contention degrades throughput)
 - Each agent processes modules **sequentially** (one at a time) to avoid lock contention
-- Use `module-classify` for classification, then `symbol-names` for symbol naming
+- Use `classify` for classification, then `name symbols` for symbol naming
 
 ### Per-module workflow (inside agent)
 
 For each module the agent must:
 
-1. Read the worklist from `reverts-cli naming-plan --input <db> --project-id
+1. Read the worklist from `reverts-cli name plan --input <db> --project-id
    <id> --target-level <tier>` — each unnamed target carries its `module_id`,
    `evidence_tokens`, and `rename_channel`. Skip modules with no unnamed targets.
 2. Read the module's source on disk (under `<output>/src/...`) once it has been
@@ -530,17 +530,17 @@ For each module the agent must:
    worklist's `evidence_tokens` and the import-evidence inputs.
 3. **Classify**: determine application vs third-party using package fingerprints
    (see below). Vendored `node_modules` paths classify deterministically with
-   `module-classify --auto --apply`; ambiguous modules get an agent verdict via
-   `module-classify --batch <MODULE_ID<TAB>classification<TAB>evidence> --apply`.
+   `classify --auto --apply`; ambiguous modules get an agent verdict via
+   `classify --batch <MODULE_ID<TAB>classification<TAB>evidence> --apply`.
 4. **Name**: assign a semantic file path AND name all unnamed symbols.
-5. Submit module file paths via `module-names --accept <MODULE_ID=path> --apply`
-   and symbol names via `symbol-names --batch <TSV|-> --apply` (or repeated
+5. Submit module file paths via `name modules --accept <MODULE_ID=path> --apply`
+   and symbol names via `name symbols --batch <TSV|-> --apply` (or repeated
    `--accept <MODULE_ID:ORIGINAL=SEMANTIC>`). Always pass `--evidence` for
    `origin=agent` names.
 6. For third-party modules, externalization (the import specifier/subpath and
-   the upstream-match evidence) is recorded by `match-packages`, not by the
+   the upstream-match evidence) is recorded by `match`, not by the
    naming agent — see [Package matching & externalization](#package-matching--externalization-third-party).
-   `module-classify` only refines the naming denominator; it never emits a bare
+   `classify` only refines the naming denominator; it never emits a bare
    import.
 
 ### Init-wrapper fast path
@@ -567,14 +567,14 @@ During classification, agents MUST check for package fingerprints BEFORE default
 
 If `incomplete_decompilation > 0` after Phase 2:
 - These are modules where the export symbol still has no semantic name
-- Dispatch agents to re-read the `naming-plan` worklist + module source on disk
-  and accept the missing names via `symbol-names --batch --apply`
+- Dispatch agents to re-read the `name plan` worklist + module source on disk
+  and accept the missing names via `name symbols --batch --apply`
 - Typically init-wrappers missed in Phase 2
 
 ### 3.2 Mechanical names
 
-- Re-read `reverts-cli naming-progress --input <db> --project-id <id> --json`
-  (and `coverage-ledger`) for the mechanical-name residue
+- Re-read `reverts-cli name progress --input <db> --project-id <id> --json`
+  (and `report coverage`) for the mechanical-name residue
 - Process by subject kind in order: **module** first, then **symbol**, then **global**
 - Module-level: often indicates misclassified packages or bad init-wrapper names
 - Symbol-level: often indicates cross-module name collisions that need disambiguation
@@ -591,21 +591,21 @@ If `incomplete_decompilation > 0` after Phase 2:
 
 
 - Read the package match/externalization state with
-  `reverts-cli match-packages-report --input <db> --project-id <id>` (or
+  `reverts-cli report packages --input <db> --project-id <id>` (or
   `--all-projects`); unverified or proposed attributions show up there.
-- For modules that still need attribution, run `match-packages
+- For modules that still need attribution, run `match
   --package-source-root <appRoot> [--reference-source-root <appRoot>]
   [--materialize-package-sources] --apply` — the matcher's deterministic confirm
   is built in (there is no separate verify step); it fingerprints each module's
   surface against the package source and only accepts when it matches.
 - If the matcher rejects an attribution, correct the package identity, version,
-  subpath, or export specifier (via `island-package-candidates --accept <pkg>
+  subpath, or export specifier (via `package candidates --accept <pkg>
   --version <v> --evidence <..> --apply` for inlined libraries, or
-  `package-surface-decisions` for per-import surface decisions) and re-run
-  `match-packages`; do not demote to `app` unless source evidence proves it is
+  `package surface` for per-import surface decisions) and re-run
+  `match`; do not demote to `app` unless source evidence proves it is
   first-party code.
 - For a wrong package classification, reclassify the module back to application
-  with `module-classify --batch <MODULE_ID<TAB>application<TAB>evidence>
+  with `classify --batch <MODULE_ID<TAB>application<TAB>evidence>
   --apply`. Correct package names/versions only when evidence is strong.
 
 ### 3.3.1 Trivial init-wrapper misclassification
@@ -651,7 +651,7 @@ Use severity tiers instead of demanding cosmetic perfection.
 **All public-surface symbols MUST have semantic names before output generation.**
 
 Public surface = exported symbols + owned globals + module names + module file
-paths. Check with `naming-progress`: the `public_surface` field tracks
+paths. Check with `name progress`: the `public_surface` field tracks
 public-surface naming progress (e.g. `public_surface=2395/5609 (42.7%)`). This
 ratio must reach **100%** before proceeding to output, and module paths/names
 must be semantic — a tree of `modules/247-esbuild-rbr.ts` is not a named public
@@ -684,8 +684,8 @@ next to large generated island file(s), the denominator is excluding them and a
 The island may be emitted as a **single** `modules/entrypoint.ts` OR
 **decomposed into per-cluster files** (`modules/island/cluster-*.ts`) when the
 planner splits it. Both forms carry `unmodularized_recovered_code` and name
-through the **same `binding-names` channel** (file-path keyed). Every one of
-those files is its own naming-plan/progress group with a null `module_id`. Count
+through the **same `name bindings` channel** (file-path keyed). Every one of
+those files is its own name plan/progress group with a null `module_id`. Count
 them all — a split island that lists 52 cluster groups plus the residual
 `entrypoint.ts` group must contribute the union of their bindings to the
 denominator, not just `entrypoint.ts`.
@@ -694,7 +694,7 @@ Before accepting the gate:
 
 1. Confirm the naming universe includes module-less code. The naming progress
    report lists a per-file group with a null `module_id`
-   (`rename_channel: "binding-names"`) for **every** unmodularized recovered-code
+   (`rename_channel: "name bindings"`) for **every** unmodularized recovered-code
    file — the residual `entrypoint.ts` and each `modules/island/cluster-*.ts`.
    Each group's symbol count must be non-zero whenever that file was generated,
    and those symbols MUST be in the `full`-tier denominator.
@@ -709,7 +709,7 @@ Before accepting the gate:
 
 Module-less bindings have no `symbols` row, so they are NOT named through the
 module/symbol channel. They are named through the **file-path-keyed binding
-channel** (`rename_channel: "binding-names"` in the naming plan/progress):
+channel** (`rename_channel: "name bindings"` in the naming plan/progress):
 recover names for those bindings keyed by `(file_path, original_name)` and
 accept them through the binding-name path. The generator applies accepted
 binding names back to the same emitted file. The same precision gates apply;
@@ -738,8 +738,8 @@ If any P0 condition fails, do not generate output yet.
    $OUTPUT_DIR --source-root src`
 2. If generation errors occur (non-zero exit + stderr), go back to the control loop.
 3. Spot-check key modules by reading the generated TypeScript on disk under
-   `$OUTPUT_DIR/src/...`, and re-run `reverts-cli full-inventory --input <db>
-   --project-id <id>` / `coverage-ledger` to confirm the inventory matches.
+   `$OUTPUT_DIR/src/...`, and re-run `reverts-cli report inventory --input <db>
+   --project-id <id>` / `report coverage` to confirm the inventory matches.
 4. Run the **post-output structural audit** (5.1a → 5.1b → 5.1c) before
    handing off to [reverts-decompile](../reverts-decompile/SKILL.md).
    Each audit produces a list of pipeline-issue candidates; do NOT hand-edit
@@ -944,20 +944,20 @@ common mistakes.
 
 | `reverts-cli` command | Purpose |
 |------|---------|
-| `import-unpacked` | Import the unpacked bundle + evidence manifest into a fresh project DB (modules, deps, assets, attributions; discovery + runtime-helper detection built in) |
-| `naming-progress` | Public-surface/declarations/full naming completion + diagnostics |
-| `coverage-ledger` | Unified decompile coverage ledger |
-| `full-inventory` | Full decompile inventory / artifact manifest |
-| `naming-plan` | Unnamed module/symbol worklist by tier (with `evidence_tokens`, `rename_channel`) |
-| `module-classify` | Classify modules application/third-party/runtime-glue (refines the naming denominator) |
-| `match-packages` | Match + externalize vendored and inlined packages; deterministic confirm built in |
-| `match-packages-report` | Match / externalization / source-elimination rates |
-| `island-package-candidates` | Agent-proposed inlined-island package candidates (deterministically confirmed by `match-packages`) |
-| `package-surface-decisions` | Per-import package-surface accept/reject/block decisions |
-| `symbol-names` | Module symbol/global semantic naming (keyed by DB `modules.id`) |
-| `binding-names` | Module-less island binding naming (keyed by `file_path`) |
-| `module-names` | Module file-path overrides (keyed by DB `modules.id`) |
-| `cluster-names` | Island-cluster file-path overrides (keyed by cluster fingerprint) |
-| `reference-source-names` | Deterministic naming from a historical first-party source tree |
-| `runtime-inventory` | Inspect deterministically detected runtime helpers |
+| `import` | Import the unpacked bundle + evidence manifest into a fresh project DB (modules, deps, assets, attributions; discovery + runtime-helper detection built in) |
+| `name progress` | Public-surface/declarations/full naming completion + diagnostics |
+| `report coverage` | Unified decompile coverage ledger |
+| `report inventory` | Full decompile inventory / artifact manifest |
+| `name plan` | Unnamed module/symbol worklist by tier (with `evidence_tokens`, `rename_channel`) |
+| `classify` | Classify modules application/third-party/runtime-glue (refines the naming denominator) |
+| `match` | Match + externalize vendored and inlined packages; deterministic confirm built in |
+| `report packages` | Match / externalization / source-elimination rates |
+| `package candidates` | Agent-proposed inlined-island package candidates (deterministically confirmed by `match`) |
+| `package surface` | Per-import package-surface accept/reject/block decisions |
+| `name symbols` | Module symbol/global semantic naming (keyed by DB `modules.id`) |
+| `name bindings` | Module-less island binding naming (keyed by `file_path`) |
+| `name modules` | Module file-path overrides (keyed by DB `modules.id`) |
+| `name clusters` | Island-cluster file-path overrides (keyed by cluster fingerprint) |
+| `name from-reference` | Deterministic naming from a historical first-party source tree |
+| `report runtime` | Inspect deterministically detected runtime helpers |
 | `generate` | Output generation (materializes source under `<output>/src/…`) |

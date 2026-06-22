@@ -833,7 +833,7 @@ large seams rather than only documenting them.
   top-level statement spans/slices, previous-non-whitespace lookup, and
   delimiter-aware initializer-operator scanning now live beside the shared edit
   applier and line-removal policy.
-- The DB-backed `match-packages` command workflow moved out of the CLI facade
+- The DB-backed `match` command workflow moved out of the CLI facade
   into `package_match_usecase.rs`. The public root function remains as a stable
   wrapper, while package-source/cache matching orchestration has its own module
   boundary.

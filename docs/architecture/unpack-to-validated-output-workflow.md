@@ -19,10 +19,10 @@ here against this map:
 
 | Proposed in this doc | Actual today |
 | --- | --- |
-| `import-unpacked` | ✅ shipped as `reverts-cli import-unpacked` |
-| `classify-modules` | ✅ shipped as `reverts-cli module-classify` |
-| `public-surface --list` / `public-surface-names` gate | landed as `reverts-cli naming-plan` (work list) + `naming-progress` (coverage gate) |
-| `symbol-context` | not yet a standalone command; context is exposed through `naming-plan` |
+| `import` | ✅ shipped as `reverts-cli import` |
+| `classify-modules` | ✅ shipped as `reverts-cli classify` |
+| `public-surface --list` / `public-surface-names` gate | landed as `reverts-cli name plan` (work list) + `name progress` (coverage gate) |
+| `symbol-context` | not yet a standalone command; context is exposed through `name plan` |
 | `validate-output` | provided by validation **Skills** (`reverts-decompile`, `electron-collector`, `browser-extension-collector`), not a CLI command |
 | `reverts-import` / `reverts-surface` / `reverts-validate` crates | **not extracted**; these use-cases currently live as module seams inside `reverts-cli`. Promotion to dedicated crates is optional (see ADR 0007), not a prerequisite. |
 
@@ -38,17 +38,17 @@ auto-unpack-target Skill
   ↓
 unpacked manifest + extracted root
   ↓
-reverts-cli import-unpacked
+reverts-cli import
   ↓
 InputBundle / SQLite
   ↓
 classify-modules
   ↓
-match-packages
+match
   ↓
-reference-source-names   (auto-name from a first-party source tree, optional)
+name from-reference   (auto-name from a first-party source tree, optional)
   ↓
-ownership-source-names   (auto-name owned-but-inlined package modules from package source)
+name from-package   (auto-name owned-but-inlined package modules from package source)
   ↓
 public-surface extraction
   ↓
@@ -154,12 +154,12 @@ extension/
 
 The following capabilities must be implemented in Reverts rather than Skills.
 
-### 1. `import-unpacked`
+### 1. `import`
 
 New CLI command:
 
 ```bash
-reverts-cli import-unpacked \
+reverts-cli import \
   --input <unpacked-root> \
   --manifest <auto-unpack-report.json> \
   --project-name <name> \
@@ -280,7 +280,7 @@ Third-party package modules should be classified as package candidates before pa
 Existing command:
 
 ```bash
-reverts-cli match-packages \
+reverts-cli match \
   --input <db> \
   --project-id <id> \
   --materialize-package-sources \
@@ -296,16 +296,16 @@ Required behavior in the full workflow:
 
 ### 5a. Ownership-Driven Source Naming
 
-`match-packages` records module→package@version "ownership" matches that it
+`match` records module→package@version "ownership" matches that it
 cannot safely externalize (the inlined esbuild bundle does not prove a clean
 single external import). Those attributions persist as `status='rejected'` and
 their modules stay inlined and decompiled — but they ARE the published source of
 a known package, so the package source file is an authoritative naming
-reference. Run this after `match-packages` (and after the optional
-`reference-source-names` first-party pass), before agent naming:
+reference. Run this after `match` (and after the optional
+`name from-reference` first-party pass), before agent naming:
 
 ```bash
-reverts-cli ownership-source-names \
+reverts-cli name from-package \
   --input <db> \
   --project-id <id> \
   --apply
@@ -315,7 +315,7 @@ reverts-cli ownership-source-names \
   source cache (`$HOME/.reverts/.reverts.db`, override with `--cache-db`),
   resolving the requested version to the best available cached version.
 - Matches bundle functions against the package source with the same engine
-  `reference-source-names` uses, then writes recovered names to
+  `name from-reference` uses, then writes recovered names to
   `semantic_binding_names` with a non-automated `package-source:` origin (so the
   vocabulary gate stays bypassed and package domain names pass).
 - Independent of externalization: a module that can never become an `import`
@@ -431,7 +431,7 @@ The JSON should include:
 Agent writes decisions through existing naming persistence:
 
 ```bash
-reverts-cli symbol-names \
+reverts-cli name symbols \
   --input <db> \
   --project-id <id> \
   --batch names.tsv \
@@ -440,7 +440,7 @@ reverts-cli symbol-names \
 
 ### 9. Naming Apply Safety
 
-Extend `symbol-names` or add companion validation for:
+Extend `name symbols` or add companion validation for:
 
 - `--only-public-surface`.
 - `--skip-package-internal`.
@@ -575,7 +575,7 @@ Expanded workflow:
 ```bash
 auto_unpack.py <target> --out work/unpacked
 
-reverts-cli import-unpacked \
+reverts-cli import \
   --manifest work/unpacked/auto-unpack-report.json \
   --project-name <name> \
   --output-db work/reverts.db
@@ -585,7 +585,7 @@ reverts-cli classify-modules \
   --project-id <id> \
   --apply
 
-reverts-cli match-packages \
+reverts-cli match \
   --input work/reverts.db \
   --project-id <id> \
   --materialize-package-sources \
@@ -598,7 +598,7 @@ reverts-cli public-surface-names \
 
 # Agent produces names.tsv from symbol-context tasks.
 
-reverts-cli symbol-names \
+reverts-cli name symbols \
   --input work/reverts.db \
   --project-id <id> \
   --batch names.tsv \
@@ -624,7 +624,7 @@ reverts-cli validate-output \
 
 ### P0: Close the Basic Loop
 
-1. `import-unpacked`.
+1. `import`.
 2. Browser extension importer.
 3. `public-surface --list`.
 4. `public-surface-names --require-complete`.
@@ -636,7 +636,7 @@ Browser extensions are the best first target because validation is deterministic
 
 1. `classify-modules`.
 2. Automatic package candidate marking.
-3. `match-packages` orchestration.
+3. `match` orchestration.
 4. Package-internal skip rules for naming.
 5. Public package surface externalization.
 
@@ -677,7 +677,7 @@ Browser extensions are the best first target because validation is deterministic
 
 The current codebase already has working local pieces:
 
-- `symbol-names` persistence and batch flow.
+- `name symbols` persistence and batch flow.
 - package matching and package surface logic.
 - `generate` emit.
 - TypeScript compile validation for small emitted projects.
@@ -685,9 +685,9 @@ The current codebase already has working local pieces:
 Observed gaps from validation (historical; see Status section above for what has
 since landed):
 
-- ~~No formal `import-unpacked` command exists yet.~~ Now shipped, along with
-  `module-classify`, `naming-plan`, and `naming-progress`.
-- `symbol-names --list` exposes module/global symbols, but this is not the same as target-aware public surface.
+- ~~No formal `import` command exists yet.~~ Now shipped, along with
+  `classify`, `name plan`, and `name progress`.
+- `name symbols --list` exposes module/global symbols, but this is not the same as target-aware public surface.
 - Some imported browser extension projects have many unnamed module/global symbols.
 - Existing package matching does not run unless modules have package evidence/classification.
 - Emitted browser-environment code may compile but fail under plain Node because `window` / `self` are expected; output validation must be target-specific.

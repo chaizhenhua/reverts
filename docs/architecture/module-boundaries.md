@@ -133,7 +133,7 @@ crate tests / integration tests
   accept, reject, or classify package imports, but it must not generate import
   statements. Agent-authored package-surface decisions are recorded and applied
   through the CLI gate described in
-  [package-surface-decisions.md](package-surface-decisions.md); rejected or
+  [package surface.md](package surface.md); rejected or
   blocked latest decisions suppress future matcher-generated surfaces before
   persistence.
 - `reverts-package-matcher` owns AST-fingerprint matching between bundle modules
@@ -152,7 +152,7 @@ crate tests / integration tests
   exit behavior. Core behavior should remain testable without invoking the CLI;
   project writing is isolated behind the CLI `project_writer` adapter and
   consumes `AcceptedProject` rather than unaudited bytes. DB-backed
-  `match-packages` orchestration lives in `package_match_usecase`, package
+  `match` orchestration lives in `package_match_usecase`, package
   source/cache loading lives in `package_source_workflow`, and
   externalization-hint promotion is isolated in
   `package_source_workflow::externalization` until those adapters are promoted
@@ -305,7 +305,7 @@ vendor binaries) are first-class pipeline outputs:
 - `reverts-pipeline::rewrite_emitted_asset_references` rewrites the literal
   spec inside the emitted source to the relative path from the module to the
   asset's `output_path`.
-- `reverts-cli::extract-assets` discovers assets from Bun-embedded binaries
+- `reverts-cli::assets extract` discovers assets from Bun-embedded binaries
   or vendor directories and persists `AssetRow`s back into the SQLite input.
 
 ## Filesystem and External Access
