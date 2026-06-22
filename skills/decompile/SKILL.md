@@ -646,9 +646,20 @@ regeneration, not a generated-output hand edit. Full procedures live in
 | Decl-vs-import collision | Every generated output | Same name is both imported and top-level declared in one file |
 | Runtime-context isolation | Multi-context profiles such as browser-extension/electron | Generated file imports from a source unit in another runtime isolate |
 | Package misclassification scan | Every generated output with package imports | App-owned symbol appears as a property of `__reverts_pkg_*` |
+| Oversized module file | Every generated output | A generated file exceeds the line budget (`OversizedModuleFile` audit warning, budget 10k lines) |
 
 Use MCP/DB-backed metadata and AST or structured parsing for these audits.
 Do not replace them with grep over generated `.ts` files.
+
+**Module-size contract.** A recovered module must be a human-readable unit — no
+generated file should exceed ~10k lines. The pipeline emits an
+`OversizedModuleFile` audit warning for any file over budget; treat each as a
+mechanism gap, not an acceptable output. Analyze the unsplit region (an eager
+entrypoint island not drained into clusters/chunks, a vendored module the matcher
+left whole, an un-clustered data blob) and implement the further split in ReverTS
+(Louvain island clustering, then `chain_split_eager_body` size-bounded chunks for
+the residual eager body), then add a regression test and regenerate. Never accept
+an oversized file by hand-editing the output.
 
 ## Phase 6: Compilation + runtime handoff
 

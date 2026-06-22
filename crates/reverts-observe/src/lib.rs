@@ -64,6 +64,12 @@ pub enum FindingCode {
     /// the bug exists in the input and would crash the original bundle too;
     /// the decompiler is faithful, not corrective.
     UnprotectedNullableMemberRead,
+    /// A generated module file exceeds the per-file line budget. Recovered
+    /// modules should be human-readable units; an oversized file means the
+    /// module-identification / island-splitting mechanism left a region
+    /// unsplit. Surfaced as a Warning (the output still compiles and runs) so
+    /// the cause can be analyzed and a further split implemented in-pipeline.
+    OversizedModuleFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

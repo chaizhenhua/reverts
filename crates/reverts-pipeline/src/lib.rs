@@ -14,8 +14,8 @@ use assets::{audit_required_assets, collect_emitted_assets};
 pub use assets::{collect_required_asset_references, collect_required_asset_references_from_rows};
 use audit::{
     audit_binding_shape_consistency, audit_emit_plan_synthesis, audit_emitted_project_parse,
-    audit_emitted_relative_import_targets, audit_namespace_object_member_consistency,
-    audit_required_sources,
+    audit_emitted_relative_import_targets, audit_module_file_sizes,
+    audit_namespace_object_member_consistency, audit_required_sources,
 };
 use output_paths::module_output_paths;
 pub(crate) use output_paths::relative_asset_specifier;
@@ -628,6 +628,8 @@ pub fn generate_project_from_prepared_with_options(
         &emitted_project,
     ));
     mark_timing!("namespace_audit");
+    audit.extend(audit_module_file_sizes(&plan));
+    mark_timing!("module_file_size_audit");
     let accepted_project = pre_accept.clone().accept_if_clean(&audit);
     // Planner-marked unmodularized recovered-code files (e.g. the eager
     // entrypoint island): owned by no module, but their declarations are

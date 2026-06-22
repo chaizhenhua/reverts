@@ -84,6 +84,37 @@ pub(crate) fn audit_emit_plan_synthesis(plan: &EmitPlan) -> AuditReport {
     audit
 }
 
+/// A recovered module file should be a human-readable unit. When the
+/// module-identification / island-splitting mechanism leaves a region unsplit,
+/// the emitted file balloons past the line budget. Flag every such file (a
+/// Warning — the output still compiles and runs) so the cause can be analyzed
+/// and a further split implemented in-pipeline, per the readability contract.
+pub(crate) const MAX_MODULE_FILE_LINES: usize = 10_000;
+
+pub(crate) fn audit_module_file_sizes(plan: &EmitPlan) -> AuditReport {
+    let mut audit = AuditReport::default();
+    for file in &plan.files {
+        // Count emitted physical lines: bodies are stored as line chunks, but a
+        // single chunk may itself contain embedded newlines (concatenated
+        // imports, minified data), so count newlines across the joined body.
+        let body = file.body.join("\n");
+        let lines = body.lines().count();
+        if lines > MAX_MODULE_FILE_LINES {
+            audit.push(
+                AuditFinding::warning(
+                    FindingCode::OversizedModuleFile,
+                    format!(
+                        "generated module file has {lines} lines (budget {MAX_MODULE_FILE_LINES}); \
+                         analyze the unsplit region and implement a further split in-pipeline"
+                    ),
+                )
+                .with_module(file.path.clone()),
+            );
+        }
+    }
+    audit
+}
+
 fn audit_file_synthesis(file: &PlannedFile) -> AuditReport {
     let mut audit = AuditReport::default();
     let declarations = planned_declarations(file);
@@ -766,5 +797,45 @@ mod tests {
             super::audit_emitted_relative_import_targets(&project, &[], &input, &BTreeMap::new());
 
         assert!(!audit.has(FindingCode::UnresolvableBareImport));
+    }
+
+    #[test]
+    fn oversized_module_file_is_flagged_as_a_warning() {
+        use reverts_planner::{EmitPlan, PlannedFile};
+        let mut plan = EmitPlan::default();
+        let mut big = PlannedFile::new("modules/island/cluster-huge.ts");
+        // One statement per line, past the budget.
+        let body = (0..super::MAX_MODULE_FILE_LINES + 5)
+            .map(|i| format!("var v{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        big.push_source(body);
+        plan.push_file(big);
+        let mut ok = PlannedFile::new("modules/small.ts");
+        ok.push_source("var a = 1;\nvar b = 2;\n");
+        plan.push_file(ok);
+
+        let audit = super::audit_module_file_sizes(&plan);
+        assert!(audit.has(FindingCode::OversizedModuleFile));
+        // Exactly the oversized file is flagged, and it is a Warning (not an
+        // Error that would block output — the file still compiles and runs).
+        assert_eq!(audit.warning_count(), 1);
+        assert_eq!(audit.error_count(), 0);
+    }
+
+    #[test]
+    fn within_budget_module_files_are_not_flagged() {
+        use reverts_planner::{EmitPlan, PlannedFile};
+        let mut plan = EmitPlan::default();
+        let mut file = PlannedFile::new("modules/m.ts");
+        let body = (0..super::MAX_MODULE_FILE_LINES - 1)
+            .map(|i| format!("var v{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        file.push_source(body);
+        plan.push_file(file);
+
+        let audit = super::audit_module_file_sizes(&plan);
+        assert!(!audit.has(FindingCode::OversizedModuleFile));
     }
 }
