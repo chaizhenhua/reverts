@@ -31,9 +31,24 @@ generate 写出:
 **保证**同时过 module-path 命名闸(`validate_module_path_acceptance`)与输出布局
 (`is_safe_typescript_module_path`)—— 即可被 `module-names` 原样接受、不退化成
 `modules/<id>-…` slug。单测覆盖映射 + 对抗输入(traversal/绝对路径/空段/怪字符)恒安全。
-**这一步只标注、不动文件**(像 M1)。**M2b 待做**:把 `vendor_path` 经 `module_path_overrides`
-真正落地为文件重定位 —— 机制(module-names)已被项目证明安全,但布局变更需在真实语料上
-跑 e2e 验证(本环境无 DMG/DB),故留作语料内的后续。
+**这一步只标注、不动文件**(像 M1)。
+
+**真实语料验证(2026-06-20,project.sqlite)**:723 个 recognized 模块**全部**带 `vendor_path`,
+**0 个** layout-unsafe;scope 包正确(`@opentelemetry/api`→`vendor/opentelemetry/api/…`、
+`@sentry/electron`→`vendor/sentry/electron/…`、`@ant/claude-native`→`vendor/ant/claude-native/…`)、
+NULL-subpath → `index.ts`、真实 subpath(`node-pty lib/windowsPtyAgent.js`→
+`vendor/node-pty/lib/windowsPtyAgent.ts`)均正确。
+
+**关键发现:723 模块只产出 13 个 distinct `vendor_path`** —— 因为绝大多数 recognized 模块
+**没有 per-module subpath**(island-inlined,subpath=NULL),全部塌缩到 `vendor/<pkg>/index.ts`。
+这从文件命名角度**再次印证结构上界**:这些模块在产物里不是独立文件、没有可区分的子路径身份,
+**M2b 文件重定位对它们无效**(会全部撞到同一个 `vendor/<pkg>/index.ts`)。能真正 per-file
+重定位的只有少数带真实 subpath 的模块(如 node-pty/ws 的若干 lib 文件)。
+
+**M2b 待做(范围已收窄)**:仅对**带非空 subpath 且在产物中是独立文件**的少数模块,经
+`module_path_overrides` 落地重定位 —— 机制(module-names)已被项目证明安全,但布局变更需在真实
+语料上跑 esbuild + e2e 验证。NULL-subpath 的大多数模块靠 M1 全量源码树 + M2a `vendor_path`
+标注处理(身份 + 可读源),这已是它们的安全上界。
 
 ### M3 — 模块体内联源码还原(中风险,核心)
 对 matched 模块,把 minified 体**替换成真实子模块源**,并**保留导出接口**:
