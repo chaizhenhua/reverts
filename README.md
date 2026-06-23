@@ -15,6 +15,23 @@ works.
 > malware/extension review, interoperability, and recovering source you own.
 > Respect software licenses and terms of service before decompiling anything.
 
+## Built for coding agents
+
+ReverTS is **agent-first**: it is meant to be driven by a coding agent —
+**Claude Code or Codex** — rather than run as a long series of manual commands.
+A release is two pieces that install together with one `curl | sh`:
+
+- the **`reverts-cli` binary** — the deterministic engine (ingest, package
+  matching, generation, structural audits, validation), and
+- the **skill bundle** — the agent playbook that orchestrates the multi-phase
+  decompile: it decides what to run next, reads the results, and loops until the
+  output compiles and runs.
+
+You install both; the agent does the work. The skills install into **both**
+`~/.claude/skills` and `~/.codex/skills`, so the identical workflow is available
+to Claude and Codex — no Node toolchain and no MCP server in the loop. Driving
+`reverts-cli` by hand works too, but the skills are the intended interface.
+
 ## What makes it different
 
 - **Structure recovery** — one bundle becomes the original module tree with real
