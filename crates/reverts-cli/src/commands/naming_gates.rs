@@ -32,6 +32,10 @@ pub(crate) enum NamingGateError {
         origin: String,
         tokens: Vec<String>,
     },
+    TokenEcho {
+        name: String,
+        original: String,
+    },
 }
 
 impl NamingGateError {
@@ -60,6 +64,9 @@ impl NamingGateError {
                 "automated origin {origin} proposed semantic name {name} with token(s) absent from evidence/technical vocabulary: {}",
                 tokens.join(", ")
             ),
+            Self::TokenEcho { name, original } => format!(
+                "semantic name {name} embeds the minified token {original}; disambiguate same-value siblings with a context word or a plain numeric index (e.g. okResponse2), never the original token"
+            ),
         }
     }
 }
@@ -83,7 +90,31 @@ pub(crate) fn validate_name_acceptance(
     validate_identifier(semantic_name)?;
     validate_provenance(semantic_name, origin, evidence)?;
     if is_automated_origin(origin) && semantic_name != original_name {
+        validate_no_token_echo(original_name, semantic_name)?;
         validate_vocabulary(semantic_name, origin, evidence.unwrap_or_default(), mode)?;
+    }
+    Ok(())
+}
+
+/// Reject names that leak the minified `original_name` into the output (the most
+/// common hygiene failure observed in held-out naming: agents append the token as
+/// a uniqueness suffix, e.g. `AKr` -> `fourThousandAKr`, `Kdt` -> `mapKdt`).
+///
+/// Scoped to minified-looking tokens to avoid flagging legitimate renames of
+/// already-readable originals: the token must be short (2..=5 chars) and carry an
+/// uppercase letter or a digit, so all-lowercase English originals like
+/// `log` -> `logError` are never affected.
+fn validate_no_token_echo(original_name: &str, semantic_name: &str) -> Result<(), NamingGateError> {
+    let original = original_name.trim();
+    let length = original.chars().count();
+    let token_like = original
+        .chars()
+        .any(|character| character.is_ascii_uppercase() || character.is_ascii_digit());
+    if (2..=5).contains(&length) && token_like && semantic_name.contains(original) {
+        return Err(NamingGateError::TokenEcho {
+            name: semantic_name.to_string(),
+            original: original.to_string(),
+        });
     }
     Ok(())
 }
@@ -472,5 +503,70 @@ mod tests {
             NamingGateMode::Symbol,
         )
         .expect("manual review is accepted provenance");
+    }
+
+    #[test]
+    fn rejects_names_that_echo_the_minified_token() {
+        for (original, semantic) in [
+            ("AKr", "fourThousandAKr"),
+            ("Kdt", "mapKdt"),
+            ("Bzr", "oneMinuteMsBzr"),
+            ("GU", "weakFieldGU"),
+            ("Zq", "defaultOkResponseZq"),
+            ("I0", "I0Alias"),
+        ] {
+            let error = validate_name_acceptance(
+                original,
+                semantic,
+                "agent",
+                Some(&format!("magnitude evidence for {semantic}")),
+                NamingGateMode::LocalBinding,
+            )
+            .expect_err("token-echo names must be rejected");
+            assert!(
+                matches!(error, NamingGateError::TokenEcho { .. }),
+                "expected TokenEcho for {original} -> {semantic}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_echo_does_not_flag_lowercase_english_originals() {
+        // `log` is all-lowercase with no digit: not minified-looking, so expanding
+        // it to `logError` is a legitimate rename, not a token echo.
+        validate_name_acceptance(
+            "log",
+            "logError",
+            "agent",
+            Some("calls:console.error log error"),
+            NamingGateMode::LocalBinding,
+        )
+        .expect("lowercase english originals are not token echoes");
+    }
+
+    #[test]
+    fn token_echo_does_not_flag_long_already_semantic_originals() {
+        // `inFlight` is already readable (8 chars); expanding it must not trip the
+        // short-token echo guard.
+        validate_name_acceptance(
+            "inFlight",
+            "pluginSyncInFlightByDir",
+            "agent",
+            Some("plugin sync in flight by dir"),
+            NamingGateMode::LocalBinding,
+        )
+        .expect("long already-semantic originals are not token echoes");
+    }
+
+    #[test]
+    fn token_echo_clean_name_passes() {
+        validate_name_acceptance(
+            "AKr",
+            "pollIntervalMs",
+            "agent",
+            Some("setInterval poll interval ms"),
+            NamingGateMode::LocalBinding,
+        )
+        .expect("a clean role name for a minified original passes");
     }
 }

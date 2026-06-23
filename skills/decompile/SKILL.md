@@ -311,6 +311,66 @@ This ordering is what makes the [Phase 4](#phase-4-completion-gate) coverage gat
 agent naming closes the precise remainder, and both naming channels keep the
 entry island in scope.
 
+### Agent naming discipline: generic-but-true beats specific-but-false
+
+When an agent names the residue (step 5), the failure that matters is not low
+coverage — agents name ~99% of a worklist — it is **confidently wrong** names that
+misdirect a reader. A held-out experiment scored agent naming against curated gold
+(see `decompile-eval/`): unrestricted cross-file "trace the call site and name by
+role" naming *raised* the wrong-name rate from 8.8% to 13.4%, while the discipline
+below cut it to **~2% with higher overall quality**. The rules, in priority order:
+
+1. **A vaguer name that is true is GOOD; a specific name that is wrong is a
+   FAILURE.** When torn between a generic and a specific name, choose the generic
+   one. `fiveMinuteMs` is a fine name; `rateLimitWindowMs` is a *bug* if the
+   constant is also used as a cache TTL elsewhere.
+2. **Cross-file tracing is allowed but conservative.** An agent may grep the
+   generated tree for a binding's call sites, but may assign a role-specific name
+   **only if every call site agrees on that role.** Shared constants (the common
+   case for exported numbers) are used in several unrelated contexts; naming one
+   from a single site overfits and lies at the others. If sites disagree or there
+   is one ambiguous use, name by magnitude/value instead.
+3. **Magic numbers and magic bytes are named by their literal value/format,
+   never by a guessed domain.** `0x1F8B…` is `gzipMagicCookie`; an `MDMP` header is
+   `minidumpMagic`; `/0x8037[0-9a-f]{4}/` is `ntStatusCodePattern`. Do not relabel
+   a format magic as an exit code, a different file format, or a platform you did
+   not see in a literal.
+4. **Durations** normalize ms to human scale (`600000` → `tenMinute…`) and add a
+   role word (`Timeout`/`Delay`/`Debounce`/`Poll`) **only** when a single
+   unambiguous usage proves it; otherwise stop at the magnitude.
+5. **Regex constants** take a `Pattern` suffix, named from the literal pattern
+   content (not a guessed domain). **IPC dispatcher objects** (the
+   `getDispatcher`/`setImplementation` idiom over `$eipc_message$_…` channels) take
+   a `Dispatcher` suffix keyed on the interface name in the channel string — not
+   `Bridge`. **Boolean predicates** are named from the exact field/condition tested;
+   never widen a guard's meaning to a trendier concept.
+6. Strip the minified token from the output — emit `maxMessageBytes`, never
+   `uIr16777228`. Spell magnitudes in words; never embed a raw number/hex in a name.
+   **Never use the minified token as a uniqueness suffix.** When several constants
+   share a value or role and you need distinct names, disambiguate with a *context*
+   word (`pollIntervalMs` / `retryDelayMs`) or, failing that, a plain numeric index
+   (`okResponse`, `okResponse2`) — never `fiveSecondMsBJe` or `mapKdt`. (A broad
+   held-out run showed this is the single most common hygiene failure; the
+   `binding-names` accept path should reject any semantic name that contains its own
+   `original_name` as a substring.)
+7. **Never label a binding "unused" or leave it minified-generic from a lack of
+   in-file reads.** A declared, exported binding is consumed cross-file (it is public
+   surface by definition). Grep the generated tree for its importers and name it for
+   the role they reveal — `extensionUpdateCacheMap`, not `unusedMap`/`map2`/`weakMap1`.
+   "No reads in this file" means *trace harder*, never *give up*.
+
+> **Vendor-heavy regions are an externalization signal, not a naming target.** When a
+> file is dominated by inlined third-party internals (zod/sentry/opentelemetry/lodash/
+> tar fragments with sparse first-party evidence), most wrong names come from naming
+> code that should have been externalized. If agent naming is producing many
+> low-evidence vendor names, STOP and re-run shape-B externalization on that region
+> (per step 1) instead of naming it — confirmed by held-out: the two most
+> vendor-heavy files produced 57% of all wrong names.
+
+The throughline: prefer literal evidence over inference, and honest generality over
+confident specificity. The gate rule (`name tokens ⊆ evidence words`) enforces the
+floor; this discipline governs the judgment calls above it.
+
 ### Naming-channel routing and id-spaces (do not mix them)
 
 A binding is named through exactly one channel, decided by where it lives:
