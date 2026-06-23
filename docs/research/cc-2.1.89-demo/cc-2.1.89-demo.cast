@@ -1,5 +1,5 @@
 {"version": 2, "width": 80, "height": 24, "timestamp": 1780885852, "env": {"SHELL": "/bin/bash", "TERM": "xterm-256color"}}
-[0.006542, "o", "\r\n\u001b[1;36m==== 0. the input: one 13 MB minified line ====\u001b[0m\r\n-rwxr-xr-x 1 chaizhenhua chaizhenhua 13081065 Oct 26  1985 /home/chaizhenhua/Codes/reverts/cc-2.1.89/package/cli.js\r\n"]
+[0.006542, "o", "\r\n\u001b[1;36m==== 0. the input: one 13 MB minified line ====\u001b[0m\r\n-rwxr-xr-x 1 user user 13081065 Oct 26  1985 /home/user/Codes/reverts/cc-2.1.89/package/cli.js\r\n"]
 [0.00684, "o", "#!/usr/bin/env node\r\n// (c) Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.\r\n\r\n// Version: 2.1.89\r\n\r\n// Want to see the unminifie"]
 [0.006886, "o", " …\r\n"]
 [0.006927, "o", "\r\n\u001b[1;36m==== 1. collect — auto-unpack detects node-bundle, runs the collector ====\u001b[0m\r\n"]

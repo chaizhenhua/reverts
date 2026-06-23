@@ -7,9 +7,9 @@ number, so future contributors don't burn time on the same dead end.
 
 ## Setup
 
-- Bundle: `/home/chaizhenhua/Codes/reverts/cli.js` — Claude Code's
+- Bundle: `/home/user/Codes/reverts/cli.js` — Claude Code's
   ~13 MB minified bundle (esbuild `__esm` wrappers, 4448 modules).
-- Cache database: `/home/chaizhenhua/Codes/reverts/reverts-output/.reverts.db`
+- Cache database: `/home/user/Codes/reverts/reverts-output/.reverts.db`
   project id 2 ("cli"). The `package_source_cache` table holds 13
   package families.
 - Match command: `match-packages --input <db> --project-id 2 --apply`.

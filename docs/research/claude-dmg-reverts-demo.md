@@ -6,7 +6,7 @@ deterministic substrate the agent calls, and scripts only orchestrate repeatable
 commands. The agent owns target triage, package judgment, **semantic naming**, and
 validation — it never hand-edits generated output or the SQLite DB.
 
-- Target: `/home/chaizhenhua/Downloads/Claude.dmg` (294 MB Electron app)
+- Target: `/home/user/Downloads/Claude.dmg` (294 MB Electron app)
 - Reference source tree (third-party identification only): `Codes/claude-code/src`
 
 ## Demo prompt (headline)
@@ -15,12 +15,12 @@ validation — it never hand-edits generated output or the SQLite DB.
 Use the Reverts decompile skill. Decompile this DMG automatically, then read the
 recovered code and give the minified module symbols real names:
 
-/home/chaizhenhua/Downloads/Claude.dmg
+/home/user/Downloads/Claude.dmg
 
 Use this reference tree only to identify third-party packages (not to recover
 first-party code):
 
-/home/chaizhenhua/Codes/claude-code/src
+/home/user/Codes/claude-code/src
 ```
 
 The reference tree is used **only** for third-party package identification. First-party
