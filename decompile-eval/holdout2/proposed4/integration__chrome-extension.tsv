@@ -1,0 +1,234 @@
+I$A	gzipHeaderLength	returns 10 + filename length: byte length of a gzip header
+I$t	eightKiB	const = 8192 (8*1024)
+I0A	readUint64LE	reads two uint32 LE and combines into 64-bit value
+I2i	sixtyFourKiB	const = 64*1024; imported elsewhere as maxBuffer
+I3	stripWwwPrefix	A.replace(/^www\./,'')
+I4t	aiResponseObjectAttr	const 'ai.response.object' (otel span attr key)
+I6e	sentryMessagePortMessageType	const '__sentry_message_port_message__'
+I7i	int8ArrayTag	const '[object Int8Array]'
+I8e	genAiAgentNameAttr	const 'gen_ai.agent.name'
+I9	honoHandlerKind	{MIDDLEWARE,REQUEST_HANDLER}; used as I9.REQUEST_HANDLER in hono integration
+IFr	defaultProtocolPorts	{ftp:21,http:80,https:443,...}; used as IFr[protocol] default port
+IG	maxInt16Signed	const 32767; used as upper clamp bound in setBounds
+IIr	machoFatMagic	3405691582 = 0xCAFEBABE, checked in Mach-O header validation (not_macho)
+ILe	memoryConsolidationPrompt	long prompt string '# Memory Consolidation...'
+IMi	uncWindowsPathPattern	/^[\\/]{2}[?.][\\/]/
+IQi	ipv6CidrPattern	IPv6-with-CIDR validation regex
+IRe	coworkPluginsDirSegment	const 'mnt/.claude/cowork_plugins/'
+IRr	pathOutsideAllowedDirsMessage	const 'Path is outside allowed working directories'
+IU	trimIncompleteTrailingTokens	recursively drops trailing incomplete JSON tokens
+IUi	tenThousand	const 1e4
+IV	colorPalettePrompt	long markdown color-palette prompt string
+IVr	twenty	const 20
+IWe	semverPattern	full semver named-group regex
+IY	makeCrc32	returns {p,d} CRC-32 accumulator over int table
+IYA	fiveMinuteMs	const 3e5; imported elsewhere as timeout
+I_i	desktopOauthCallbackUrl	'http://localhost:4000/desktop/callback'; imported as redirectUri
+Iae	oneThousand	const 1e3
+Igi	chromeExtensionDispatcher	IPC dispatcher for interface 'ChromeExtension'
+Imr	delayMs	() => new Promise(setTimeout, A): sleep helper
+Inn	three	const 3
+Irt	twoMinuteMs	const 12e4
+Itt	builtinMcpIncidentsFile	const 'builtin-mcp-incidents.json'
+Iu	padStartZeros	left-pads string with '0' to width
+Ixe	emptyObjectSingleton	var = {}
+Iy	claudeDocsBaseUrl	'https://code.claude.com/docs/en'
+J$	inferenceCredentialKind	A.inferenceCredentialKind ?? LD(A)
+J$r	remoteSetupFailureMessages	list of 'failed to deploy claude cli' etc.
+J0t	isLoopbackIpv4	checks 127.x.x.x dotted quad
+J2r	threeMinuteMs	const 18e4; imported as timeoutMs
+J3e	mysqlIntegrationName	const 'Mysql'
+J3r	apiPathPrefixes	['/api/','/edge-api/','/v1/',...]
+J4i	zodReadonlyToJsonSchema	sets t.readOnly on innerType during zod->json-schema
+J4r	githubPullRequestUrlPattern	/https:\/\/github\.com\/...\/pull\/\d+/g
+J5r	ipv4WithOptionalPortPattern	/^[\d.]+(:\d+)?$/
+J6A	thirtySecondMs	const 3e4; imported as interval_ms
+J7e	microsoft365List	['microsoft365']
+J7r	coworkTeachNextKey	const 'cu-teach:next'
+J8t	sentrySampleRandAttr	const 'sentry.sample_rand'
+JBA	claudePreviewName	const 'Claude Preview'
+JBr	dangerousExecutableExtensions	['.bat','.cmd','.exe',...]
+JDi	emailAddressPattern	email-matching global regex
+JFr	httpProtocolPattern	/https:?/
+JH	aiPromptToolsAttr	const 'ai.prompt.tools'
+JHA	httpStatusCodes	{Continue:100,Ok:200,...} status-code map
+JHi	defaultMaxTotalSizeMB	2048; used as ia().dxtMaxTotalSizeMB ?? JHi
+JHt	sentryDataCategoryMap	maps envelope item type to data category
+JIA	fastifyIntegrationName	const 'Fastify'
+JIr	thirtyMinuteMs	const 1800*1e3
+JOt	maxBaggageEntries	const 180; .slice(0, JOt) limit on baggage entries
+JPA	searchSessionTranscriptsName	const 'search_session_transcripts'
+JQr	helperProcessNamePatterns	[/Helper/, /Agent/, /Service/, ...]
+JUr	randomString	generates random string from alphabet
+JVe	sentryIsolationScopeKey	const '_sentryIsolationScope'
+JXe	custom3pSetupDispatcher	IPC dispatcher for interface 'Custom3pSetup'
+JXi	maxSafeInteger	9007199254740991 = Number.MAX_SAFE_INTEGER
+JZi	regexSpecialCharsPattern	/[\\^$.*+?()[\]{}|]/g
+JZt	notSlashClass	const '[^/]'
+JaA	permissionTierRank	{read:0,click:1,full:2}; compared as JaA[tier]
+Jdt	currentRefHolder	{current:null}
+Jee	pathTrieNode	class with hooks[] and children Map
+Jet	wildcardSegment	const '*'
+Jgr	featureFlagNames	['autoMode','deepLink','voice',...]
+Jit	tenThousand	const 1e4
+Jji	jsonSchemaDraft07Url	'http://json-schema.org/draft-07/schema#'
+Jkt	filesApiVersionHeader	const 'files-api-2025-04-14'
+Joe	prismaInstrumentationEnv	const 'PRISMA_INSTRUMENTATION'
+JsA	zodTypeToJsonSchemaType	{ZodString:'string',...} map
+Jtn	tenThousand	const 1e4
+Jwi	stringifyArguments	JSON.stringify(arguments)
+Jxe	sixtySecondMs	const 6e4
+Jyr	authErrorMessages	['authentication_error',...]
+JzA	ccdSessionName	const 'ccd_session'
+K$A	normalizeOptionAliases	maps option aliases, handles chmod/noChmod
+K$r	platformUnsupportedMessages	['claude cli not available for platform',...]
+K1r	stackBufferOverrunExitCode	3221226505 = 0xC0000409 STATUS_STACK_BUFFER_OVERRUN, compared as exit code
+K3r	assetExtensionPattern	/\.(m?[jt]sx?|css|map)$/
+K3t	nodeSystemErrorIntegrationName	const 'NodeSystemError'
+K5r	bracketOrColonPrefixPattern	/^\[|:.*:/
+K6A	fifteenSecondMs	const 15e3; imported as timeout_ms
+K7r	coworkTeachExitKey	const 'cu-teach:exit'
+K8t	sentrySampleRateAttr	const 'sentry.sample_rate'
+KAr	noop	() => {}
+KBA	mcpRegistryName	const 'mcp-registry'
+KBr	unicodeWhitespacePattern	/[ ...　]/
+KC	orgProvisionedValue	const 'org-provisioned'
+KEA	appName	const 'app'
+KHe	twentyMiB	20*1024*1024; used as file-size upper limit
+KOt	maxBaggageEntryLength	const 4096; .filter(s.length <= KOt) on baggage entries
+KPA	archiveSessionName	const 'archive_session'
+KPt	caretGroupPattern	const '(?:\\^)'
+KQA	baggageHeaderName	const 'baggage'
+KWr	twoFiftySixKiB	256*1024; used as accumulation byte cap
+KXe	claudeAiImportDispatcher	IPC dispatcher for interface 'ClaudeAiImport'
+KXi	nonNegativeIntegerPattern	/^(?:0|[1-9]\d*)$/
+KY	someFeatureGateId	'1291166712'; flag-store key in $r(KY,'enabled',...)
+KZi	objectConstructorTagPattern	/^\[object .+?Constructor\]$/
+Kar	ajvValidatorFactory	class wrapping ajv compile/getSchema
+KbA	remoteMarketplaceMigrationKey	const 'remote_marketplace_migration_done_v1'
+Kct	assertFileGlobalExists	throws if File global missing for uploads
+Kd	localPrefix	const 'local_'
+KgA	framebufferName	const 'Framebuffer'
+Kit	eight	const 8
+Kji	jsonSchemaDraft07Url	'http://json-schema.org/draft-07/schema#'
+Kkt	oauthVersionHeader	const 'oauth-2025-04-20'
+Kli	codeRoutePaths	['/code/onboarding',...]
+Kme	ten	const 10
+Kmr	humanTurnMarker	const '\n\nHuman:'
+Ko	mapIfString	(fn) => (v) => string ? fn(v) : v
+Kqt	genAiPipelineNameAttr	const 'gen_ai.pipeline.name'
+KsA	mcpNodeHostName	const 'Claude Desktop MCP Node Host'
+Ktn	one	const 1
+KxA	claudeCodePolicyRegistryKey	const 'HKLM\\SOFTWARE\\Policies\\ClaudeCode'
+Kyr	authErrorPattern	/401|unauthorized|authentication|revoked/i
+L1t	mcpLoggingLevelAttr	const 'mcp.logging.level'
+L4A	detectWindowsUserDataScope	returns 'local'/'roaming' from userData path
+L4i	zodUnionToJsonSchema	maps zod union to oneOf/anyOf
+L4r	two	const 2
+L7r	timerIconSvgPath	SVG path string for a clock/timer icon
+L8	auditChainGenesisValue	const 'audit-chain-genesis'
+L8r	sideChatSystemPrompt	side-chat read-only system prompt string
+L8t	versionString	const '2.6.1'
+LAi	tediousIntegration	() => sentry Tedious integration
+LCi	dateFormatTokens	{D,DD,Do,...} date-format token functions
+LDi	iamCredentialsHost	const 'iamcredentials.googleapis.com'
+LHi	addEntriesToPack	adds file entries to a tar pack stream
+LIt	isoDateBodyPattern	ISO date (leap-year aware) regex body
+LKe	five	const 5
+LKt	userManagementMethodNames	['createUser','deleteUser',...]
+LPt	comparatorOperatorGroup	const '((?:<|>)?=?)'
+LRe	thirtySecondMs	const 3e4
+LRi	envVarPrefixes	['CLAUDE_','ANTHROPIC_','OTEL_','LD_']
+LUr	hasIteratorMethod	A != null && qu(A[Symbol.iterator])
+LVr	fiveSecondMs	const 5e3
+LWi	keyNameAliases	{esc:'escape',del:'delete',...}
+LYi	parsePaxHeaderLine	parses a single PAX header line into accumulator
+LZi	proxyTag	const '[object Proxy]'
+L_r	scopeNames	['user','feedback','project','reference']
+Ldi	hyphenatedAlnumPattern	/^[A-Za-z0-9]{2,8}(?:-...)*$/
+Lei	unleashIntegration	browser-only Unleash integration warning
+Lgr	nonPrintableAsciiPattern	/[^ -~]/
+Lgt	oneKiB	const 1024; used as 'implausibly small' byte threshold
+LiA	systemPromptDynamicBoundaryMarker	const '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'
+Ljr	fiveHundred	const 500
+Lme	five	const 5
+Lmi	warnInDev	console.warn unless NODE_ENV=production
+Loe	one	const 1
+Lot	oneHundred	const 100
+Lpr	readWidgetContextSchema	tool input schema {tool_name}
+LtA	tracestateHeaderName	const 'tracestate'
+M$r	fiveSecondMs	const 5e3
+M1t	mcpToolResultContentCountAttr	const 'mcp.tool.result.content_count'
+M4i	zodEnumToJsonSchema	maps zod enum to number/string enum
+M6r	fiveMinuteMs	const 5*6e4; imported as maxBuffer-adjacent
+M6t	traceId16HexPattern	const '(?![0]{16})[\\da-f]{16}'
+M8t	otelSpanParentOriginAttr	const 'otel.span.parent.origin'
+MAn	configureOutboundOnlyCcrClient	inits/disposes outbound-only CCR client on flag change
+MB	assignNumericIfValid	sets A[e]=Number(t) when not NaN
+MDi	gstaticWildcardHost	const '*.gstatic.com'
+MEr	oneDayMs	const 864e5
+MFA	controlCharsPattern	/[\r\n\0]/
+MFr	callbackifyAsyncFn	wraps async fn into node-style callback fn
+MGt	anotherFeatureGateId	'2023768496'; checked via lt(MGt) flag guard
+MHi	streamFileIntoParser	pipes a read stream into a parser
+MIA	genAiRequestAvailableToolsAttr	const 'gen_ai.request.available_tools'
+MIr	fifty	const 50
+MNe	toolManifestName	const 'tool.manifest'
+MOi	collectTransferableBuffers	collects ArrayBuffers for worker transfer
+MdA	axiosTransitionalDefaults	{silentJSONParsing,forcedJSONParsing,...}
+Mee	loggerProvider	class with getLogger/_getDelegate (otel logs API)
+Mei	langGraphIntegration	() => sentry LangGraph integration
+Mft	debugConfigTemplate	JSON debug-config template string
+NYi	toOctalPadded	octal-pad helper for tar headers
+OWe	tediousIntegrationName	const 'Tedious'
+Pmr	balanceJsonBrackets	pushes closing braces/brackets to balance tokens
+RSr	defaultWindowWidth	var 800; default BrowserWindow width
+S8e	langGraphIntegrationName	const 'LangGraph'
+TFr	isLoopbackIpv6	checks ::1 / mapped loopback IPv6
+Tpt	parsePartialJson	JSON.parse over balanced/truncated token stream
+Twt	windowManager	class managing electron windows over IPC
+UX	workerScriptCache	var [] cache of built worker scripts
+V3t	nodeSystemErrorIntegration	sentry NodeSystemError integration factory
+V_i	vmClient	VM control client object; imported as vm
+WOe	isLoopbackAddress	true if host is loopback v4/v6
+WOt	baggagePropagator	inject/extract baggage on otel context
+Ymr	stringifyJsonTokens	serializes token list back to JSON text
+_Sr	windowManagerDispatcher	IPC dispatcher for interface 'WindowManager'
+aSr	windowPropertySetters	map of prop name -> BrowserWindow setter
+aei	vercelAiIntegration	sentry VercelAI integration factory
+b4A	userDataDirBasename	basename of app.getPath('userData')
+bYi	parsePaxHeader	parses PAX extended header block
+c$A	writeGzipHeader	writes gzip magic/flags/mtime/filename header
+c9t	fastifyIntegration	sentry Fastify integration factory
+dPt	delegatingLogger	otel logger that delegates to provider
+eoA	comma	const ','
+f$A	writeZipEndOfCentralDirectory	writes EOCD record fields
+fDe	serializeFunctionsToSource	serializes fns to a worker source string
+kYi	octalPad	pads octal string to fixed width
+kwt	managedBrowserWindow	wraps a BrowserWindow with event/bounds handling
+l5t	mysqlIntegration	sentry Mysql integration factory
+lUe	minWindowDimension	const 1; lower clamp bound in setBounds
+nnt	gzipModuleParts	returns [writeGzipHeader,gzipHeaderLength,writeUint32,makeCrc32,crcTable]
+ns	writeUint32LE	writes little-endian uint32 bytes
+oYi	resolveOptionAlias	AYi.get(A) || A
+ooA	slash	const '/'
+rnt	buildWorkerFromFunctions	builds/caches a worker from function set
+sYt	hookTrie	trie over module-name path for hook lookup
+uc	readUint32LE	reads little-endian uint32
+vHi	appendEntriesToTarFile	appends entries to existing tar archive file
+vRe	stripWwwAndPort	I3(A).replace(/:\d+$/,'')
+xmr	tokenizeJson	tokenizes JSON-ish input into token list
+ySA	resolveInferenceProvider	jUA(provider, credentialKind)
+MPA	fiveSecondMs	const 5e3
+MSA	oauthApiKeyScope	'org:create_api_key user:profile'; imported as scope in oauth flow
+MSr	defaultWindowHeight	var 600; default BrowserWindow height
+MVt	chatRoleMap	{human:'user',ai:'assistant',...}; used as MVt[role] ?? role
+MXr	commonProjectDirNames	['code','projects','src','dev','github',...]
+MXt	comparatorOperatorGroup	const '((?:<|>)?=?)'
+MYi	writeOctalAscii	A.write(toOctalPadded(...),'ascii') for tar headers
+MZi	undefinedTag	const '[object Undefined]'
+M_e	tarFsEntry	class holding path/absolute/entry/stat/readdir
+M_r	fiveHundred	const 500
+name	vercelAiIntegrationName	const 'VercelAI'; exported as I1A, used as integration name
+_emoji	emojiOnlyPattern	'^(\p{Extended_Pictographic}|\p{Emoji_Component})+$'; exported as Iir
+regexes	regexCache	var = {}; exported as L3A

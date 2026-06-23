@@ -1,0 +1,291 @@
+$6r	installQuitSessionGuard	exported alias installQuitSessionGuard in export map
+$He	errnoRetrySet	Set of retryable fs/network errno codes (ENOSPC, EACCES, ETIMEDOUT...)
+$XA	authQueryParamEnum	enum {cmdK, googleAuthCode} of auth query-param keys
+$d	cuTeachMainWindow	BrowserWindow ref used by teach-mode controller W7r
+$jr	fetchMentionOptions	async builds mention options from project files + windows
+$p	updaterRemoteConfig	qJi() updater config carrying tickMs/updateApiBase
+A5r	xmlbuilderVariant5bExport	re-export of vendor xmlbuilder-5-2 module.exports
+AZr	resolveGitBashPathEnv	builds PATH including git-bash dir, cached in AtA
+Abt	openReadonlyNoFollowFlag	bitmask O_RDONLY | O_NOFOLLOW for safe file open
+AtA	cachedGitBashPathEnv	cached PATH string from AZr resolveGitBashPathEnv
+BW	fileIndexByRelativePath	Map relativePath -> file entry for project file index
+BWr	officeFileTypeSet	Set {excel, powerpoint, word}
+BXr	extraUsageSchema	zod schema is_enabled/monthly_limit/used_credits/utilization
+Ba	cuGlowOverlayWindow	BrowserWindow for the computer-use glow overlay
+Bs	notificationManager	new i3r() notification permission/show manager
+C5r	configProfileManifestPayloadFields	mobileconfig PayloadDescription/PayloadType field defs
+C7A	accountMarketplaceOps	bundle of account-marketplace create/delete/sync ops
+CWr	connectionStatusSet	Set {connected, working, editing, disconnected}
+CXr	promotionalCampaignSet	Set {omelette_promotional}
+CbA	concurrencyLimiter8	Fh limiter with concurrency 8
+Cvt	setUseSshFileSource	toggles uP ssh flag, resets file index cache
+D5r	asyncMutex	new dh() async-mutex instance
+D9r	xmlbuilderVariant2Export	re-export of vendor xmlbuilder-2 module.exports
+DHe	weakMap1	WeakMap (no in-file reads; declaration only)
+E6r	globalShortcutConfigSchema	zod schema {globalShortcut optional}
+E7A	ccdMarketplacePluginManager	new Pbt(qbt) CCD marketplace plugin manager
+E9r	updaterModuleExports	frozen module namespace of updater functions
+EHe	fileIndexBuiltAtMs	timestamp of last file-index rebuild
+ELt	iconvExtendedNodeEncodings	fc(s5r) iconv-lite extended node encodings
+EWr	deploymentModeModuleExports	frozen namespace deployment-mode functions
+EbA	map1	Map (declaration only, no in-file reads)
+F9r	xmlbuilderVariant4bExport	re-export of vendor xmlbuilder-4-2 module.exports
+FJe	cuTeachIpcHandlersRegistered	flag: teach-mode ipcMain handlers registered
+FnA	planUsageOrgId	org id the cached plan-usage belongs to
+Fp	projectFileIndex	D1r fuzzy file index instance
+Fs	claudeSwiftNotificationModule	lazily imported @ant/claude-swift default
+Fvt	buddyRemoteSessionManager	new bWr() remote buddy session manager
+Fzr	previewableFileExtensionSet	Set of file extensions supported by native preview
+G9r	xmlbuilderVariant2bExport	re-export of vendor xmlbuilder-2-2 module.exports
+Gk	pendingFilePreviewTarget	in-flight {sessionId, sourcePath} preview request
+GlA	stopPlanUsagePolling	clears plan-usage interval and resets state
+H9r	xmlbuilderVariant9Export	re-export of vendor xmlbuilder-9 module.exports
+Hbt	marketplacePluginManagerConfig	config for MarketplacePluginManagerCLI
+I3r	showChromeExtensionReauthDialog	dialog prompting re-sign-in to Claude in Chrome
+I6r	acceleratorKeyTokenSet	Set of valid Electron accelerator key tokens
+IHe	windowMentionsFetchedAtMs	timestamp of last window-mentions fetch
+Ik	map2	Map (declaration only, no in-file reads)
+Ivt	filePreviewLruCache	clA LRU cache size 500 for file mention entries
+J2A	filePreviewLoadGeneration	monotonic counter for preview loadURL races
+J9r	xmlbuilderXmldomNodeListExport	re-export of vendor xmlbuilder-xmldom-nodelist
+JXr	startEventLoopStallMonitor	installs interval monitoring main-process stalls
+Jbt	marketplacePluginManager	new Pbt(Hbt) marketplace plugin manager
+Jy	cachedProjectFileList	cached list of project file entries
+Jzr	filePreviewModuleExports	frozen namespace file-preview functions
+K2A	disposeFilePreviewSession	clears storage data and removes preview temp dir
+KXr	handlePendingOpensOnAppReady	processes queued open-file/protocol handlers
+Kbt	marketplacePluginSyncManager	new Ybt(...) marketplace sync manager
+L9r	xmlbuilderVariant3Export	re-export of vendor xmlbuilder-3 module.exports
+LXr	detectedProjectsModuleExports	frozen namespace detected-projects functions
+LZ	getDesktopDevConfig	returns cached desktop-dev config, refreshes if forced
+LlA	refreshPlanUsage	fetches org plan-usage and stores in hb
+Lvt	connectionStateEnum	enum {Ready, Connected, Disconnected}
+M7r	showCuGlowOverlay	shows the computer-use glow overlay window
+M9r	xmlbuilderVariant8Export	re-export of vendor xmlbuilder-8 module.exports
+MWr	gifTextKindSet	Set {gif, text}
+MbA	eventLoopLastTickMs	performance.now of last stall-monitor tick
+Mbt	previewBaseDirSetter	holds current preview base-dir setter callback
+N$	planUsageRefreshPending	flag: a plan-usage refresh was requested while busy
+N7r	hideCuGlowOverlay	hides the computer-use glow overlay after delay
+N9r	xmlbuilderXmldomElementExport	re-export of vendor xmlbuilder-xmldom-element
+NHe	plusSignWidthMetric	Gr-conditional metric (a6r vs g6r) for accelerator UI
+NT	configReloadDebounceTimer	setTimeout handle debouncing config reload
+NXr	concurrencyLimiter50	Fh limiter with concurrency 50
+Nbt	officeDocExtensionSet	Set {.docx, .doc, .pptx, .ppt}
+O7A	setupWindowModuleExports	frozen namespace setup-window functions
+O9r	xmlbuilderVariant13Export	re-export of vendor xmlbuilder-13 module.exports
+OB	filePreviewParentWindow	parent BrowserWindow hosting file-preview child view
+Ojr	setFocusedCwd	sets focused-cwd file source, resets index cache
+OlA	cuSidePanelSavedBounds	saved window bounds while docked in cu side panel
+OnA	pendingAppReadyHandlers	queue of handlers deferred until app ready
+P2A	quitDialogShowing	flag: quit-session-guard dialog currently shown
+P3r	devToolsConfigSchema	zod schema {allowDevTools, useMacMenuBarHelper}
+P7A	planUsageEnabledPredicate	predicate gating plan-usage feature
+P7r	showCuTeachOverlay	shows the computer-use teach-mode overlay window
+P9r	xmlbuilderTextNodeExport	re-export of vendor xmlbuilder-text-node
+PnA	restoreMainWindowAfterTeach	re-shows main window hidden during teach mode
+Q7A	registerWebContentsDispatchers	wires all IPC dispatcher implementations for a webContents
+QHe	fetchAccountUuidForChromeMcp	fetches account uuid via oauth profile API
+Qs	cuTeachOverlayWindow	BrowserWindow for computer-use teach overlay
+Qv	indexedFileSourceCwd	cwd the current file index was built for
+Qzr	intentWarmer	new dzr() intent warmer instance
+R$	cancelDeferredRestartListener	teardown for deferred-restart event listeners
+R3r	watchChromeExtensionDirs	fs.watch on Chrome extension dirs to reload MCP
+R7r	ensureCuGlowOverlayWindow	creates the cu glow overlay BrowserWindow if absent
+R9r	xmlbuilderVariant6Export	re-export of vendor xmlbuilder-6 module.exports
+RHe	weakMap2	WeakMap (declaration only, no in-file reads)
+RZr	accountMarketplaceUploadOps	bundle ensureAccountUploadsMarketplace/uploadAccountPlugin
+RbA	eventLoopStallTimer	setInterval handle for stall monitor
+RlA	allowQuitOverride	flag bypassing quit-session guard for one quit
+S6r	coworkDiagnosticsModuleExports	frozen namespace cowork-diagnostics functions
+SHe	weakMap3	WeakMap (declaration only, no in-file reads)
+SJe	weakMap4	WeakMap (declaration only, no in-file reads)
+SXr	claudeHostSet	Set of claude.ai/claude.com host names
+Sbt	noFollowOpenFlag	fs O_NOFOLLOW constant (0 fallback)
+T4e	fsConstantsRdonlyHolder	temp holder for zA.constants in Abt flag
+T9r	xmlbuilderVariant10Export	re-export of vendor xmlbuilder-10 module.exports
+TG	detectedProjectsInflightPromise	in-flight getDetectedProjects promise
+TbA	pendingOpenFileBatch	batched open-file paths awaiting flush
+U2A	echoLogFilenameSet	Set {echo.log, echo1.log}
+U9r	xmlbuilderVariant5Export	re-export of vendor xmlbuilder-5 module.exports
+UJe	setCuTeachDisplayId	sets teach-overlay display, repositions overlay
+W2A	resetPlanUsageState	clears plan-usage org id and resets store
+W6r	localSessionGuardModuleExports	frozen namespace local-session quit-guard functions
+W7r	initCuTeachController	wires teach-mode manager listeners and ipc handlers
+W9r	xmlbuilderVariant18Export	re-export of vendor xmlbuilder-18 module.exports
+X3r	hostCliModuleExports	frozen namespace host-cli helper functions
+X8	filePreviewChildViewSetter	holds preview child-view setter callback
+X9r	xmlbuilderVariant6bExport	re-export of vendor xmlbuilder-6-2 module.exports
+Xk	pendingCuTeachStep	queued teach step awaiting overlay readiness
+XrA	captureKindEnum	enum {Gif, Text}
+XvA	chromeReauthDialogInProgress	flag guarding concurrent reauth dialogs
+Y2A	setPreviewBaseDir	invokes the preview base-dir setter Mbt
+Y7r	enqueueCuTeachStep	shows or queues a teach step on the overlay
+Y9r	xmlbuilderVariant7Export	re-export of vendor xmlbuilder-7 module.exports
+Z9r	xmlbuilderVariant3bExport	re-export of vendor xmlbuilder-3-2 module.exports
+ZS	filePreviewSizeHint	preview view size hint passed to klA
+Zbt	updateInstallDidFail	flag: previous update install did not apply
+Zh	updaterEventEmitter	new e3r() updater-related emitter
+Zzr	hooksConfigSchema	zod schema {hooks} wrapping hook-matcher map
+_3r	scheduleConfigReload	debounced reload of extension config
+_9r	xmlbuilderNodeTypeExport	re-export of vendor xmlbuilder-node-type
+_He	weakMap5	WeakMap (declaration only, no in-file reads)
+_Je	weakMap6	WeakMap (declaration only, no in-file reads)
+_bA	planUsageRefreshInFlight	flag: a plan-usage refresh is running
+_vt	weakSet1	WeakSet (declaration only, no in-file reads)
+a9r	AutoUpdaterStateTracker	class wrapping autoUpdater state events
+aQA	ensureFileIndexBuilt	ensures file index build promise is started
+aV	unusedBinding1	declared, no reads; exported as aV
+abA	map3	Map (declaration only, no in-file reads)
+atA	cuGlowOverlayHtmlPath	temp html file path for glow overlay
+b7r	registerCuNotifications	wires cu lock/permission notification listeners
+bS	localFileModuleExports	frozen namespace local-file impl functions
+bWr	BuddyRemoteSessionManager	EventEmitter subclass managing remote buddy sessions
+bZ	skipDirectoryNameSet	Set of dir names skipped during file indexing
+bjr	localSessionManagerTestExports	{isKnownModelId, INTERRUPT_TIMEOUT_MS} test bag
+c6r	plusSignSeparator	Gr-conditional '' vs '+' accelerator separator
+cF	planUsageRefreshGeneration	counter invalidating stale plan-usage fetches
+cO	cuGlowHideTimer	setTimeout handle for hiding glow overlay
+cbA	map4	Map (declaration only, no in-file reads)
+cg	filePreviewChildView	current file-preview WebContentsView
+cp	quickActionKindEnum	enum QUICK_ENTRY/DICTATION/PLUSH_RACCOON_*
+dbt	weakSet2	WeakSet (declaration only, no in-file reads)
+eAn	dockCuSidePanel	docks main window into computer-use side panel
+eJA	cuGlowShowGeneration	monotonic counter for glow show races
+eLt	updateApiBaseUrl	updater API base, default https://api.anthropic.com
+ej	checkForUpdatesOnce	dedups concurrent update checks via hbA
+enA	hostCliSemaphoreCount	current count of host-cli concurrency semaphore
+f2e	weakMap7	WeakMap (declaration only, no in-file reads)
+fHe	stringSet1	Set (declaration only, no in-file reads)
+fJe	configHandlerModuleExports	frozen namespace config/IPC handler functions
+fW	map5	Map (declaration only, no in-file reads)
+fWr	uint8ArrayTypeGuard	w1A type guard for Uint8Array
+gQA	getChromeBridgeTransport	lazily selects + caches chrome bridge transport
+gtA	cuTeachOverlayHtmlPath	temp html file path for teach overlay
+h2e	planUsageHourTickMs	tick interval (config tickMs ?? 1 hour)
+h9r	xmlbuilderVariant4Export	re-export of vendor xmlbuilder-4 module.exports
+hXr	setPlanUsageEnabledPredicate	sets the plan-usage enabled predicate P7A
+hb	planUsageStore	bAt store named plan-usage holding usage data
+hbA	checkForUpdatesPromise	in-flight update-check promise
+hbt	findInPageClaimed	flag: find-in-page bar is claimed
+hv	planUsagePollInterval	setInterval handle for plan-usage polling
+iE	cuTeachManager	teach-mode session manager reference
+ibA	cachedDesktopDevConfig	cached desktop-dev.json config
+ij	cuSidePanelDockGeneration	counter for side-panel dock races
+izr	releaseHostCliSemaphore	releases a host-cli concurrency slot
+j6r	showQuitWhileWorkingDialog	dialog warning Claude is still working on quit
+j7r	handleCuTeachExitPressed	handles teach-overlay exit button
+j9r	xmlbuilderVariant16Export	re-export of vendor xmlbuilder-16 module.exports
+k$	detectedProjectsCache	cached detected-projects result
+k9r	xmlbuilderCdataSectionExport	re-export of vendor xmlbuilder-cdatasection
+kG	signInAbortController	AbortController for in-flight anthropic-api sign-in
+kHe	quickEntryAcceleratorDefault	Gr-conditional default global shortcut
+kT	activeFilePreviewSession	current active preview session record
+kbt	filePreviewLoadedGeneration	generation of the last successfully loaded preview
+kvt	thirdPartyNotAvailableErrorJson	JSON error custom_3p_not_available
+l5r	emptyStringSet	empty Set (declaration only)
+lHe	cachedWindowMentions	cached list of window mention options
+lO	cuTeachHideTimer	setTimeout handle for hiding teach overlay
+lbA	map6	Map (declaration only, no in-file reads)
+lvt	windowMentionLruCache	clA LRU cache size 100 for window mention entries
+m2e	weakSet3	WeakSet tracking webContents with dispatchers registered
+m7r	registerMainViewLoadHandlers	wires did-fail-load/render-gone reload handlers
+m9r	xmlbuilderVariant12Export	re-export of vendor xmlbuilder-12 module.exports
+mGt	cuTeachOverlayDisplayId	display id the teach overlay targets
+mf	headersStatusOkResponse	{status:200, headers} response template
+mlA	focusedCwdFileSource	focused cwd used as file-index source
+nGt	startPlanUsagePolling	starts the plan-usage polling interval
+ntA	updateNewerVersionCheckInFlight	flag: newer-version peek in progress
+o9r	processUpdateAttemptMarker	reads/clears update-attempt marker on launch
+oGt	refreshPlanUsageNow	bumps generation and refreshes plan-usage
+otA	updateStagedVersionConfirmed	flag: staged update version is still current
+p9r	iconvLiteExport	re-export of vendor iconv-lite module.exports
+pGt	cuGlowOverlayBounds	bounds override for glow overlay window
+pU	fileIndexBuildPromise	current ensureFileIndexBuilt promise
+pbA	dispatcherWebContentsSet	Set of webContents with auth dispatchers
+pbt	setFindInPageClaimed	sets the findInPageClaimed flag
+pu	updatePendingHours	hours an update has been pending install
+q5r	sentryIngestTunnelMap	maps *.ingest.us.sentry.io ingest host
+q9r	xmlbuilderNodeTypeAltExport	re-export of vendor xmlbuilder-nodetype
+qHe	hostCliQueueCapacity	Rbt*4 host-cli queue capacity
+qXr	registerOpenFileHandlers	wires open-file/argv file-handling on startup
+qbt	ccdMarketplacePluginManagerConfig	config for CCDMarketplacePluginManagerCLI
+r7A	useMacMenuBarHelper	returns whether mac menu-bar helper is enabled
+r9r	planUsageTenMinuteTickMs	tick interval (config tickMs ?? 10 minutes)
+rXr	mcpServerConfigSchema	zod schema with transport http/sse, oauth/headers rule
+rZr	abortFetchErrorNameSet	Set {AbortError, FetchError}
+rtA	lastReplacementTargetVersion	last version targeted by staged-update replacement
+s5r	iconvExtendedNodeFactory	o5r() iconv-lite extend-node factory result
+s6r	acceleratorBaseMetric	Gr-conditional 0 vs 36 accelerator UI metric
+sGt	weakSet4	WeakSet (declaration only, no in-file reads)
+sV	cuLockHolderSessionId	session id currently holding the cu lock
+sXr	policyExportFormatMap	build defs for mobileconfig/reg/admx/profileManifest
+sbA	macMenuBarHelperInstalled	cached existence of mac menu-bar helper binary
+sp	unusedSetter1	holds a setter callback (z6r); no in-file reads
+sw	localSessionManagerModuleExports	frozen namespace LocalSessionManager exports
+t3r	loadClaudeSwiftForNotifications	lazily imports @ant/claude-swift on darwin
+t5r	xmlbuilderVariant14Export	re-export of vendor xmlbuilder-14 module.exports
+tE	setupWindow	third-party-inference setup BrowserWindow ref
+tJA	cuTeachShowGeneration	monotonic counter for teach-overlay show races
+tV	cachedChromeMcpProfile	cached {uuid, token} from chrome-mcp profile fetch
+tzr	acquireHostCliSemaphore	awaits a host-cli concurrency slot
+u0	chromeBridgeTransport	cached chrome bridge transport instance
+u2e	hourInRangeSchema	zod int 0..23 nullable (hour-of-day)
+uP	useSshFileSource	flag selecting ssh as file-index source
+uW	indexedFileSourceIsSsh	whether current file index source is ssh
+uXr	usageWindowSchema	zod schema {resets_at, utilization}
+uk	activeAuthRequest	in-flight ASWebAuth AuthRequest instance
+uvt	invalidateFileIndexBuildPromise	clears the cached file-index build promise
+v4e	fsConstantsNofollowHolder	temp holder for zA.constants in Abt flag
+v9r	xmlbuilderVariant15Export	re-export of vendor xmlbuilder-15 module.exports
+vG	mainViewIntentionalKillCount	count of intentional renderer kills to ignore
+vbA	openFileBatchFlushTimer	setTimeout handle flushing batched open-files
+wGt	setCuGlowOverlayBounds	sets glow overlay bounds override and repositions
+wU	unusedBool1	boolean flag; no in-file reads; exported as wU
+wW	mainWindowHiddenForTeach	flag: main window hidden during teach mode
+wWr	connectionStateValueSet	Set {ready, connected, disconnected}
+x0	filePreviewChildViewAttached	flag: preview child view added to parent
+x3r	allowedNavigationHostSet	Set of claude hosts allowed for navigation
+x7r	ensureCuTeachOverlayWindow	creates the cu teach overlay BrowserWindow if absent
+x9r	xmlbuilderVariant2cExport	re-export of vendor xmlbuilder-2-3 module.exports
+xjr	rebuildProjectFileIndex	rebuilds the project file list and fuzzy index
+xnA	hideCuTeachOverlay	hides the cu teach overlay after delay
+xvt	apiReachabilityState	{reachability, willTryRecover} api reachability
+y2e	authListenersInstalled	flag: interactive-auth listeners installed
+y6r	slackArchiveUrl	`${Ebt}/archives/...` slack archive link
+yJe	lastResumeFromSleepMs	performance.now of last power resume event
+yU	cuTeachActiveSessionId	session id currently in teach mode
+yZr	orgMarketplacePluginSyncManager	new Ybt(...) org marketplace sync manager
+z6r	setUnusedSetter1	sets the sp setter callback
+z9r	xmlbuilderWriterExport	re-export of vendor xmlbuilder/writer module.exports
+zS	map7	Map (declaration only, no in-file reads)
+zrA	chromeUserDataDir	~/Library/Application Support/Google/Chrome path
+zzr	hookMatcherConfigSchema	zod schema {matcher, hooks}
+$9r	xmlbuilderVariant11Export	re-export of vendor xmlbuilder-11 module.exports
+b9r	xmlbuilderVariant17Export	re-export of vendor xmlbuilder-17 module.exports
+ALt	enableUpdates	exported alias enableUpdates in export map
+CGt	updateCache	exported alias updateCache; refreshes detected-projects cache
+Cy	hideFilePreview	exported alias hideFilePreview in export map
+D6r	localFileTestExports	exported as _test; {stopVMIfRunning, copyCoworkServiceLogs}
+EXr	createSetupWindow	exported alias createSetupWindow in export map
+NbA	totalEventLoopStalls	exported as total_stalls; count of event-loop stalls
+Tbt	initFilePreview	exported alias initFilePreview in export map
+Wr	claudeCodeSessionManager	exported alias claudeCodeSessionManager in export map
+YLt	signInWithAnthropicApiHandler	exported alias signInWithAnthropicApiHandler
+a7A	scheduleRestartWhenIdle	exported alias scheduleRestartWhenIdle in export map
+bXr	getDetectedProjects	exported alias getDetectedProjects in export map
+bbt	parkFilePreviewAndCapture	exported alias parkFilePreviewAndCapture in export map
+dP	cancelPendingRestart	exported alias cancelPendingRestart in export map
+kbA	cumulativeStallMs	exported as cumulative_stall_ms; summed stall duration
+plA	LocalSessionManager	exported alias LocalSessionManager in export map
+rGt	planUsageSchema	exported as schema; zod plan-usage response schema
+vbt	showFilePreview	exported alias showFilePreview in export map
+xs	autoUpdaterStateTracker	exported alias autoUpdaterStateTracker in export map
+set	errnoRetrySet	Set of retryable fs/network errno codes (exported as $He)
+_test	localSessionManagerTestExports	{isKnownModelId, INTERRUPT_TIMEOUT_MS} test bag (alias bjr)
+assignment	spaceAssignmentSchema	zod schema for session space assignment
+cumulative_stall_ms	cumulativeStallMs	summed event-loop stall duration in ms
+schema	planUsageSchema	zod plan-usage response schema (exported as rGt)
+signInWithAnthropicApiHandler	signInWithAnthropicApiHandler	already-semantic; starts anthropic-api console grant
+total_stalls	totalEventLoopStalls	count of recorded event-loop stalls
+updateCache	updateCache	already-semantic; refreshes detected-projects cache

@@ -1,0 +1,5 @@
+# large local DB copies (regenerate from the source project.sqlite)
+*.sqlite
+__pycache__/
+# regenerable answer-key (produced by extract_gold.py from the gold DB)
+gold/

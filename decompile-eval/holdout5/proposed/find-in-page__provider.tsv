@@ -1,0 +1,323 @@
+TimePrecision	TimePrecision	already-semantic enum of temporal precision digit counts (Minute/Second/Millisecond/Microsecond)
+browserEmail	browserEmailPattern	already-semantic; regex literal validating an email address
+extendedDuration	extendedDurationPattern	already-semantic; ISO-8601 duration regex literal
+k1A	findInPageProviderDispatcher	IPC getDispatcher/setImplementation object over channels named ..._FindInPageProvider_$_...
+k1t	mcpToolResultLabel	string literal 'mcp.tool.result'
+name	graphqlIntegrationName	string literal 'Graphql' used as Sentry integration name field
+k4t	responseStreamEventNames	array of literal 'response.output_item.*'/'response.function_call_arguments.*' event names
+k8t	otelSdkSpanStartedLabel	string literal 'otel.sdk.span.started'
+kCi	threeDigitPattern	regex source literal '\\d{3}'
+kDi	sentryIoWildcardHost	string literal '*.sentry.io'
+kEr	fiveThousandMs	numeric literal 5000 ms
+kI	sseTransportTag	string literal '[transport:sse]'
+kJe	fourEighty	numeric literal 480
+kPe	sixteen	numeric literal 16
+kSi	blackHexColor	string literal '#000000'
+kUe	claudeCodeOauthTokenEnvVar	string literal env var name 'CLAUDE_CODE_OAUTH_TOKEN'
+kUt	netFetch	arrow wrapping sA.net.fetch(A,e)
+kWi	terminalAndEditorAppNames	array of terminal/editor app names (terminal, iterm, vscode, ...)
+kZA	filePathFieldNames	array literal ['file_path','path']
+kct	oauthTokenPath	string literal '/v1/oauth/token'
+kdA	emptyRecord	empty object literal {}
+kft	fiveMinuteMs	numeric literal 300*1000 ms
+kgt	finderBundleId	string literal 'com.apple.finder'
+kin	artIllustrationGuide	long markdown string '## Art and illustration ...'
+klr	remoteSettingsFileName	string literal 'remote-settings.json'
+kme	threeHundred	numeric literal 300
+kpr	sendMessageToolSchema	JSON-schema object with session_id/message properties for delivering a message
+kqA	custom3pHelperRunDispatcher	IPC dispatcher over channels named ..._Custom3pHelperRun_$_...
+krn	eight	numeric literal 8
+ktA	mcpRequestArgumentLabel	string literal 'mcp.request.argument'
+kti	fiveThousandMsB	numeric literal 5000 ms
+l0r	sixtyFour	numeric literal 64
+l1r	fiveMinuteMsB	numeric literal 300*1000 ms
+l2A	defaultUserPreferences	object {numStartups:0, theme:'dark', verbose:false}
+l2i	thirtyThousandMs	numeric literal 30000 ms
+l4t	aiSchemaLabel	string literal 'ai.schema'
+l5i	five	numeric literal 5
+l7i	float64ArrayTag	string literal '[object Float64Array]'
+l8e	genAiRequestTopKLabel	string literal 'gen_ai.request.top_k'
+lFt	eightyEight	numeric literal 88
+lHi	halfMebibyte	numeric literal 512*1024 bytes
+lIr	fnv32OffsetBasis	numeric literal 4277009103 (FNV-style 32-bit constant)
+lJr	fortyFiveThousandMs	numeric literal 45000 ms
+lMi	windowsDriveLetterPattern	regex /^[A-Za-z]:/
+lOr	isFunctionOrNullOrFalse	predicate: je.isFunction(A) || A===null || A===false
+lPe	sdkTransportTag	string literal '[transport:sdk]'
+lQi	ipv6AddressPattern	large IPv6 address regex literal
+lQr	setupCoworkGuide	long markdown string '# Setup Cowork ...'
+lRi	inferenceBaseUrlSettingKeys	array of inference*BaseUrl/organizationPluginsUrl setting keys
+lUi	twoMinuteMs	numeric literal 120000 ms
+lW	fiftyCount	numeric literal 50 used as a max-file-count limit
+lWi	windowsTerminalPackagePrefixes	array of 'Microsoft.WindowsTerminal_' etc package id prefixes
+l_i	oauthCallbackLocalUrl	string literal 'http://127.0.0.1:3000/oauth/code/callback'
+l_r	listSpacesToolDescription	tool description string for listing user's spaces/Projects
+lae	thirtyCount	numeric literal 30 (compared as a day-age threshold)
+lat	typeofToZodTypeName	map {number:'number', bigint:'bigint', object:'date'}
+lfA	zero	numeric literal 0
+lfr	fiftyCountB	numeric literal 50
+lft	sixtyThousandMs	numeric literal 60000 ms
+lgi	claudeCodeDispatcher	IPC dispatcher over channels named ..._ClaudeCode_$_...
+lgr	xdgAppPaths	builds data/config/cache/log/temp paths from XDG_* env for an app name
+lmr	assertPositiveInteger	validates argument is a non-negative integer, throws fn otherwise
+lnn	thirtyMinuteMs	numeric literal 1800*1000 ms
+lot	addTarEntries	async helper appending entries (with @list-file expansion) to a tar pack
+lti	isoTimestampPattern	regex matching ISO date-time with optional fractional Z
+lur	sixtyThousandMsB	numeric literal 60000 ms
+m1r	one	numeric literal 1
+m1t	mcpServerTitleLabel	string literal 'mcp.server.title'
+m2A	thirtyMebibytes	numeric literal 30*1024*1024 bytes
+m3t	modulesIntegrationFactory	Sentry integration factory merging getModules() into event.modules
+m4i	applyStringSchemaConstraints	maps zod string bag (minLength/maxLength/format/pattern) into JSON schema
+m4t	aiToolCallResultLabel	string literal 'ai.toolCall.result'
+m8t	oneTwentyEight	numeric literal 128
+mFr	two	numeric literal 2
+mG	getOwnProp	returns A[e] when A has own prop e, else undefined
+mHe	tokenCleanupTasks	array of async functions clearing/revoking various auth tokens
+mIi	dataRefFieldNames	array literal ['$data']
+mJe	twoHundred	numeric literal 200
+mKA	genAiRequestStreamLabel	string literal 'gen_ai.request.stream'
+mKt	extraErrorDataIntegrationFactory	Sentry integration factory named 'ExtraErrorData'
+mMA	tenThousand	numeric literal 10000
+mPt	semverRangePattern	semver range/comparator regex with named groups
+mQr	pluginManifestFileName	string literal 'plugin.json'
+mUe	oneMillion	numeric literal 1000000
+mZA	gridjsThemeAssets	array of CDN url/SRI/hint entries for Grid.js theme css
+mZe	browserNavigationDispatcher	IPC dispatcher over channels named ..._BrowserNavigation_$_...
+mZr	claudePluginsOfficialRepo	string literal 'anthropics/claude-plugins-official'
+mZt	escapeRegExpChars	replaces regex-special chars with escaped form
+mbt	emptyArray	empty array literal
+mfr	computerUseBusyMessage	user-facing message about another Claude session using the computer
+mft	haloDetachLabel	string literal 'halo_detach'
+mgA	toolPermissionValidationConfig	object grouping file/bash tools and WebSearch/WebFetch permission validators
+mgi	nestDevDispatcher	IPC dispatcher over channels named ..._NestDev_$_...
+mgt	hintsKey	string literal 'hints'
+mht	envVarsKey	string literal 'envVars'
+mii	thirtyTwoKibibytes	numeric literal 1024*32 bytes
+mpt	assertFileGlobalDefined	throws if global File is not defined (Node upload requirement)
+mqr	twoHundredB	numeric literal 200
+mst	notFoundErrorPrefix	string literal '404 Not Found:'
+mur	modelEffortLevelConfig	map of claude model id to effort levels/modes
+n4A	profileKindNames	array ['static','helper-script','interactive','vendor-profile']
+n5i	jsonBodyEncoder	encodes {body} as JSON with application/json content-type
+n6	claudeVmDispatcher	IPC dispatcher over channels named ..._ClaudeVM_$_...
+n6r	fiftyThousandMs	numeric literal 50000 ms
+n6t	processRuntimeNameLabel	string literal 'process.runtime.name'
+n7	thirtyMinuteMsB	numeric literal 1800*1000 ms
+n7i	setTag	string literal '[object Set]'
+n7r	failureSuffixPattern	regex /(_failed|_error|_crash|_timeout)$/
+n8t	undefinedTag	string literal '[object Undefined]'
+nDe	thirtyCountB	numeric literal 30
+nDi	ipv6CidrPattern	IPv6 regex with trailing /prefix-length
+nEr	fiveMinuteMsC	numeric literal 300*1000 ms
+nFi	googleOauthScopes	array of OAuth scopes (openid, email, cloud-platform)
+nJi	cloudStorageProviderNames	array of cloud-drive provider names (OneDrive, Dropbox, ...)
+nKt	defaultRequestDataCaptureFlags	object of cookies/data/headers/query_string/url booleans
+nOr	chunkBufferBySize	generator yielding byteLength-bounded slices of a buffer
+nQi	jwtShapePattern	regex matching three dot-separated base64url segments
+nQr	threeB	numeric literal 3
+nSi	warnInDev	console.warn unless NODE_ENV production
+nTt	eightB	numeric literal 8
+nYi	hasFileProp	predicate returning !!A.file
+nZr	marketplaceErrorPatternCodes	array of [regex, errorCode] for marketplace failures
+nae	sentryElectronRendererIdKey	string literal 'sentry-electron-renderer-id'
+ncA	four	numeric literal 4
+ndt	computerUseLabel	string literal 'computer-use'
+nfA	anonymousLabel	string literal '<anonymous>'
+nfe	coworkColdStartPrefix	string literal 'cowork:cold-start:'
+nlr	sixteenB	numeric literal 16
+nme	eightKibibytes	numeric literal 8*1024 bytes
+npr	oneThousand	numeric literal 1000
+nte	captureCallPattern	regex /captureMessage|captureException/
+ntr	stagingBeaconHosts	array of staging/fedstart claude beacon hosts
+nwe	formatIntlMessage	formatjs/intl message formatting routine
+nxe	progressTrackingStream	wraps a stream in a ReadableStream reporting progress bytes
+nxr	thirtyThousandMsB	numeric literal 30000 ms
+o$A	assertPrivateFieldAccess	throws 'Cannot <op>' when private field map lacks key
+o0	custom3pOauthCancelledReason	string literal 'custom3p-oauth-cancelled-by-newer'
+o1t	featureFlagsIntegrationFactory	Sentry integration factory named 'FeatureFlags'
+o2A	getDeviceInfoLabel	string literal 'get_device_info'
+o4A	profileKindNamesReversed	array ['interactive','vendor-profile','helper-script','static']
+o7e	unicodeWhitespacePattern	regex of unicode whitespace code points
+o7i	stringTag	string literal '[object String]'
+o7r	claudeDesktopEventsLabel	string literal 'claude-desktop.events'
+oAr	propertyPathPattern	lodash-style property-path tokenizer regex
+oDe	thirtyCountC	numeric literal 30
+oDi	base64Pattern	standard base64 regex
+oFi	tenThousandB	numeric literal 10000
+oFr	isTokenChars	tests trimmed string against HTTP token-char regex
+oI	outboundCcrTag	string literal '[outbound-ccr]'
+oKi	claudeInChromeLabel	string literal 'Claude_in_Chrome'
+oKt	requestDataIntegrationName	string literal 'RequestData'
+oOr	chunkAsyncIterableBySize	async generator chunking an async source by size
+oPe	heartbeatMessageJson	string literal '{"type":"hb"}'
+oQ	builtinBundleProbeOutcomes	map of bundle/tenant/client-id probe outcome labels
+oQi	durationPattern	ISO-8601 duration regex
+oQt	jsonContentTypeHeader	object {'Content-Type':'application/json'}
+oTt	eightC	numeric literal 8
+oUe	fiveB	numeric literal 5
+oVt	anthropicSdkMethodNames	array of SDK method names (messages.create, ...)
+o_r	listCodeWorkspacesDescription	tool description string for listing host workspace paths
+oar	zodDateToJsonSchema	maps a zod date to integer/unix-time JSON schema with min/max
+oc	isBootstrapEnabled	predicate: has bootstrapUrl && bootstrapEnabled!==false
+odt	screenshotPlatformConfig	object {screenshotFiltering:'native', platform:'darwin'}
+ogi	windowControlDispatcher	IPC dispatcher over channels named ..._WindowControl_$_...
+onn	fiveMinuteMsD	numeric literal 300*1000 ms
+oot	normalizeFileMode	bit-twiddles a unix file mode (masks 4095, applies umask-like bits)
+ovA	nullRef	null initializer
+ow	cliPluginBridgeTag	string literal '[cliPluginBridge]'
+p$	sessionPhaseNames	array of session lifecycle phases (entry, preflight, ...)
+p$t	commaOrEqualsPattern	regex /,|=/
+p1r	fourB	numeric literal 4
+p1t	mcpTransportLabel	string literal 'mcp.transport'
+p3t	modulesIntegrationName	string literal 'Modules'
+p4i	buildEventPipeline	builds processor pipeline (wat/Vl/mat/yat) for given input
+p4t	aiUsagePromptTokensLabel	string literal 'ai.usage.promptTokens'
+p6t	printableAsciiPattern	regex of printable ASCII range
+p7t	hapiIntegrationFactory	Sentry integration factory named 'Hapi'
+p8t	exceptionLabel	string literal 'exception'
+p9t	graphqlIntegrationFactory	Sentry integration factory named (Graphql)
+pEr	forwardedEnvVarNames	array of env var names forwarded (PATH, ANTHROPIC_API_KEY, ...)
+pGA	baggageLabel	string literal 'baggage'
+pGi	fiveThousandMsC	numeric literal 5000 ms
+pHe	cspDirectiveDefaults	object of default CSP directive source lists
+pIi	dataRefMetaSchemaTitle	string literal meta-schema description for $data reference
+pJr	buildFilePathPatterns	array of regexes matching makefile/justfile/.github paths
+pKr	sixHundredThousandMs	numeric literal 600000 ms
+pQA	rateLimitWindowNames	array of rate-limit window keys (five_hour, seven_day, ...)
+pQr	skillsPluginName	string literal 'skills-plugin'
+pRe	threeC	numeric literal 3
+pSA	allowedSurfacesMessage	intl message {defaultMessage:'Allowed surfaces', id}
+pUr	forEachMapEntry	iterates an iterable's entries invoking callback with key/value
+pVr	sixtyFourKibibytes	numeric literal 64*1024 bytes
+pZe	toastDispatcher	IPC dispatcher over channels named ..._Toast_$_...
+pdi	languageTagPattern	regex matching BCP-47-like language subtags
+vIA	googleGenAiIntegrationName	string literal 'Google_GenAI'
+pei	googleGenAiIntegrationFactory	Sentry integration factory named 'Google_GenAI'
+pft	windowHaloName	string literal 'Window Halo'
+pgA	zodTypeToJsonTypeName	map {ZodString:'string', ZodNumber:'number', ...}
+pgi	grandPrixDispatcher	IPC dispatcher over channels named ..._GrandPrix_$_...
+poA	emptyRecordB	empty object literal {}
+ppr	grantPathToolSchema	JSON-schema object with optional path property
+pq	tryCatchTuple	runs fn, returns [error,null] or [null,result]
+pqr	sixtyThousandMsC	numeric literal 60000 ms
+ptn	claudeForDesktopBundleId	string literal 'com.anthropic.claudefordesktop'
+pye	zodUnionToJsonSchema	maps a zod union's options to JSON-schema anyOf
+q0i	oneHourMs	numeric literal 3600*1000 ms
+q1r	threeBillionConstantA	numeric literal 3221225781
+q2i	uuidPattern	UUID regex (lowercase, case-insensitive flag)
+q6t	twenty	numeric literal 20
+q7r	cuTeachMouseEnterLabel	string literal 'cu-teach:mouse-enter'
+q8A	ed25519PublicKeyPem	Ed25519 public key in PEM form
+q9e	weekdayNames	array of full weekday names (Sunday..Saturday)
+qBr	controlCharPattern	regex of ASCII control chars
+qCA	emitTarWarningOrError	emits 'warn' or 'error' on a tar stream with code metadata
+qD	fastifyHookKinds	map {ROUTE:'route-hook', INSTANCE:'hook', HANDLER:'request-handler'}
+qDi	ipv4InTextPattern	global regex matching dotted IPv4 in text
+qEA	bootOnceFlag	string literal '--boot-1p-once'
+qGA	processExitReasonNames	array of process exit reasons (clean-exit, crashed, oom, ...)
+qJr	oneB	numeric literal 1
+qMA	twoThousandMs	numeric literal 2000 ms
+qOe	digitChars	string literal '0123456789'
+qOt	eightThousandOneNinetyTwo	numeric literal 8192
+qPA	sendMessageLabel	string literal 'send_message'
+qRi	twoMinuteMsB	numeric literal 120*1000 ms
+qTA	lowercaseAlphabetChars	string literal 'abcdefghijklmnopqrstuvwxyz'
+qTe	claudeCodeBundleId	string literal 'com.anthropic.claudecode'
+qWr	sixB	numeric literal 6
+qXe	supportBundleDispatcher	IPC dispatcher over channels named ..._SupportBundle_$_...
+qYi	replaceAllFromMap	splits/joins A over each token in j$A using KYi map
+qZr	twoMinuteMsC	numeric literal 120*1000 ms
+qct	isAsyncIterable	predicate: object with Symbol.asyncIterator function
+qer	uuidPatternB	UUID regex (case-insensitive flag)
+qet	singleDashFlagPattern	regex /^-[^-]$/
+qg	remoteUploadsMigrationTag	string literal '[remoteUploadsMigration]'
+qj	collapseNewlinesToArrow	replaces newline runs with ' ⏎ '
+qji	coreSchemaMetaSchemaTitle	string literal 'Core schema meta-schema'
+qlA	emptyArrayB	empty array literal
+qm	aiModelIdLabel	string literal 'ai.model.id'
+qme	oneHundred	numeric literal 100 used as a max-rule-count limit
+qmr	assistantPromptSuffix	string literal '\\n\\nAssistant:'
+qtA	claudeCodeDesktopPath	string literal '/claude-code-desktop'
+qtn	threeHundredB	numeric literal 300
+qwi	defaultFactory	object with create() returning new Kwi()
+qxA	claudeCodePolicyRegistryKey	string literal Windows registry path for ClaudeCode policies
+qxe	kebabCasePattern	regex /^[a-z0-9]+(-[a-z0-9]+)*$/
+qxi	mcpbSignatureMagic	string literal 'MCPB_SIG_V1'
+r0r	fiveMillion	numeric literal 5000000
+r1r	permissionModeRanks	map {ask:0, follow_a_plan:1, skip_all_permission_checks:2}
+r1t	ten	numeric literal 10
+r2A	userDataUploadsPath	string literal '/mnt/user-data/uploads'
+r2i	fiveThousandMsD	numeric literal 5000 ms
+r4	threeD	numeric literal 3
+r6	windowStateDispatcher	IPC dispatcher over channels named ..._WindowState_$_...
+r6r	fifteenThousandMs	numeric literal 15000 ms
+r6t	versionTwoZeroOne	string literal '2.0.1'
+r7i	regExpTag	string literal '[object RegExp]'
+r7t	prismaTracingHelper	class wrapping OTel tracerProvider for prisma span tracing
+t7t	emptyTraceParent	string literal '00-10-10-00'
+r8t	nullTag	string literal '[object Null]'
+r9t	sentryFastifyV3InstrumentationName	string literal '@sentry/instrumentation-fastify-v3'
+rAr	symbolTag	string literal '[object Symbol]'
+rCA	defaultLabel	string literal 'default'
+rDe	fiveMinuteMsE	numeric literal 5*60000 ms
+rDi	ipv6AddressPatternB	large IPv6 address regex literal
+rF	workspaceMcpServerTag	string literal '[workspaceMcpServer]'
+rFA	emptyArrayC	empty array literal
+rFi	googleTokenRevokeUrl	string literal 'https://oauth2.googleapis.com/revoke'
+rJi	boxRegistryKey	string literal 'Software\\Box\\Box'
+rKi	browserNativeMessagingRegistryKeys	array of {name,key} browser native-messaging registry keys
+rL	threeBillionConstantB	string literal '3229517805'
+rQi	nanoidPattern	regex /^[a-z0-9_-]{21}$/i (21-char id)
+rQt	surfaceModeNames	array ['cowork','code','chat']
+rRi	privateIpv4Pattern	regex matching RFC1918 private IPv4 ranges
+rS	forcedFeatureFlagState	object {value:true, source:'force', ...}
+rSi	errorInDev	console.error unless NODE_ENV production
+rVe	nine	numeric literal 9
+rXe	dateValiditySubPattern	regex source for valid calendar date including leap-day
+r_r	startCodeTaskDescription	tool description string for starting a host Claude Code session
+rcA	tenB	numeric literal 10
+rhr	threeE	numeric literal 3
+rie	genAiResponseModelLabel	string literal 'gen_ai.response.model'
+rii	fifty	numeric literal 50
+rlr	eightHundred	numeric literal 800
+ro	readPrivateField	private-field read helper after access assertion
+rrt	oneDaySeconds	numeric literal 24*3600 seconds
+rst	remotePluginsDirName	string literal '.remote-plugins'
+rte	errorParenPattern	regex /\(error: (.*)\)/
+rtn	fiveMinuteMsF	numeric literal 60*1000*5 ms
+rvA	twentyMebibytes	numeric literal 20*1024*1024 bytes
+rxe	cloneIfErrorEvent	spreads A into a new object when A instanceof Vu
+rxr	oneThousandB	numeric literal 1000
+s$	coworkLabel	string literal 'cowork'
+s0A	codeLabel	string literal 'code'
+s0i	thirtySixHundred	numeric literal 3600
+s1t	growthbookIntegrationFactory	Sentry integration factory named 'GrowthBook'
+s5i	jwtBearerGrantType	string literal jwt-bearer oauth grant-type urn
+s7e	emojiModifierPattern	regex /^(@+)?(\+|#+)?[rs]?$/g
+s7i	weakMapTag	string literal '[object WeakMap]'
+s7r	oneThousandC	numeric literal 1000
+s9i	lodashHashUndefinedKey	string literal '__lodash_hash_undefined__'
+vWe	connectIntegrationName	string literal 'Connect'
+sAi	connectIntegrationFactory	Sentry integration factory named 'Connect'
+sAr	wordCharsPattern	regex /^\w*$/
+sDi	base64UrlPattern	base64url regex
+sHe	bellChar	string literal '\x07'
+sKt	requestDataIntegrationFactory	Sentry integration factory named (RequestData)
+sO	configuringMachineMessage	string literal 'Configuring machine...'
+sOr	asyncIterableFromStream	async generator yielding from an async iterator or stream reader
+sQi	emailPattern	email validation regex (case-insensitive)
+sT	emptyRecordC	empty object literal {}
+sTt	sixtyFourB	numeric literal 64
+sUA	deepLinkDispatcher	IPC dispatcher over channels named ..._DeepLink_$_...
+sVr	fifteenMinuteMs	numeric literal 900*1000 ms
+s_	worktreeHooksTag	string literal '[WorktreeHooks]'
+sat	base64UrlCharsPattern	regex /^[A-Za-z0-9_-]*$/
+sde	indexOfLowercaseInField	returns factory finding lowercased value index in a field array
+sg	writePrivateField	private-field write helper after access assertion
+tHi	createTarFileWriter	creates a tar pack piped to a write stream, returns done promise
+rHi	createTarStream	creates a tar pack from entries and returns the stream
+w4i	zodFormatToJsonFormatName	map {guid:'uuid', url:'uri', datetime:'date-time', json_string:'json-string', regex:''}
+wKt	extraErrorDataIntegrationName	string literal 'ExtraErrorData'
+yWe	hapiIntegrationName	string literal 'Hapi'
+zm	accessPrivateMethod	private-method access helper after access assertion

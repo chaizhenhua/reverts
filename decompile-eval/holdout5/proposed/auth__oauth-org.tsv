@@ -1,0 +1,247 @@
+CLAUDE_CODE_OAUTH_CONFIGS	claudeCodeOauthConfigs	already-semantic literal const: per-env {production,staging,local} OAuth client configs for Claude Code
+COWORK_OAUTH_CONFIGS	coworkOauthConfigs	already-semantic literal const: per-env OAuth configs for Cowork
+COWORK_3P_OAUTH_CONFIGS	coworkThirdPartyOauthConfigs	already-semantic literal const: per-env OAuth configs for Cowork 3P (third-party)
+DESKTOP_OAUTH_CONFIGS	desktopOauthConfigs	already-semantic literal const: per-env OAuth configs for the desktop app
+t_i	refreshGrowthBookForAccountChange	awaits in-flight fetch then logs '[growthbook] refreshing for account change' and re-runs VAt()
+XUA	scheduleNextGrowthBookRefresh	logs '[growthbook] next refresh in %d min', setTimeout that re-calls msA() then itself
+AFA	growthBookAccountRefreshPromise	module-level promise assigned from t_i() on account-change in initGrowthBook
+AiA	growthBookListenerSetA	new Set() cleared on account change alongside ysA/eFA in initGrowthBook
+ysA	growthBookListenerSetB	new Set() cleared on account change alongside AiA/eFA in initGrowthBook
+eFA	growthBookFeatureCache	new Map() cleared on account change in initGrowthBook
+Kv	growthBookModule	frozen __proto__:null namespace re-exporting getFeatureValue/initGrowthBook/refreshGrowthBook etc; Symbol.toStringTag 'Module'
+jAt	oauthDisabledFlag	boolean set true by n_i()
+n_i	disableOauth	sets jAt=!0
+s_i	oauthErrorModule	frozen namespace exporting OAuthError + SESSION_STALE_RELOGIN_ERROR_CODE
+Zf	oauthTokenCache	object keyed by cacheKey holding {token,refreshToken,expiresAt,...}; logged '[oauth] token cache'
+eiA	oauthTokenCacheEpoch	counter incremented by clearTokenCache to detect cache cleared mid-flow
+dx	staleSessionFailureCache	object of latched session_stale_relogin failures by cacheKey
+SsA	staleSessionFailureEpoch	counter bumped by clearStaleSessionFailure to invalidate latched failures
+f_i	loadOauthTokenCacheFromDisk	reads persisted base64 token cache, safeStorage.decryptString, JSON.parse into Zf
+_me	oauthTokenCacheLoaded	boolean set true after first f_i() load
+Aet	emptySubscriptionInfo	frozen {subscriptionType:null, rateLimitTier:null}
+_test	oauthTestHooks	object exposing refreshOauthToken/getOauthToken/getStaleSessionFailure for tests
+k6	oauthModule	frozen namespace exporting OAuth configs + performOauthFlow + clearTokenCache etc
+Mme	accountIdBackfillStarted	boolean (declared, false); paired with bootstrap account backfill
+K$	backfilledAccountUuid	holds account uuid; cleared on logout, set from accountUuid
+Z1	lastSeenIsLoggedOut	previous isLoggedOut snapshot for identity-change detection
+X1	lastSeenAccountUuid	previous accountUuid snapshot for identity-change detection
+S_i	backfillAccountFromBootstrap	fetches /api/bootstrap, backfills account data into IPC provider via zEA()
+Aq	accountIdResolutionPromise	in-flight promise from __i() in waitForAccountId
+N4A	accountModule	frozen namespace exporting getAccountId/getAccountTaggedId/getLastActiveOrg/waitForAccountId
+k4A	pendingVmRequestDepth	counter inc/dec by M_i/N_i
+M_i	incrementVmRequestDepth	returns ++k4A
+N_i	decrementVmRequestDepth	returns --k4A
+eq	cachedSystemBuildVersion	cached OS build string (win BuildLabEx / darwin ProductBuildVersion) from T4A
+T4A	getSystemBuildVersion	reads registry/plist for OS build, caches in eq
+k_i	cachedAppPathInfo	cached {appPath, homedir} from _sA
+_sA	getAppPathInfo	returns/caches {appPath:app.getAppPath(), homedir}
+cli_stderr_tail	cliStderrTailScrubber	Ko(DF) scrubber for cli_stderr_tail telemetry field
+override_label	overrideLabelScrubber	Ko scrubber: passes label if <=64 chars and no @/\:= else '[redacted]'
+fX	hostnameScrubber	Ko scrubber preserving anthropic/claude/loopback/private hosts else '<ip>'/'<host>.tld'
+nFA	logScrubOptions	scrub config: scrubString + skipKeys Set + per-field keyHandlers
+tq	cachedScrubOptionsBySalt	cached {salt, opts} for cet scrubbing by organization salt
+cet	scrubLogEventMetadata	scrubs event metadata using salted opts; catch returns {_scrubError:true}
+QD	bundleScrubOptions	{lineScrub, jsonScrubOpts, onError} for bundle scrubbing
+U_i	isCoworkVmDebug	boolean: process.env.COWORK_VM_DEBUG==='1'
+level	logLevel	'info' if packaged else 'debug'
+F_i	logsDir	app.getPath('logs')
+Tme	debugNamespaceFilter	m5e(process.env.DEBUG) namespace matcher
+filename	logFilename	join(logsDir,'cowork_vm_node.log')
+O_i	fileTransport	winston File transport for cowork_vm_node.log
+transports	logTransports	array of winston transports ([fileTransport] + optional console)
+iq	coworkVmLogger	winston createLogger for COWORK_VM
+vme	vmEventSubscriptionActive	boolean (declared, false) for vm event subscription
+zg	vmEventHandlers	object of nullable vm event callbacks (onStdout/onStderr/onExit/...)
+t0	vmEventSocket	event-subscription socket connection
+iQ	vmRpcSocket	connected RPC pipe socket
+ay	vmRpcConnectingSocket	socket while RPC pipe is connecting
+Ay	vmRpcConnectPromise	in-flight RPC connect promise
+OS	vmRpcReadBuffer	Buffer accumulating RPC pipe bytes
+x_i	nextVmRpcRequestId	incrementing RPC request id counter
+Np	vmRpcPendingRequests	Map of request id -> {resolve,reject,timeoutId,method}
+cc	vmRpcConnectionStats	{openedAt,requestsSent,responsesReceived,orphanedResponses,...}
+oFA	vmGuestRequestHandler	callback for guest request dispatch over the event pipe
+J_i	closeVmEventSocket	destroys t0 then calls q_i()
+K_i	connectVmRpcPipe	createConnection, on connect sends 'configure', resolves Ay
+q_i	disconnectVmRpcPipe	destroys iQ/ay, resets buffers/stats
+Bet	sendVmRpcRequest	writes {method,id,params} to RPC socket, returns promise resolved on response
+det	subscribeVmEvents	connects event pipe, sends subscribeEvents, dispatches stdout/stderr/exit events
+i0	loadedVmModule	cached loaded vm client module ({vm} or @ant/claude-swift default)
+wX	vmModuleLoadPromise	in-flight promise loading the vm module
+Qet	loadVmModule	loads vmClient (TypeScript) or @ant/claude-swift, caches in i0
+j_i	vmClientInstanceId	Zt.randomUUID()
+YT	pendingTelemetryEvents	array buffer of events flushed by hw()
+SF	telemetryFlushTimer	setTimeout handle for flushing event queue
+vSA	cachedAppVersionInfo	cached {version, commitHash}
+z_i	getAppVersionInfo	caches/returns {version:app.getVersion(), commitHash}
+pet	scheduleEventQueueFlush	flushes now if quitting else sets flush timer
+hw	flushEventQueue	already-semantic role: sends buffered telemetry events via wet()
+mX	cachedProcessMetrics	cached {digest, ts} of per-process memory/cpu metrics
+X_i	getProcessMetricsDigest	aggregates app.getAppMetrics by Browser/Tab/GPU into rss/cpu digest
+kL	cachedVmMemoryInfo	cached {...memInfo, ts} from guest getMemoryInfo
+eRi	getVmMemoryMetrics	queries guest memory/balloon/host info, returns vm_*_memory digest
+riA	desktopEventTee	tee callback set by setDesktopEventTee
+tRi	loopbackHostnames	Set of localhost/127.0.0.1/::1/[::1]
+niA	eventLoggingModule	frozen namespace exporting flushEventQueue/logEvent/queueExperimentExposureEvent etc
+NsA	quittingForUpdate	boolean set true on before-quit-for-update
+ksA	quitCleanupRunning	boolean guard while onQuitCleanup is running
+TsA	readyForQuit	boolean set true once all quit-cleanup handlers ran
+oiA	beforeQuitInterceptor	veto callback set by setBeforeQuitInterceptor
+vsA	skipNextQuitInterceptor	boolean: skip before-quit veto once
+gRi	runOnQuitCleanup	hides windows, runs registered onQuitCleanup handlers with 75s abort timeout
+Ume	quitModule	frozen namespace exporting quitClaudeApp/setupQuitHandlers/isEffectivelyQuitting etc
+Fme	mintedKeyStore	cached electron-store 'custom3p-anthropic-console' for minted API key
+bSA	getMintedKeyStore	lazily creates Fme electron-store
+tCA	mintedKeyAccessor	Get wrapper '[custom-3p:console] Anthropic minted API key' with get/set/delete
+fx	cachedMintedKey	in-memory cached minted key record
+Vj	resolvedOauthClientId	resolved OAuth client id; mismatch clears stored key
+cRi	mintedKeyModule	frozen namespace exporting readStoredMintedKey/writeStoredMintedKey/clearMintedKeyStore etc
+Ome	blockedIpRangeList	net.BlockList of private/reserved subnets (fc00::, fe80::, 64:ff9b:: etc)
+QRi	ip6LoopbackHostnames	Set ['ip6-localhost','ip6-loopback']
+j4A	mcpServerCommandSchema	= $4A (mcp command schema import)
+GRi	dangerousEnvVarNames	Set of env vars stripped for safety (LD/NODE_OPTIONS/PATH/proxies/...)
+ORi	envRuleKeys	Set ['op','match','flag','unless_flag','description']
+PRi	pluginManifestKeys	Set ['displayName','icon','oauth','commands','env','network']
+VRi	bootstrapOidcErrorCodes	Set of OIDC bootstrap error codes (invalid_token_url, token_exchange_http_error, ...)
+LSA	bootstrapConfigCache	new Map() for bootstrap config
+AMi	bootstrapOidcStore	cached electron-store 'custom3p-bootstrap-oidc'
+mx	getBootstrapOidcStore	lazily creates AMi electron-store
+D0	cachedBootstrapConfig	cached {value, expiresAt} bootstrap config
+Xf	lastGoodBootstrap	last-good bootstrap config snapshot (has .etag)
+V$	bootstrapStateMap	new Map() cleared by clearBootstrapToken
+xS	bootstrapAuthFlightMap	new Map() of in-flight interactive-auth promises by key
+JT	bootstrapTokenStore	object reset by clearBootstrapToken
+qv	bootstrapEpochGuard	new oCA() capture/invalidate guard for in-flight bootstrap ops
+sMi	bootstrapTestHooks	test object {clearCache, readStoredCredential, discoverOidcEndpoints, bootstrapSsoBase}
+aMi	bootstrapModule	frozen namespace exporting resolveBootstrapConfig/runBootstrapInteractiveAuth etc
+gMi	builtinMcpIncidentStore	cached electron-store 'custom3p-builtin-mcp'
+rtt	getBuiltinMcpIncidentStore	lazily creates gMi electron-store with clearInvalidConfig
+Jf	PathEscapeError	already-semantic class: 'ERR_SAFE_FS_ESCAPE', name 'PathEscapeError'
+Bp	SymlinkEncounteredError	already-semantic class: 'ERR_SAFE_FS_SYMLINK', name 'SymlinkEncounteredError'
+rq	NotRegularFileError	already-semantic class: 'ERR_SAFE_FS_NOT_REGULAR', name 'NotRegularFileError'
+jj	SizeLimitError	already-semantic class: 'ERR_SAFE_FS_SIZE', name 'SizeLimitError'
+Sm	UnsafeRootError	already-semantic class: 'ERR_SAFE_FS_ROOT', name 'UnsafeRootError'
+_F	oNoFollowFlag	zA.constants.O_NOFOLLOW ?? 0
+zme	oDirectoryFlag	zA.constants.O_DIRECTORY ?? 0
+stt	oNonblockFlag	zA.constants.O_NONBLOCK ?? 0
+IFA	isWindows	process.platform==='win32'
+pC	safeFileHandleField	WeakMap private field on safe-fs file handle
+uO	safeFileTierField	WeakMap private 'tier' field on safe-fs file handle
+_W	safeFileExtraField	WeakMap private field on safe-fs file handle
+RW	safeFileMethodSet	WeakSet of safe-fs file-handle private methods
+EFA	requireMaxBytesForTieredFile	throws SizeLimitError unless maxBytes given for non-appdata-tier file
+AVA	pathSeparatorPattern	RegExp [\\/]+ (win) or \/+ for splitting path segments
+bV	isWindowsPlatform	process.platform==='win32' (safe-fs scope)
+Pa	safeRootPathField	WeakMap private 'path' field on SafeRoot
+mp	safeRootTierField	WeakMap private 'tier' field on SafeRoot
+MW	safeRootAllowUncField	WeakMap private 'allowUnc' field on SafeRoot
+BO	safeRootDirHandleField	WeakMap private dir-handle field on SafeRoot
+NW	safeRootScratchField	WeakMap private scratch-flag field on SafeRoot
+dO	safeRootDisposedField	WeakMap private disposed-flag field on SafeRoot
+Dn	safeRootMethodSet	WeakSet of SafeRoot private methods
+Od	assertSafeRootNotDisposed	throws SafeFsDisposedError if disposed
+uFA	requireMaxBytesForTieredRoot	throws SizeLimitError unless maxBytes given for non-appdata-tier root
+QC	resolveSafeRootLeafPath	resolves+validates a leaf path under the root, throws PathEscapeError
+Wm	rejectSafeRootSymlink	lstat, throws SymlinkEncounteredError if path is symlink
+XS	SafeRoot	root-confined fs class (open/readFile/writeFileAtomic/mkdir/cp/...) guarding escapes/symlinks
+Dx	SafeRoot	let alias bound to the SafeRoot class XS
+hMi	SafeFsDisposedError	already-semantic class: 'ERR_SAFE_FS_DISPOSED', name 'SafeFsDisposedError'
+pMi	fsOpenFlagModes	map of fopen mode strings (r,r+,w,wx,a) to O_* flag bitmasks
+wMi	atomicRenameRetryErrors	Set ['EPERM','EBADF','EACCES','EBUSY']
+ZD	builtinMcpServerConfig	cached {version:1, servers} config object
+GSA	builtinMcpServerConfigPromise	in-flight promise loading ZD
+USA	builtinMcpIncidentWriteChain	serialized write-promise chain (starts Promise.resolve())
+Ett	loadBuiltinMcpServerConfig	reads+parses builtin-mcp config from userData, caches in ZD
+Wj	recordBuiltinMcpIncident	appends a server exit/incident record, trims to BFA, persists via Lr
+FMi	abortedStatus	frozen {status:'aborted'}
+zj	ZodSyncParseAsyncError	zod error: 'Encountered Promise during synchronous parse. Use .parseAsync()'
+ftt	captureStackTrace	Error.captureStackTrace or no-op fallback (zod)
+PMi	canEvalFunction	memoized check whether new Function('') works (not Cloudflare)
+YMi	propertyKeyTypeSet	Set ['string','number','symbol']
+JMi	numberFormatBounds	zod number-format min/max ranges (safeint/int32/uint32/float32/float64)
+ptt	ZodErrorBase	mt('$ZodError', htt) base error constructor
+aCA	ZodError	mt('$ZodError', htt, {Parent:Error}) error class
+XMi	zodErrorPrettifier	wtt(aCA) (zod $ZodError prettify helper)
+ANi	zodErrorFlattener	mtt(aCA) (zod $ZodError flatten helper)
+oVA	zodSafeParseSync	ytt(aCA) synchronous safe-parse helper
+sVA	zodSafeParseAsync	Dtt(aCA) async safe-parse helper
+fNi	isoDatePattern	RegExp ^${_tt}$ for $ZodISODate
+tB	ZodCheck	mt('$ZodCheck') base check constructor
+Ntt	ZodCheckLessThan	mt('$ZodCheckLessThan') too_big comparator check
+ktt	ZodCheckGreaterThan	mt('$ZodCheckGreaterThan') too_small comparator check
+MNi	ZodCheckMultipleOf	mt('$ZodCheckMultipleOf') not_multiple_of check
+NNi	ZodCheckNumberFormat	mt('$ZodCheckNumberFormat') int/float range check
+kNi	ZodCheckMaxLength	mt('$ZodCheckMaxLength') too_big length check
+TNi	ZodCheckMinLength	mt('$ZodCheckMinLength') too_small length check
+vNi	ZodCheckLengthEquals	mt('$ZodCheckLengthEquals') exact-length check
+gCA	ZodCheckStringFormat	mt('$ZodCheckStringFormat') pattern-format check
+bNi	ZodCheckRegex	mt('$ZodCheckRegex') regex format check
+LNi	ZodCheckLowerCase	mt('$ZodCheckLowerCase') lowercase check
+GNi	ZodCheckUpperCase	mt('$ZodCheckUpperCase') uppercase check
+UNi	ZodCheckIncludes	mt('$ZodCheckIncludes') substring-includes check
+FNi	ZodCheckStartsWith	mt('$ZodCheckStartsWith') prefix check
+ONi	ZodCheckEndsWith	mt('$ZodCheckEndsWith') suffix check
+xNi	ZodCheckOverwrite	mt('$ZodCheckOverwrite') value-transform check
+oa	ZodType	mt('$ZodType') base type constructor
+aVA	ZodString	mt('$ZodString') string type constructor
+Bg	ZodStringFormat	mt('$ZodStringFormat') string-format base
+HNi	ZodGuid	mt('$ZodGUID') GUID format
+JNi	ZodUuid	mt('$ZodUUID') UUID format
+KNi	ZodEmail	mt('$ZodEmail') email format
+qNi	ZodUrl	mt('$ZodURL') URL format
+VNi	ZodEmoji	mt('$ZodEmoji') emoji format
+$Ni	ZodNanoId	mt('$ZodNanoID') NanoID format
+jNi	ZodCuid	mt('$ZodCUID') CUID format
+WNi	ZodCuid2	mt('$ZodCUID2') CUID2 format
+zNi	ZodUlid	mt('$ZodULID') ULID format
+ZNi	ZodXid	mt('$ZodXID') XID format
+XNi	ZodKsuid	mt('$ZodKSUID') KSUID format
+Aki	ZodIsoDateTime	mt('$ZodISODateTime') ISO datetime format
+eki	ZodIsoDate	mt('$ZodISODate') ISO date format
+tki	ZodIsoTime	mt('$ZodISOTime') ISO time format
+iki	ZodIsoDuration	mt('$ZodISODuration') ISO duration format
+rki	ZodIpv4	mt('$ZodIPv4') IPv4 format
+nki	ZodIpv6	mt('$ZodIPv6') IPv6 format
+oki	ZodCidrv4	mt('$ZodCIDRv4') CIDRv4 format
+ski	ZodCidrv6	mt('$ZodCIDRv6') CIDRv6 format
+aki	ZodBase64	mt('$ZodBase64') base64 format
+cki	ZodBase64Url	mt('$ZodBase64URL') base64url format
+lki	ZodE164	mt('$ZodE164') E.164 phone format
+Eki	ZodJwt	mt('$ZodJWT') JWT format
+vtt	ZodNumber	mt('$ZodNumber') number type constructor
+Cki	ZodNumberFormat	mt('$ZodNumber') number-format composed type
+uki	ZodBoolean	mt('$ZodBoolean') boolean type constructor
+Bki	ZodNull	mt('$ZodNull') null type constructor
+dki	ZodAny	mt('$ZodAny') any type constructor
+Qki	ZodUnknown	mt('$ZodUnknown') unknown type constructor
+fki	ZodNever	mt('$ZodNever') never type constructor
+hki	ZodArray	mt('$ZodArray') array type constructor
+Bx	coworkOauthConfigs	export alias of COWORK_OAUTH_CONFIGS (export { COWORK_OAUTH_CONFIGS as Bx })
+Cet	logTransports	export alias of transports (export { transports as Cet })
+D_i	oauthTestHooks	export alias of _test oauth test hooks (export { _test as D_i })
+ER	waitForAccountId	export alias of waitForAccountId (export { waitForAccountId as ER })
+Eet	logFilename	export alias of filename (export { filename as Eet })
+Fet	setResolvedClientId	export alias of setResolvedClientId (export { setResolvedClientId as Fet })
+G_i	overrideLabelScrubber	export alias of override_label (export { override_label as G_i })
+Iet	logLevel	export alias of level (export { level as Iet })
+L_i	cliStderrTailScrubber	export alias of cli_stderr_tail (export { cli_stderr_tail as L_i })
+M4A	clearStaleSessionFailure	export alias of clearStaleSessionFailure (export { clearStaleSessionFailure as M4A })
+M6	refreshGrowthBook	export alias of refreshGrowthBook (export { refreshGrowthBook as M6 })
+OQ	quitClaudeApp	export alias of quitClaudeApp (export { quitClaudeApp as OQ })
+P4A	writeStoredMintedKey	export alias of writeStoredMintedKey (export { writeStoredMintedKey as P4A })
+PT	claudeCodeOauthConfigs	export alias of CLAUDE_CODE_OAUTH_CONFIGS (export { CLAUDE_CODE_OAUTH_CONFIGS as PT })
+S4A	initGrowthBook	export alias of initGrowthBook (export { initGrowthBook as S4A })
+T6	readStoredMintedKey	export alias of readStoredMintedKey (export { readStoredMintedKey as T6 })
+Tet	skipNextBeforeQuitInterceptor	export alias of skipNextBeforeQuitInterceptor (export { skipNextBeforeQuitInterceptor as Tet })
+cFA	resolveBootstrapConfig	export alias of resolveBootstrapConfig (export { resolveBootstrapConfig as cFA })
+eY	OAuthError	export alias of OAuthError class (export { OAuthError as eY })
+eet	performOauthFlow	export alias of performOauthFlow (export { performOauthFlow as eet })
+gFA	setLastGoodBootstrap	export alias of setLastGoodBootstrap (export { setLastGoodBootstrap as gFA })
+iCA	clearMintedKeyStore	export alias of clearMintedKeyStore (export { clearMintedKeyStore as iCA })
+jy	clearTokenCache	export alias of clearTokenCache (export { clearTokenCache as jy })
+ket	setBeforeQuitInterceptor	export alias of setBeforeQuitInterceptor (export { setBeforeQuitInterceptor as ket })
+lFA	runBootstrapInteractiveAuth	export alias of runBootstrapInteractiveAuth (export { runBootstrapInteractiveAuth as lFA })
+nMi	clearBootstrapToken	export alias of clearBootstrapToken (export { clearBootstrapToken as nMi })
+vet	setupQuitHandlers	export alias of setupQuitHandlers (export { setupQuitHandlers as vet })
+yet	setDesktopEventTee	export alias of setDesktopEventTee (export { setDesktopEventTee as yet })
+z0	desktopOauthConfigs	export alias of DESKTOP_OAUTH_CONFIGS (export { DESKTOP_OAUTH_CONFIGS as z0 })

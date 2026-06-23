@@ -1,0 +1,9 @@
+modules/island/find-in-page/provider.ts
+modules/island/media/image-handling.ts
+modules/island/scheduler/wake-scheduler.ts
+modules/island/auth/oauth-org.ts
+modules/island/ipc/settings-extension-dispatchers.ts
+modules/island/telemetry/sentry-node-integrations.ts
+modules/island/ipc/deep-link-and-scheduled-tasks.ts
+modules/island/plugins/local-plugins.ts
+modules/island/ipc/main-view-window-wiring.ts

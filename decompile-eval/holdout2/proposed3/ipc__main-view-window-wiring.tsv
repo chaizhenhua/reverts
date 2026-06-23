@@ -1,0 +1,204 @@
+$en	startClaudeAiImport	calls getValidClaudeAiImportToken, ky(Jl.AwaitingApproval), logs `${Yl} approve in browser` — starts claude.ai import auth flow
+$nA	pendingOpenUrl	holds open-url payload when handler not ready; consumed by WnA($nA) at app ready ('claudeURLHandler')
+$tn	microsoftDeviceCodeResponseSchema	zod object device_code/user_code/verification_uri refined to *.microsoft.com
+AAe	claudeAiImportTokenCache	new Map() written via X7A.write/AAe.set in getValidClaudeAiImportToken
+AQ	persistedFocusedAppHandle	{timestamp,handle} of currently focused app via getActiveWindowHandle, restored in iUt
+AT	pairedBuddyDevice	QJA.get('paired'); device with .id/.name used in BLE pairing match
+BJA	coworkOAuthConfigPromise	cached promise of COWORK_3P_OAUTH_CONFIGS['production']
+Bin	Sha256DigestTransform	Transform subclass hashing sha256, getDigest() returns hex
+BtA	dxtUpdateCheckTimer	setInterval handle for periodic extension update checks
+CKe	externalIdpCredModule	frozen module: refreshExternalIdpCred, runExternalIdpPkceGrant
+CtA	userThemeMode	wr.get('userThemeMode'); 'system'|'light'|'dark' sets nativeTheme.themeSource
+DU	enrollTrustedDevicePromise	in-flight enrollTrustedDevice promise, cleared in finally
+DW	buddyBleInstalled	set true at end of Srn; gated in pairDevice/RQA ('not installed')
+Dnn	orgScopedDxtUpdateDialogModule	frozen module: showOrgScopedDxtUpdateDialog
+Drn	reportBuddyState	export alias of reportState (buddy connection state)
+Dtn	appReadyPromise	D9e(sA.app, 'ready'); awaited in activate handler
+EAe	echoMcpServerModule	frozen empty module placeholder for registerEchoMcpServer import
+EFt	totalOutputTokensToday	accumulates t.usage.output_tokens in brn
+EO	buddyPairBackoffExponent	Math.min(2e3*2**EO,6e4); incremented per pair retry
+Ein	dxtUpdateModule	frozen module: applyPendingUpdates, startDxtUpdateChecks
+EtA	quickWindowReadyPromise	D9e(Ro,'ready-to-show').then(()=>FbA=!0)
+FbA	quickWindowReady	set true when quick window ready-to-show resolves
+GE	popoutWindowsModule	awaited Promise.resolve().then(()=>kSr); .getWindowManager()
+GZ	loadDeploysState	caches srn() result; returns nj or JbA promise
+HJe	wiredWebContents	WeakSet guarding TGt against double-wiring a webContents
+Hen	claudeAiImportAuthModule	frozen module: cancelClaudeAiImportAuth, getValidClaudeAiImportToken, ...
+Hin	csiSequencePattern	RegExp matching CSI escape \[[0-9;?]*[A-Za-z]
+Hrn	deviceStatusExport	export alias of deviceStatus
+IFt	buddyTokensStore	new _h({name:'buddy-tokens'}) persistent store
+JJe	remoteToolsOn	set from tQ('3572572142') on flag; feeds V7A
+JbA	deploysLoadPromise	in-flight srn() promise in GZ
+Jin	oscSequencePattern	RegExp matching OSC escape \][^...]*(ST|ESC\\)
+JlA	claudeAiImportListeners	Set of {onAuthUserCode,onAuthStateChange} listeners
+Jrn	suspendBuddyBridge	sets XlA=true (suspends buddy event forwarding)
+KJe	cuSidePanelStateFlag	boolean, declared with V7A/oJA side-panel state group
+KlA	extensionAccessorsModule	frozen module: getExtension(s)/version(s), getUrlWithDirectoryBase
+KnA	popupApplicationMenu	()=>B?.popup({window:et}) on non-macOS
+Krn	resumeBuddyBridge	sets XlA=false (resumes buddy event forwarding)
+Ld	aboutWindow	BrowserWindow for 'About Claude'
+Lin	visualizeMcpResources	resource def array for visualize widget (uri jlA)
+MKe	buddySelectBluetoothDeviceHandler	'select-bluetooth-device' handler picking nibblet/claude sticks
+Mrn	scanDevicesExport	export alias of scanDevices
+Mtn	anthropicOauthAuthorizeUrl	`https://${z7e}/oauth/authorize`
+NGt	getTrustedDeviceTokenExport	export alias of getTrustedDeviceToken
+NKe	setBuddyPairingPromptCallback	sets pJA (passkey prompt target)
+Ny	mainWindowRef	stored main window in TGt; checked isFocused/isVisible for idle notifs
+PGt	enterpriseConfigKeys	Object.keys(cR.shape)
+PJe	initialBlocklistCheckDone	guard for triggerInitialBlocklistCheck
+PbA	claudeAppUrl	new URL(Ki()); protocol/hostname checked in gtn frame guard
+Pin	imagineServerModule	frozen module: getImagineServerDef
+QFt	hardwareBuddyModule	frozen module: getBuddyMenuItem, initBuddy
+QJA	buddyStateStore	new _h({name:'buddy-state'}) persistent store
+QP	buddyTokensToday	{date,tokens} daily token counter
+QUt	mainWindowCreated	set true after fUt() creates window; gated in activate
+Qnn	allowedReviewAuthorAssociations	Set OWNER/MEMBER/COLLABORATOR
+RQ	buddyPairRetryTimer	setTimeout handle for buddy pair retry
+RQA	scheduleBuddyPairRetry	schedules pairDevice with exponential backoff
+Ren	showTrayUsagePopup	swift trayUsage.popUp menu; returns bool
+Ro	quickEntryWindow	BrowserWindow for quick entry overlay
+Rrn	setBuddyStateCallback	sets XnA (state-change callback)
+SU	authExpiryToastEpoch	last credential epoch shown in showAuthExpiryToast
+SUt	loadCoworkOAuthConfig	returns BJA promise of cowork 3p oauth config
+Srn	startBuddyBridge	sets up BLE bridge: select-bluetooth-device, pairing handler
+Stn	openedAtLogin	negated wasOpenedAtLogin / --startup detection
+T$	deploysModule	frozen module: getAll, setDeploy, removeDeploy, setPinned
+TGt	wireMainViewWindow	wires main view webContents: IPC dispatchers, session events
+Trn	loadTokensToday	IFt.get('tokens-today'), resets QP if date changed
+Ty	startupPerfMarks	Map of startup-perf timing marks
+UbA	pendingPromiseChain	Promise.resolve() chain placeholder
+V7A	remoteToolsActive	JJe||SAn; cu side-panel/remote tools active
+VbA	buddyInstallInProgress	guard 'install already in progress'
+Vrn	startBuddySessionBridge	wires session bridge: SW writes, permission relay
+Wen	clearClaudeAiImport	cancelClaudeAiImportAuth, ky(Jl.SignedOut)
+WlA	buddyPairingPinResolver	pending setBluetoothPairingHandler callback awaiting pin
+Wrn	wireBuddyWindowIpc	TWr.for(A).setImplementation buddy window IPC
+X7A	claudeAiImportSsoTokenStore	new tY('custom3pClaudeAiImportSso','[claude-ai-import:sso] token')
+Yrn	onBuddyBleConnectionChange	'connected'/'disconnected' handler; sends time on connect
+Zin	sshMcpServerModule	frozen module: SshMcpServerManager
+ZlA	resolveBuddyPicker	clears abandon timer, invokes QQ.cb with device id
+ZnA	buddyRxCallback	BLE rx callback set by _rn
+_test	clampHelpersTestExports	{clampInt, clampExpiresAt, readJsonBounded}
+_Ut	anthropicConsoleGrantModule	frozen module: doAnthropicConsoleGrant, getMintedAnthropicApiKey
+_rn	setBuddyRxCallback	sets ZnA
+aKe	extensionUpdateMap	new Map() declared near extension-update accessors
+ain	cachedUpdatesModule	frozen module: getCachedUpdate(s), cacheExtensionUpdate, removeCachedUpdate
+b4e	sentryClientTmp	temp $i() sentry client in disableEssentialTelemetry branch
+bG	unusedBgRef	let bG=null, never assigned elsewhere
+bUt	deviceCodeErrorSchema	zod object error/error_description
+bin	visualizeToolDefs	show_widget + read_me MCP tool definitions
+brn	recordBuddySessionTokens	accumulates output_tokens, pushes msgs into oj
+cH	blocklistModule	frozen module: checkCanInstall, startBlocklistUpdateChecks, ...
+cJA	weakStateMap	new WeakMap() near send-ui state
+cKe	startupPerfReported	guard for ctn one-time startup perf report
+c_	claudeAiImportAuthState	{status:Jl...}; updated by ky
+ctn	reportStartupPerf	logs desktop_app_startup_perf from Ty marks
+deviceStatus	getBuddyDeviceStatus	B0 cmd 'status' request to buddy device
+dnn	reviewChangesRequestedStates	Set CHANGES_REQUESTED/COMMENTED
+drn	remotePluginSyncImpl	store/uploadAccountPlugin/installSinglePlugin impl bag
+dtA	dxtUpdateCheckInFlight	guard in wKe extension update check
+dtn	webauthnRpId	`${Btn}.com.anthropic.claude.webauthn`
+eKe	trayUsageListenerBound	guard for binding trayUsageAction listener once
+eT	buddyEventMap	new Map() near buddy session bridge
+fJA	buddyBridgePromise	oFt() caches Srn() promise
+fKe	foundryEntraModule	frozen module: entraDeviceCodeUrl, runFoundryEntraDeviceGrant, ...
+forgetDevice	forgetBuddyDevice	sends unpair, nFt(null), clears retry timer
+frn	remoteUploadsMigrationModule	frozen module: maybeRunRemoteUploadsMigration
+gFt	forgetDeviceExport	export alias of forgetDevice
+gUt	cancelClaudeAiImportAuthExport	export alias of cancelClaudeAiImportAuth
+g_	allowDevTools	LZ().allowDevTools
+gon	electronDevtoolsInstallerDefault	fc(KFt) default export of devtools installer
+gtn	guardClaudeProtocolFrame	cancels webauthn-scheme requests from non-claude frames
+hJA	buddyBleDispatcher	Uvt.for(A).setImplementation rx/reportState/log
+hKe	vertexWorkforceModule	frozen module: refreshVertexWorkforce, runVertexWorkforceGrant
+hrn	showAuthExpiryToastExport	export alias of showAuthExpiryToast
+iAn	initCuSidePanel	sets aV, wires Pl 'cuLockChanged'
+iUt	restorePersistedFocus	restores focus to AQ.handle within 30s window
+inFlight	syncInFlightMap	new WeakMap() guarding plugin dir sync
+itn	wireClaudeAiImportIpc	KXe.for(A).setImplementation import auth/runImport
+jUt	warmBundleModule	frozen module: maybeWarmDownloadForUpdate, promoteWarmBundle
+j_	buddyBleConnected	set from reportState===Connected
+jd	deviceCodeWindow	BrowserWindow for device-code verify
+jnA	pendingHandoffActivity	stored handoff continue-activity payload
+jtn	devicePollPendingStatuses	Set authorization_pending/slow_down
+kGt	trustedDeviceModule	frozen module: clearTrustedDeviceToken, enrollTrustedDevice, getTrustedDeviceToken
+kKe	submitPinExport	export alias of submitPin
+ky	setClaudeAiImportAuthState	sets c_ and notifies JlA listeners
+lF	claudeAiImportAuthGeneration	bumped by cancelClaudeAiImportAuth; staleness check
+lV	claudeAiImportTokenPromise	in-flight device-auth token promise
+lastImportedAt	lastClaudeAiImportAt	Date.now() timestamp of last import
+lin	applyPendingUpdatesExport	export alias of applyPendingUpdates
+mAn	enrollTrustedDeviceExport	export alias of enrollTrustedDevice
+mKe	pendingUpdatesApplied	guard for applyPendingUpdates once
+mnn	autoFixEngineModule	frozen module: AutoFixEngine
+mrn	authExpiryToastModule	frozen module: isBrowserFlowAuthKind, showAuthExpiryToast
+nAe	stealthLaunchEnabled	uJA.enabled from ltn() stealth config
+nFt	setPairedBuddyDevice	sets AT, persists 'paired' in QJA
+nJA	trustedDeviceIdentityGeneration	bumped on clearTrustedDeviceToken; discards stale enroll
+nj	deploysState	cached srn() result
+nnn	reactDevToolsModule	frozen module: loadReactDevTools
+nrn	pluginSyncModule	frozen module: syncPluginDirsToRemote
+ntn	remoteOnlySettingsKeys	Set remoteSessionFolderGrants/coworkDisabledTools/...
+oAe	updateTrayContextMenu	sets vT=IJA() on rE tray
+oFt	ensureBuddyBridge	returns fJA?? (fJA=Srn())
+oJA	remoteToolsDeviceActive	boolean; gates closeRemoteToolsDevice on account change
+oKe	claudeAiImportTokenGeneration	guards lV cache against generation change
+oj	buddySessionMessageMap	new Map() sessionId -> {msgs,at}
+pJA	buddyPairingPromptCallback	passkey prompt target callback
+pv	buddyPairInFlight	guard for pairDevice/scanDevices in-flight
+qbA	buddySessionBridgeStarted	guard in Vrn (bridge already started)
+qin	terminalServerModule	frozen module: getTerminalServerDef
+rE	trayIcon	new sA.Tray(...); tray icon instance
+rUt	activateQuickEntryWindowExport	export alias of activateQuickEntryWindow
+rin	vertexWorkforceTestExports	{effectiveIdpScopes, stsExchange}
+rj	trustedDeviceToken	cached device token from pAn()/enrollment
+rp	buddyWindow	BrowserWindow 'Hardware Buddy & Maker Devices'
+rrn	pluginSyncTestExports	{collectPluginEntries, contentHash, sftpMkdirp, inFlight, ...}
+sAe	refreshTrayIcon	creates/destroys rE tray per menuBarEnabled
+sFt	pairDeviceExport	export alias of pairDevice
+sj	buddyCommandHandler	handles {cmd:'permission'} from buddy device
+tAn	restoreWindowFromCuSidePanel	restores bounds/minSize after cu side panel
+tUt	persistFocusedApp	captures currently focused app handle into AQ
+uFt	rollBuddyTokensDay	resets QP if date changed
+uJA	stealthConfig	ltn() {enabled, delaySec}
+uin	closeDeviceCodeWindowExport	export alias of closeDeviceCodeWindow
+unn	worktreePoolModule	frozen module: WorktreePool, createWorktreePool, planReap, ...
+urn	remoteMarketplaceMigrationModule	frozen module: maybeRunRemoteMarketplaceMigration
+vGt	showAboutWindow	creates/shows Ld about window
+vT	trayContextMenu	IJA() context menu for rE tray
+vUt	deviceTokenResponseSchema	zod object access_token/expires_in/refresh_token
+vtn	anthropicConsoleGrantTestExports	{authorizeUrlFor, mintApiKey, reset}
+wAn	clearTrustedDeviceTokenExport	export alias of clearTrustedDeviceToken
+wJA	buddyStatusTimeoutCount	increments on status timeout; warn at 3
+wKe	checkDxtExtensionUpdates	checks installed extensions for updates
+xJe	blocklistUpdateTimer	setInterval handle for blocklist update checks
+xbA	claudeAiImportRunPromise	in-flight runImport promise
+xtn	effectiveScopesTestExports	{effectiveScopes}
+zJe	defaultSendUiState	{stage:Hd.Closed, canSend:false, showSendUi:false}
+zUt	svgSetupPromptBuilder	builds visualize SVG setup prompt from width
+zen	runClaudeAiImport	fetches export zip, spawns importer, ky(SignedIn)
+zrn	showBuddyWindow	creates/shows rp buddy window
+width	quickWindowWidth	556 + ZGt
+height	quickWindowHeight	420 + ZGt
+eUt	notHasShadow	!hasShadow; gates focus restore
+KFt	electronDevtoolsInstaller	aon() electron-devtools-installer instance
+con	electronDevtoolsInstallerModule	gOt namespace wrapper of devtools installer default
+STRIPPED_TOP_LEVEL_DIRS	strippedTopLevelDirs	Set hooks/.mcpb-cache excluded from plugin sync
+reportState	reportBuddyConnectionState	sets j_ from connection state, schedules retry
+pairDevice	pairBuddyDevice	invokes renderer window.buddyBle.pair()
+scanDevices	scanBuddyDevices	enumerates buddy BLE devices via picker
+submitPin	submitBuddyPairingPin	resolves WlA with {confirmed,pin}
+QQ	buddyScanPickerState	{found:Map,cb,abandon} BLE device picker state in MKe/scanDevices/ZlA
+XlA	buddyBridgeSuspended	set true by Jrn/false by Krn; gates buddy event forwarding
+XnA	buddyStateCallback	set by Rrn; invoked in reportState(A,e)
+YlA	claudeAiImportVerifyUrl	verify URL captured in $en, cleared in Wen
+YnA	mainViewWebContentsHolder	set to e (mainView webContents) in TGt
+YbA	stealthLaunchDelayMs	uJA.delaySec*1e3 stealth launch delay
+YUt	deviceCodeWindowModule	frozen module: closeDeviceCodeWindow, showDeviceCodeWindow
+nUt	quickEntryModule	frozen module: activateQuickEntryWindow, navigateToExistingChat, ...
+cnn	autoArchiveEngineModule	frozen module: AutoArchiveEngine
+Cin	showDeviceCodeWindowExport	export alias of showDeviceCodeWindow
+QAn	startBlocklistUpdateChecksExport	export alias of startBlocklistUpdateChecks
+RGt	triggerInitialBlocklistCheckExport	export alias of triggerInitialBlocklistCheck
+aUt	getValidClaudeAiImportTokenExport	export alias of getValidClaudeAiImportToken
+cin	startDxtUpdateChecksExport	export alias of startDxtUpdateChecks

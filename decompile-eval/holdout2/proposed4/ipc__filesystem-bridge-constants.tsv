@@ -1,0 +1,176 @@
+fEi	jsonSchemaDraft7Definition	Object literal of JSON Schema draft-07 keywords ($id,$ref,properties,patternProperties,…)
+fGA	globPathCharClass	String '[_0-9a-z-*/]' — character class for glob path matching
+fHi	normalizeCaseFoldKey	Maps key to NFD lowercase->uppercase fold, with LRU eviction over a size cap
+fHt	gitRemoteUrlPattern	Regex matching scheme://user:pass@host:port/path remote URL form
+fJr	threeRetries	Numeric constant 3
+fKr	oneThousand	Numeric constant 1000 (1e3)
+fMi	windowsUncDevicePathPattern	Regex /^[\\/]{2}[?.][\\/]/ matching \\?\ and \\.\ UNC device prefixes
+fS	oneOrTwoDigitsPattern	String '\\d\\d?' — one-or-two-digit regex fragment
+fUr	toArrayCopy	Returns null/array passthrough else copies array-like into a new Array
+fXi	twoHundred	Numeric constant 200
+fYi	parseBase256Number	Decodes base-256 tar number header (0x80 positive / 0xff negative), guards safe integer
+fZr	relativeMntClaudeDir	String './mnt/.claude' path
+fcr	convertToJsonArgs	CLI arg array ['-convert','json','-o','-','--']
+ffe	versionZeroPointFour	Version string '0.4'
+fgi	fileSystemInterfaceDispatcher	IPC getDispatcher/setImplementation over $eipc..._FileSystem_$_ channels
+fgr	eightKilobytes	Numeric constant 8192
+isCode	isKnownCode	Predicate KCA.has(A)
+flA	claudeMediaProtocol	String 'claude-media'
+fme	modelsMenuLabel	i18n message {defaultMessage:'Models', id}
+fqA	versionZeroPointFour	Version string '0.4'
+fv	claudeDesktopBundleId	macOS bundle id 'com.anthropic.claudefordesktop'
+g$t	equalsSign	String '='
+g0r	fiveHundred	Numeric constant 500
+g5i	oidcFederationProfileDate	String 'oidc-federation-2026-04-01'
+g5r	claudeDownloadUrl	String 'https://claude.com/download'
+g6r	modifierKeyAliasTable	Maps accelerator modifier names (CmdOrCtrl,Alt,Shift…) to {char,order}
+g7i	dataViewTag	String '[object DataView]' toString tag
+g7r	fiveThousand	Numeric constant 5000 (5e3)
+g8r	identifierTokenPattern	Regex /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/
+gCr	ntStatusCodePattern	Regex /0x8037[0-9a-f]{4}/i matching NT status hex codes
+gDe	googleOauthTokenUrl	String 'https://oauth2.googleapis.com/token'
+gEr	crashPatternBugTypeTable	Array mapping crash log patterns to bugType labels
+gF	worktreeKeepFilename	String '.worktree-keep'
+gFi	oneTwentyThousandMs	Numeric 120000 (12e4)
+gGt	isInSet	Predicate sGt.has(A)
+gQi	ipv4AddressPattern	Regex matching dotted IPv4 address
+gUi	oneTwentyThousandMs	Numeric 120000 (12e4)
+gV	showAndFocusWindow	Shows and focuses Ny window if not destroyed
+gX	hourCycleByRegionTable	Maps region/locale codes to hour-cycle preference arrays (H/h/hB/hb)
+gYi	identity	Returns its argument unchanged
+gZr	relativeMntClaudeDir	String './mnt/.claude'
+g_i	oneYearSeconds	365*24*60*60 = seconds in a year
+g_r	displayNameSettingDescription	Help text for setting the assistant display name
+gae	minidumpMagic	String 'MDMP' minidump file magic
+gde	decrementToZeroBased	Returns +A - 1 (one-based to zero-based)
+gdt	fifty	Numeric constant 50
+gft	tieredAppsAccessGuidance	Long help text about restricted app tiers / link safety
+ggi	desktopNotificationsInterfaceDispatcher	IPC dispatcher over $eipc..._DesktopNotifications_$_ channels
+ggr	platformAppDataPaths	Builds data/config/cache/log/temp paths under Library for an app name
+ggt	dispatchExtensionToolCall	Routes browser-extension tool calls, handles connect/timeout/disconnect errors
+giA	emptyObject	Empty object literal {}
+gie	geminiStreamingMethodNames	Array of GenAI method names (models.generateContent,…)
+rfc5322Email	rfc5322EmailPattern	RFC5322-style email validation regex
+gj	BoundedCommandResultCollector	Class buffering command output with byte cap, timeout, exit/error promise
+gjr	bootSweepController	resetBootSweep / chainActiveSweep over module-level sweep state
+gk	fiveHundredMegabytes	500*1024*1024 bytes
+gri	ipv6AddressPattern	Regex matching IPv6 address forms
+gsA	isPromise	Predicate A instanceof Promise
+gtr	dottedIdentifierPattern	Regex /^[a-zA-Z0-9._-]+$/
+gur	fifteenThousandMs	Numeric 15000 (15e3)
+gxr	streamTrueOption	Object { stream: true }
+gxt	versionTwoTwoZero	Version string '2.2.0'
+h$t	printableHeaderPattern	Regex of printable ASCII chars up to 255 length
+h1r	six	Numeric constant 6
+h1t	mcpSessionIdAttr	String 'mcp.session.id' span attribute key
+h4t	completionTokensAttr	String 'ai.usage.completionTokens' span attribute key
+hCr	diskSpaceLimitByPlatformArch	15GiB limits keyed by darwin/win32 arm64/x64
+hFr	streamRequestBody	Async generator yielding stream/arrayBuffer/async-iterable body chunks
+hIi	ajvDataRefSchemaUrl	String ajv data.json ref schema URL
+hJe	fiftyMegabytes	50*1024*1024 bytes
+hJr	oneHundredMegabytes	100*1024*1024 bytes
+hJt	oneHourMs	36e5 = 3600000 ms
+hKi	selectExtensionPromptText	UI text about opening confirmation in connected Chrome extensions
+hKr	thirtyThousandMs	Numeric 30000 (3e4)
+hOr	emptyTokenUsageStats	Zeroed token-usage/cache/server-tool-use stats template
+hRi	pluginShimPrefix	String 'plugin-shim:'
+hS	generalRestrictionsLabel	i18n message {defaultMessage:'General restrictions', id}
+hTA	fortyFiveThousandMs	Numeric 45000 (45e3)
+hVr	pullRequestTemplatePaths	Array of PR template file paths
+hX	ansiLogColorCodes	ANSI color escape codes by log level (error/warn/info/debug/reset)
+hYA	coworkConfigTestPresets	test_replace/test_footer prompt-config presets
+hYi	parseBase256NegativeNumber	Decodes negative base-256 tar number using two's complement
+hZA	coworkArtifactMetaKey	String 'cowork-artifact-meta'
+hZr	mntClaudeDir	String 'mnt/.claude'
+hcr	fiveThousandMs	Numeric 5000 (5e3)
+hdi	localePlaceholderPattern	Regex /\$\{locale\}/i
+hdt	otelEnvVarNames	Array of OTEL_/CLAUDE_CODE telemetry env var names
+het	fifty	Numeric constant 50
+hgi	openDocumentsInterfaceDispatcher	IPC dispatcher over $eipc..._OpenDocuments_$_ channels
+hkt	envString	String 'env'
+hmr	jsonRequestBodyEncoder	Returns JSON content-type headers and JSON-stringified body
+hmt	fetchWebPageToolDescription	Tool description text for fetching a web page by URL
+hpr	requestDirectoryToolDescription	Tool description for requesting access to a directory
+htn	desktopAppString	String 'desktop_app'
+hx	upperSnakeCasePattern	Regex /^[A-Z][A-Z0-9_]*$/
+i$r	versionOneSeventeenZero	Version string '1.17.0'
+i0r	oneMillion	Numeric 1000000 (1e6)
+i1A	nonSlashCharClass	String '[^/]' glob fragment
+i1t	oneHundred	Numeric constant 100
+i2A	twentyMegabytes	20*1024*1024 bytes
+i2r	fiveMinutesMs	5*6e4 = 300000 ms
+i6r	claudeHaikuModelId	String 'claude-haiku-4-5-20251001'
+i7i	objectTag	String '[object Object]' toString tag
+i8t	objectTag	String '[object Object]' toString tag
+i9t	versionZeroOneZero	Version string '0.1.0'
+iDi	ipv4CidrPattern	Regex matching IPv4 address with /CIDR suffix
+iFi	googleOauthAuthUrl	String Google OAuth2 v2 auth endpoint URL
+iG	twoHundred	Numeric constant 200
+iGe	markChapterAction	String 'mark_chapter'
+core	emptyObjectModule	Empty object {} module export
+iJt	fiveThousandMs	Numeric 5000 (5e3)
+iKi	chromeExtensionId	Chrome extension id string 'dngcpimnedloihjnnfngkgjoidhnaolf'
+iOr	composeAbortSignal	Combines abort signals plus optional timeout into one AbortController signal
+iPr	zodErrorMessageFormatter	Builds localized Zod validation error messages by issue code
+iPt	twenty	Numeric constant 20
+iQi	uuidPattern	Regex matching canonical UUID format
+iRi	internalDomainSuffixes	Array ['.internal','.local','.lan']
+iRr	thirtyThousandMs	Numeric 30000 (3e4)
+iVr	sixtyThousandMs	Numeric 60000 (6e4)
+iWi	five	Numeric constant 5
+iWt	logLevelToSeverityMap	Maps log level names to severity (trace/debug/info/warn/error/fatal)
+iXi	humanTurnSeparator	String '\n\nAssistant:' prompt separator
+iZt	escapedDotPattern	Regex /\\./g
+i_t	remoteClaudeDir	String '/home/claude/.claude/remote'
+ibe	makeAbortException	Returns DOMException or fallback abort error for a message
+Class	emptyConstructorClass	No-op constructor class with index signature
+iie	aiPromptAttr	String 'ai.prompt' span attribute key
+iii	thirty	Numeric constant 30
+ije	scopeContextKey	String '_scopeContext'
+ime	globalBindingKey	String '__gb__'
+iri	jwtLikePattern	Regex matching three dot-separated base64url segments
+irt	tenThousand	Numeric constant 10000 (1e4)
+itt	builtinMcpDesiredKey	String 'builtinMcpDesired'
+ivA	logLocalMcpBridge	Logs '[localMcpBridge] ...' via D.info
+ivt	alphanumDashUnderscorePattern	Regex /^[a-zA-Z0-9_-]+$/
+ize	isoDatePatternFragment	Regex fragment validating ISO calendar dates incl leap-year Feb 29
+j0i	oneDayMs	1440*60*1000 = ms in a day
+j1	trimToUndefined	Returns trimmed string or undefined when empty/nullish
+j2r	envExampleFilenames	Array ['.env.example','.env.sample',…]
+j3r	modelUnavailableErrorPattern	Regex /ValidationException|model.*not found|ModelNotReady/i
+j4r	eight	Numeric constant 8
+j8A	browserExtensionBundleId	String 'com.anthropic.claude_browser_extension'
+jAn	redactedPlaceholder	String '<redacted>'
+jD	twoDigitsPattern	String '\\d\\d'
+jFr	promiseWithCancel	Wraps a callback-style op into a cancelable Promise
+jJr	fifteenThousandMs	Numeric 15000 (15e3)
+jQr	forty	Numeric constant 40
+jUi	oneTwentyThousandMs	Numeric 120000 (12e4)
+jV	emptyObject	Empty object literal {}
+jXi	argumentsTag	String '[object Arguments]' toString tag
+jZt	makeMinimatchWithDefaults	Returns minimatch fn+classes pre-bound with default options
+jaA	logLevelNumericMap	Maps off/error/warn/info/debug to numeric levels
+jgt	computerUseActionToolSchema	JSON schema for computer-use action tool (key,type,click,scroll…)
+jin	mcpEnvVarAllowPatterns	Regex array allowing MCP_/DEBUG/LOG_LEVEL/… env vars
+jjA	hookEventNames	Array of hook lifecycle event names (PreToolUse,SessionStart,…)
+jji	jsonSchemaDraft7Definition	JSON Schema draft-07 keyword definition object
+jjt	linuxDistroReleaseFiles	Maps release filenames to Linux distro names
+jlA	showWidgetUiUri	String 'ui://imagine/show-widget.html'
+jlt	oneMegabyte	1048576 bytes
+jme	ten	Numeric constant 10
+jpe	numberFormatPattern	Regex matching number-format placeholder spec
+jrA	doubleColon	String '::'
+jsA	gcpCredentialsFilename	String '.gcp-credentials.json'
+jwi	dateFormatTokenPattern	Regex matching date/time format tokens outside quotes
+jxt	undefinedTag	String '[object Undefined]' toString tag
+jyi	ulidPattern	Regex /^[0-9A-HJKMNP-TV-Z]{26}$/i matching ULID
+k0t	isMeaningfulValue	Predicate !sP(A) && A !== mT
+name	prismaIntegrationName	String 'Prisma' integration name
+pWe	prismaSentryIntegration	Sentry integration tracing prisma:* spans
+pYi	parseBase256Positive	Sums base-256 digits into a positive number
+rbe	resolveAbortReason	Returns reason as Error or wraps it as abort exception
+tPr	describeValueType	Returns a descriptive type name for a value (NaN/array/null/ctor name)
+tke	coerceLogLevel	Validates a log-level value against allowed set, warns otherwise
+tot	twosComplementByte	Returns (255 ^ A) + 1 & 255
+v_e	tenThousand	Numeric 10000 (1e4) used as case-fold cache cap
+wd	mergeOptions	Returns Object.assign({}, A, e) shallow merge

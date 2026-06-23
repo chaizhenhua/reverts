@@ -1,0 +1,231 @@
+soA	emptyObjectConstant	const soA = {} bare object literal
+srA	launchPreviewStaticPartition	'persist:launch-preview-static' Electron session partition
+sri	ipv4Pattern	/^(?:(?:25[0-5]|...)\.){3}...$/ matches dotted-quad IPv4
+sst	manifestJsonFileName	'manifest.json'
+str	credentialsSuffix	'-credentials' string suffix
+sv	coworkArtifactKind	'cowork-artifact'
+sxA	toError	coerces any value into an Error instance (handles [object Error], JSON.stringify fallback)
+sxr	fiveHundred	const sxr = 500
+szA	lowerAlnumDashUnderscorePattern	/^[a-z0-9_-]+$/
+t0i	uuidPattern	/^[0-9a-f]{8}-...-[1-8]...$/i UUID v1-8 format
+t2r	thirtySecondMs	const t2r = 3e4
+t3A	thirty	const t3A = 30
+t3t	tenSecondMs	const t3t = 1e4
+t4	skillsDirName	'skills'
+t6r	oauthProtocolVersion	'oauth-2025-04-20' OAuth protocol date version
+t7i	objectNumberTag	'[object Number]' toString tag
+tBt	apiVersionDate	'2025-11-25' date-stamped version string
+tDe	twoThousand	const tDe = 2e3
+tDi	ipv4Pattern	/^(?:(?:25[0-5]|...)\.){3}...$/ dotted-quad IPv4
+tDr	alnumDotDashUnderscore128Pattern	/^[A-Za-z0-9._-]{1,128}$/
+tFr	nonPrintableAsciiPattern	/[^\x09\x20-\x7E\x80-\xFF]/g matches non-printable bytes
+tGe	dismissTaskToolName	'dismiss_task'
+tKe	planTypeLabels	maps seven_day_opus→'Opus', seven_day_cowork→'Claude Cowork' etc plan labels
+tPe	hundredMebibytes	100 * 1024 * 1024
+tQi	ulidPattern	/^[0-9A-HJKMNP-TV-Z]{26}$/i Crockford base32 ULID
+tRr	fiveSecondMs	const tRr = 5e3
+tVr	twenty	const tVr = 20
+tWi	fiveMinuteMs	5 * 6e4
+tWr	thirtySecondMs	const tWr = 3e4
+tXi	humanTurnSentinel	'\n\nHuman:' Claude prompt turn marker
+tYe	thirtySecondMs	const tYe = 3e4
+tZt	escapedCommaPattern	/\,/g
+thi	bcp47LanguageTagPattern	/^[A-Za-z0-9]{2,8}(?:-[A-Za-z0-9]{1,8})*$/ language tag
+tmr	uploadSizeThresholdsBytes	[512KiB, 2MiB, 5MiB] byte size tiers
+tmt	boldMarkerPattern	/\[1m\]/i matches [1m] marker
+tne	fastifyLifecycleHooks	['onRequest','preParsing','preValidation',...,'onError'] Fastify hook names
+tpt	devDebugChannel	'dev-debug'
+trt	oauthAuthServerWellKnownPath	'.well-known/oauth-authorization-server'
+tsA	three	const tsA = 3
+txe	pipeStreamEndErrorHandler	attaches end/error handlers to stream, returns first arg
+u1i	noUppercasePattern	/^[^A-Z]*$/
+u2A	fifteenSecondMs	const u2A = 15e3
+u2i	thirtySecondMs	const u2i = 3e4
+u4t	aiPromptMessagesAttr	'ai.prompt.messages' telemetry attribute
+u7i	objectUint8ArrayTag	'[object Uint8Array]' toString tag
+u8	imageTokenSizing	{pxPerToken:28, maxTargetPx:1568, maxTargetTokens:1568} image token estimation
+uDr	fiveSecondMs	const uDr = 5e3
+uEi	jsonSchemaDraft07Url	'http://json-schema.org/draft-07/schema#'
+uIr	uIr16777228	const uIr = 16777228 magnitude-only (single use unclear)
+uJr	deviceListDirKey	'device_list_dir'
+uKe	fiveMinuteMs	5 * 6e4
+uLe	tenMinuteMs	const uLe = 6e5
+uLi	zodUnixTimeToJsonSchema	maps zod int-as-unix-time to {type:'integer',format:'unix-time'} JSON Schema
+uUi	sixtyFourKibibytes	64 * 1024
+uV	cachedInputTokensAttr	'gen_ai.usage.input_tokens.cached' telemetry attribute
+uWe	nonNegativeIntegerSource	'0|[1-9]\\d*' regex source fragment
+uXA	five	const uXA = 5
+u_i	desktopOauthCallbackUrl	'https://claude.ai/desktop/callback'
+ua	remoteMarketplaceMigrationLogTag	'[remoteMarketplaceMigration]'
+uen	diagnosticReportSections	array of diagnostic-collector descriptors (system-info, mcp-servers, logs, crash dumps)
+uet	vmPipeClosedErrorCode	'ERR_VM_PIPE_CLOSED'
+ufA	inferenceEndpointKinds	{CHAT:'chat',RESPONSES:'responses',EMBEDDINGS:'embeddings'}
+ugi	coworkUserFilesDispatcher	IPC dispatcher for CoworkUserFiles (getInfo/pickTarget/migrate/reveal)
+ugr	emptyArrayConstant	var ugr = [] bare array
+ume	hashTelemetryKey	Ex(_Si + value) hashes string/JSON for telemetry id
+utt	threeMinuteMs	3 * 6e4
+uu	frontmostAppAllowlistNote	error/help note: frontmost app must be in session allowlist
+uve	dockerNamesWordlist	['albattani','allen',...] Docker-style random name adjectives/scientists
+ux	sessionStaleReloginReason	'session_stale_relogin'
+uxe	bundledSystemValues	['bundled','system']
+v0	remoteOrgPluginsLogTag	'[custom-3p:remote-org-plugins]'
+v1t	mcpPromptResultMessageContentAttr	'mcp.prompt.result.message_content' telemetry attribute
+v3i	undefinedConstant	const v3i = undefined
+v4A	telemetryScrubPrefix	'desktop-telemetry-scrub-v1:'
+v4i	zodArrayToJsonSchema	emits JSON Schema array node with minItems/maxItems/items from zod def
+vDi	googleAccountsHost	'accounts.google.com'
+vFr	defaultProtocolPorts	{http:80,https:443,ws:80,wss:443,ftp:21}
+vMi	tenSecondMs	const vMi = 1e4
+vRi	hostnamePattern	/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[...])*$/ DNS hostname
+vSi	hexColorPattern	/^#[0-9A-Fa-f]{6}$/
+vUe	memoryDirPlaceholder	'{{memoryDir}}' template placeholder
+vVr	sixtySecondMs	const vVr = 6e4
+vXi	objectArgumentsTag	'[object Arguments]' toString tag
+vZi	objectFunctionTag	'[object Function]' toString tag
+v_i	threeHundred	const v_i = 300
+veA	fiftyMebibytes	50 * 1024 * 1024
+ven	buildViewMenu	builds Electron View menu (Reload/Back/Forward/Zoom) via formatMessage
+vf	sourceNameSchemaProperty	{name:{type:'string',description:'Source name.'}}
+vfA	baggageHeaderName	'baggage' W3C baggage header
+vkt	sensitiveDotfileNames	['.gitconfig','.bashrc','.env','.netrc',...] sensitive config filenames
+vxt	commaOrEqualsPattern	/,|=/
+w1r	three	const w1r = 3
+w1t	mcpServerNameAttr	'mcp.server.name' telemetry attribute
+w4t	aiToolCallArgsAttr	'ai.toolCall.args' telemetry attribute
+w6t	commaOrEqualsPattern	/,|=/
+w8e	chatsCreateEvent	'chats.create'
+wHi	parentPathSegments	splits path, reduces to accumulated ancestor directory list
+wIi	objectTypeName	'object'
+wKr	fortyFiveSecondMs	const wKr = 45e3
+wPA	doubleDash	'--'
+wQr	claudePluginDirName	'.claude-plugin'
+wRe	authorizationHeaderNames	['authorization','proxy-authorization']
+wSA	tabEnabledPredicates	predicates for coworkTabEnabled/isClaudeCodeForDesktopEnabled/chatTabEnabled flags
+wTe	zodUnionToJsonSchema	maps zod union options to JSON Schema anyOf
+wWi	mediaAppDenylist	['netflix','spotify','audible',...] media/streaming app names
+wXA	ccrByocProtocolVersion	'ccr-byoc-2025-07-29' date-stamped protocol version
+wZA	cdnLibraryScripts	Chart.js/Grid.js/Mermaid jsdelivr CDN urls with SRI hashes
+wZe	autoUpdaterDispatcher	IPC dispatcher for AutoUpdater interface
+wft	haloAttachKind	'halo_attach'
+wgi	orbitDeploysDispatcher	IPC dispatcher for OrbitDeploys interface
+wlA	twoThousand	const wlA = 2e3
+wrn	dedupResetHelper	{resetDedup:()=>{SU=undefined}} resets module-level dedup state
+wst	fiveMinuteMs	300 * 1e3
+wur	coworkSystemPrompt	Cowork mode system prompt text (application_details/claude_behavior)
+wxe	sixtyKibibytes	var wxe = 61440
+x1t	mcpClientToServerNotificationAttr	'mcp.notification.client_to_server' telemetry attribute
+x2i	fiveSecondMs	const x2i = 5e3
+x2r	mutableFalseFlag	let x2r = false mutable boolean flag
+x4i	zodDefaultToJsonSchema	applies zod default value into JSON Schema node
+x5t	redisSetCommands	['set','setex']
+x7e	loopbackHosts	['127.0.0.1','localhost']
+x8r	previewToolNames	['preview_stop','preview_list',...,'resize_window'] preview/browser tool names
+xDi	pluginTelemetryV1Prefix	'claude-plugin-telemetry-v1'
+xG	launchDispatcher	IPC dispatcher for Launch interface (preview server controls)
+xGt	fiftyKibibytes	50 * 1024
+xIr	xIr2486083521	'2486083521' magic numeric string literal
+xJt	ignoredErrorPatterns	regexes/strings for ignored browser errors (Script error, ResizeObserver loop)
+xL	sixtySecondMs	60 * 1e3
+xNe	computerInUseMessage	'Another Claude session is currently using the computer...'
+xPe	bashToolName	'Bash'
+xSi	chatRestrictionsLabel	{defaultMessage:'Chat restrictions',id:'Ztk/Zc3utE'}
+xSr	coworkArtifactBridgeDispatcher	IPC dispatcher for CoworkArtifactBridge interface
+xTe	toolNameAliases	maps Task→'Agent', KillShell→'TaskStop' tool name remapping
+xUi	fiveMinuteMs	5 * 6e4
+xWr	thirtySecondMs	const xWr = 3e4
+xWt	fourKibibytes	const xWt = 4096
+xXA	sixtySecondMs	const xXA = 6e4
+xXe	globalShortcutDispatcher	IPC dispatcher for GlobalShortcut interface
+xYi	wrapOnReadEntry	wraps tar onReadEntry to call resume() on each entry
+x_r	memoryUsageGuidanceLines	markdown lines on applying/verifying a memory
+xfe	zeroPointTwo	'0.2' version-like string
+xgA	executableFileExtensions	['.sh','.bat','.ps1','.py',...] executable script extensions
+xje	nine	const xje = 9
+xpr	chapterSchema	JSON schema for chapter {title,summary} required title
+xur	lineEndingVariants	['\n','\r','\r\n']
+xwt	debugJsonlFileName	'debug.jsonl'
+xxe	verificationStatusNames	['UNSPECIFIED','ABSENT','VERIFIED','INVALID','UNCHECKED']
+xxt	traceIdHexPattern	'(?![0]{16})[\\da-f]{16}' 16-hex non-zero trace id source
+xyr	conversationLengthLimitMessage	'This conversation has reached its length limit...'
+xzA	xzA900000Ms	const xzA = 9e5 (15 minutes); single use ambiguous
+y1r	hundred	const y1r = 100
+y1t	mcpServerVersionAttr	'mcp.server.version' telemetry attribute
+y5e	fifty	const y5e = 50
+y6i	clickPositionDescriptions	pixel vs normalized_0_100 coordinate field descriptions
+y8t	positiveInfinity	1 / 0
+yCr	fiveSecondMs	const yCr = 5e3
+yF	inferenceOauthScopes	'user:inference user:file_upload user:profile' OAuth scopes
+yHi	processUmask	() => process.umask()
+yIi	dataRefSchemaProperty	{$data:{type:'string',anyOf:[json-pointer formats]}} ajv $data schema
+yJt	thisMessageUri	'thismessage:/' base URI
+yKA	maxTokensRequestAttr	'gen_ai.request.max_tokens' telemetry attribute
+yKe	chartAndMapGuidance	markdown guidance for Chart.js charts and D3 choropleth maps
+yOi	websocketReconnectConfig	{initialReconnectionDelay,maxReconnectionDelay,growFactor,maxRetries} reconnect backoff
+yPt	semverComparatorOffsets	maps '>','>=','=' etc to comparison-result arrays
+yQr	ten	const yQr = 10
+yVe	semverPattern	/^(?:v)?(?<version>...major.minor.patch...prerelease...build)$/ semver regex
+yVr	twoMinuteMs	const yVr = 12e4
+yYi	splitTarPathPrefix	splits tar path into name/prefix under 100/configurable byte limits
+yZe	coworkArtifactsDispatcher	IPC dispatcher for CoworkArtifacts interface
+yZt	escapeGlobSpecialChars	escapes glob metacharacters ?*()[] in path
+ybt	coworkArtifactRunScheduledTaskAllowedKey	'coworkArtifactRunScheduledTaskAllowed'
+ydt	fortyFive	const ydt = 45
+yfA	linuxDistroVersionParsers	per-distro (alpine/arch/debian/ubuntu...) os-release version extractors
+ygA	wslClaudeCodeProgramFilesPath	'/mnt/c/Program Files/ClaudeCode' WSL path
+ygi	localSessionEnvironmentDispatcher	IPC dispatcher for LocalSessionEnvironment interface
+yht	maskedSecretDots	'••••••' masked secret display
+ypr	listSessionsToolDescription	tool description for listing other CCD sessions
+yri	aboutWindowDispatcher	IPC dispatcher for AboutWindow interface
+yte	one	const yte = 1
+yur	effortLevelHelpText	'Higher effort means more thorough responses...'
+yxe	fortyFiveSecondMs	var yxe = 45e3
+z$e	mcpMethodNameAttr	'mcp.method.name' telemetry attribute
+z2i	localPluginsDirName	'.local-plugins'
+z3	buildToolResultsReadGlob	builds Read(.../projects/**/tool-results/**) glob pattern string
+z4r	sevenDayMs	10080 * 60 * 1e3 (7 days in ms)
+z5r	fiveSecondMs	const z5r = 5e3
+z7e	platformClaudeHost	'platform.claude.com'
+z7r	z7r520	const z7r = 520 magnitude-only (single use)
+z8i	dataRefMetaSchemaTitle	'Meta-schema for $data reference (JSON AnySchema extension proposal)'
+z9i	assertPositiveInteger	throws Fr if value is not a non-negative integer
+zAn	logLevelTagPattern	/\[error\]|\[warn\]|\[custom-3p\b|.../i matches log tags
+zAt	deploymentEnvironments	['production','staging','local']
+zFr	http2RequestAdapter	{request(...)} HTTP/2 request adapter mapping headers/pseudo-headers
+zFt	definePropertyOrAssign	defines enumerable prop via TQA or direct assign
+zJi	fiveMinuteMs	300 * 1e3
+zJr	thirtySecondMs	const zJr = 3e4
+zL	claudeAgentSdkPackageName	'@anthropic-ai/claude-agent-sdk'
+zOe	stripBracketsAndTrailingDots	removes wrapping [] and trailing dots
+zOr	twentySecondMs	var zOr = 2e4
+zOt	anchoredClock	class combining epoch + monotonic clock to produce now()
+zQr	fiveMinuteMs	300 * 1e3
+zSi	claudeAiHost	'claude.ai'
+zSr	thumbnailPngFileName	'thumbnail.png'
+zVA	noneResolver	{label:'none',resolve:()=>Promise.resolve(null),everResolved:()=>true}
+zXi	objectBooleanTag	'[object Boolean]' toString tag
+zY	sessionMgmtPluginId	'ccd_session_mgmt'
+zZr	simulatorDispatcher	IPC dispatcher for Simulator interface (attach/detach/gesture)
+z_e	fiveMinuteMs	300 * 1e3
+zar	alnumDotDashUnderscore128Pattern	/^[A-Za-z0-9._-]{1,128}$/
+zeA	three	const zeA = 3
+zk	twenty	const zk = 20
+zkA	thirtySecondMs	const zkA = 3e4
+znA	escapeChar	'\x1B' ESC control character
+zot	threeHundredSecondMs	const zot = 3e5 (5 minutes)
+zp	requestMessagesAttr	'gen_ai.request.messages' telemetry attribute
+zqA	microsoftLoginHost	'login.microsoftonline.com'
+zur	framebufferLaunchConfigNote	help text for adding framebuffer entry to .claude/launch.json
+zvA	escapeChar	'\x1B' ESC control character
+zwi	unicodeWhitespacePattern	/[\t-\r \x85‎... ]/i whitespace incl bidi marks
+zxe	systemVolumesDataPath	'/system/volumes/data'
+zyi	nanoidPattern	/^[a-z0-9_-]{21}$/i 21-char nanoid
+JSONSchema	jsonSchemaState	var JSONSchema = {} mutable object exported as snr
+name	firebaseIntegrationName	const name = 'Firebase'; used as Sentry integration name
+sdt	screenshotMaskWin32Config	{screenshotFiltering:'mask',platform:'win32'}
+set	mapStringTransform	curried: applies transform fn to string or array of strings
+sgi	accountDispatcher	IPC dispatcher for Account interface (setAccountDetails)
+slA	twoThousand	const slA = 2e3
+sne	anonymousName	'anonymous'
+snn	oneHourMs	3600 * 1e3
+zei	firebaseIntegrationFactory	() => ({name, setupOnce(){Wei()}}) Sentry-style integration
+zD	hashPluginTelemetryKey	(A)=>tAt(xDi + A) hashes plugin telemetry id

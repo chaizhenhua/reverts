@@ -1,0 +1,1058 @@
+[
+  {
+    "file": "account__account-details",
+    "orig": "sdt",
+    "gold": "screenshotFilteringDefaults",
+    "proposed": "screenshotFilterConfig"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "sgi",
+    "gold": "accountDispatcher",
+    "proposed": "accountBridge"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "slA",
+    "gold": "dispatchDebounceMs",
+    "proposed": "defaultTimeoutMs2000"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "soA",
+    "gold": "emptyFormatRegistry",
+    "proposed": "emptyOptionsObject"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "t3A",
+    "gold": "defaultRetryCount",
+    "proposed": "thirtyCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "t3t",
+    "gold": "tenSecondTimeoutMs",
+    "proposed": "tenThousandMs"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "tDe",
+    "gold": "twoSecondDelayMs",
+    "proposed": "twoThousandMs"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "tKe",
+    "gold": "sevenDayPromoLabels",
+    "proposed": "planTypeLabels"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "tRr",
+    "gold": "fiveSecondTimeoutMs",
+    "proposed": "fiveThousandMs"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "tVr",
+    "gold": "defaultBatchSize",
+    "proposed": "twentyCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "thi",
+    "gold": "bcp47TagPattern",
+    "proposed": "languageTagRegex"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "tmr",
+    "gold": "uploadSizeTiersBytes",
+    "proposed": "uploadSizeBuckets"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "tsA",
+    "gold": "defaultRetryAttempts",
+    "proposed": "threeCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "txe",
+    "gold": "resumeStreamOnEnd",
+    "proposed": "pipeStreamEnd"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "uDr",
+    "gold": "fiveSecondTimeoutMsB",
+    "proposed": "fiveThousandMs2"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "uLi",
+    "gold": "unixTimeSchema",
+    "proposed": "zodDateToJsonSchema"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "uXA",
+    "gold": "defaultMaxRetries",
+    "proposed": "fiveCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "ugr",
+    "gold": "pendingEntriesBuffer",
+    "proposed": "emptyArray"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "ume",
+    "gold": "hashPayload",
+    "proposed": "hashWithSalt"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "uve",
+    "gold": "dockerNameWords",
+    "proposed": "codenameWords"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "uxe",
+    "gold": "bundledSystemModes",
+    "proposed": "runtimeSourceModes"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "v3i",
+    "gold": "undefinedSentinel",
+    "proposed": "undefinedValue"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "vMi",
+    "gold": "tenSecondTimeoutMsB",
+    "proposed": "tenThousandMs2"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "vVr",
+    "gold": "oneMinuteMs",
+    "proposed": "sixtySecondMs"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "v_i",
+    "gold": "defaultThumbnailPx",
+    "proposed": "threeHundred"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "veA",
+    "gold": "maxUploadBytes",
+    "proposed": "fiftyMegabytes"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "vxt",
+    "gold": "baggageDelimiterPattern",
+    "proposed": "commaOrEqualsRegex"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "w1r",
+    "gold": "defaultConcurrency",
+    "proposed": "threeCount2"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "w6t",
+    "gold": "baggageDelimiterPatternB",
+    "proposed": "commaOrEqualsRegexDup"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "wHi",
+    "gold": "dirChainFromPath",
+    "proposed": "splitParentPaths"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "wZA",
+    "gold": "cdnLibraryPins",
+    "proposed": "cdnLibraries"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "wlA",
+    "gold": "twoSecondTimeoutMs",
+    "proposed": "twoThousandMs2"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "x2i",
+    "gold": "fiveSecondTimeoutMsC",
+    "proposed": "fiveThousandMs3"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "x2r",
+    "gold": "loggedFlag",
+    "proposed": "mutableBoolFlag"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "xG",
+    "gold": "launchDispatcher",
+    "proposed": "launchBridge"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "xL",
+    "gold": "oneMinuteMsB",
+    "proposed": "sixtySecondMs2"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "xNe",
+    "gold": "computerBusyMessage",
+    "proposed": "computerInUseError"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "xWt",
+    "gold": "defaultChunkBytes",
+    "proposed": "fourKilobytes"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "xje",
+    "gold": "defaultPrecisionDigits",
+    "proposed": "nineCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "xur",
+    "gold": "lineEndingVariants",
+    "proposed": "newlineVariants"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "xxe",
+    "gold": "verificationStates",
+    "proposed": "attestationStates"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "xzA",
+    "gold": "fifteenMinuteMs",
+    "proposed": "nineHundredThousandMs"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "y1r",
+    "gold": "defaultPageLimit",
+    "proposed": "hundredCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "y5e",
+    "gold": "defaultBatchSizeB",
+    "proposed": "fiftyCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "y6i",
+    "gold": "clickPositionDescriptions",
+    "proposed": "coordinateDescriptions"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "yCr",
+    "gold": "fiveSecondTimeoutMsD",
+    "proposed": "fiveThousandMs4"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "yKe",
+    "gold": "chartJsGuidance",
+    "proposed": "chartsAndMapsGuide"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "yOi",
+    "gold": "reconnectionConfig",
+    "proposed": "reconnectBackoffConfig"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "yQr",
+    "gold": "defaultMaxItems",
+    "proposed": "tenCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "ydt",
+    "gold": "defaultLineLimit",
+    "proposed": "fortyFiveCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "yfA",
+    "gold": "osReleaseParsers",
+    "proposed": "linuxDistroVersionParsers"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "ygi",
+    "gold": "localSessionEnvDispatcher",
+    "proposed": "localSessionEnvironmentBridge"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "yte",
+    "gold": "defaultRetryCountB",
+    "proposed": "oneCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "z5r",
+    "gold": "fiveSecondTimeoutMsE",
+    "proposed": "fiveThousandMs5"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "z7r",
+    "gold": "defaultStatusCode",
+    "proposed": "fiveTwentyCount"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zAn",
+    "gold": "logNoiseRegex",
+    "proposed": "logLevelTagRegex"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zOr",
+    "gold": "twentySecondTimeoutMs",
+    "proposed": "twentyThousandMs"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zOt",
+    "gold": "monotonicEpochClock",
+    "proposed": "anchoredClock"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zY",
+    "gold": "sessionMgmtFlag",
+    "proposed": "sessionMgmtPluginId"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zZr",
+    "gold": "simulatorDispatcher",
+    "proposed": "simulatorBridge"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zar",
+    "gold": "pluginNamePatternB",
+    "proposed": "tokenNameRegexDup"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zeA",
+    "gold": "defaultRetryAttemptsB",
+    "proposed": "threeCount3"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zk",
+    "gold": "defaultMaxItemsB",
+    "proposed": "twentyCount2"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zot",
+    "gold": "fiveMinuteMsD",
+    "proposed": "fiveMinuteSec"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zvA",
+    "gold": "ansiEscapeCharB",
+    "proposed": "escapeCharDup"
+  },
+  {
+    "file": "account__account-details",
+    "orig": "zyi",
+    "gold": "nanoidPattern",
+    "proposed": "nanoIdRegex"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "Class",
+    "gold": "emptyConstructorClass",
+    "proposed": "EmptyBase"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "fEi",
+    "gold": "jsonSchemaProps",
+    "proposed": "jsonSchemaDraft07Meta"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "fGA",
+    "gold": "globRangeCharClass",
+    "proposed": "braceCharClass"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "fHi",
+    "gold": "normalizeCaseFold",
+    "proposed": "getNormalizedUpperCase"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "fHt",
+    "gold": "credentialedUrlPattern",
+    "proposed": "gitRemoteUrlRegex"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "fJr",
+    "gold": "defaultRetryCount",
+    "proposed": "defaultMaxRetries"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "fS",
+    "gold": "twoDigitDayPattern",
+    "proposed": "oneOrTwoDigitsPattern"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "fXi",
+    "gold": "dataViewByteLength",
+    "proposed": "defaultBatchSize"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "fZr",
+    "gold": "mntClaudeRelativePath",
+    "proposed": "claudeMountDir"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "fgr",
+    "gold": "streamChunkSize",
+    "proposed": "eightKilobytes"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "fqA",
+    "gold": "dxtSpecVersion",
+    "proposed": "versionZeroPointFour"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "g0r",
+    "gold": "pollIntervalMs",
+    "proposed": "fiveHundred"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "g5i",
+    "gold": "oidcFederationFeatureFlag",
+    "proposed": "oidcFederationKey"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gCr",
+    "gold": "ntStatusCodePattern",
+    "proposed": "macErrorCodeRegex"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gGt",
+    "gold": "isKnownKey",
+    "proposed": "hasGtSet"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gUi",
+    "gold": "twoMinuteMsAlt",
+    "proposed": "twoMinutesMs"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gX",
+    "gold": "localeHourCycleMap",
+    "proposed": "hourCycleByRegion"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gZr",
+    "gold": "mntClaudeRelativePathLeadingDot",
+    "proposed": "claudeMountDir"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "g_r",
+    "gold": "setDisplayNamePrompt",
+    "proposed": "displayNameSettingDescription"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gde",
+    "gold": "parseMonthIndex",
+    "proposed": "monthIndexFromOneBased"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gdt",
+    "gold": "maxLogLines",
+    "proposed": "fifty"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gft",
+    "gold": "tieredAppsAccessPrompt",
+    "proposed": "tieredAppsHelpText"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "ggr",
+    "gold": "appDirectoryPaths",
+    "proposed": "getAppDataPaths"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gie",
+    "gold": "genaiTrackedMethods",
+    "proposed": "geminiStreamingMethods"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gj",
+    "gold": "commandExecution",
+    "proposed": "CommandRunner"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "gk",
+    "gold": "maxFileSizeBytes",
+    "proposed": "fiveHundredMegabytes"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "h$t",
+    "gold": "printableHeaderValuePattern",
+    "proposed": "printableAsciiRegex"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "h1r",
+    "gold": "maxRedirectDepth",
+    "proposed": "six"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "hFr",
+    "gold": "streamRequestBody",
+    "proposed": "streamToAsyncIterable"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "hKi",
+    "gold": "openConfirmationScreenPrompt",
+    "proposed": "selectExtensionPrompt"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "hX",
+    "gold": "ansiColorCodes",
+    "proposed": "ansiLogColors"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "hYA",
+    "gold": "coworkConfigTestEntries",
+    "proposed": "configTestOverrides"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "hZr",
+    "gold": "mntClaudeRelativePathNoLeading",
+    "proposed": "claudeMountDirNoPrefix"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "hcr",
+    "gold": "fiveSecondMsAlt",
+    "proposed": "fiveSecondsMs"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "het",
+    "gold": "fiftyItemLimit",
+    "proposed": "fifty"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "hkt",
+    "gold": "envKeyword",
+    "proposed": "envKey"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "hmr",
+    "gold": "pickHeadersAndBody",
+    "proposed": "jsonBodySerializer"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "hpr",
+    "gold": "requestDirectoryAccessPrompt",
+    "proposed": "requestDirectoryToolDescription"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "i$r",
+    "gold": "httpClientVersion",
+    "proposed": "versionOnePoint17"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "i1A",
+    "gold": "nonSlashCharClass",
+    "proposed": "notSlashClass"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "i1t",
+    "gold": "hundredItemLimit",
+    "proposed": "hundred"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "i9t",
+    "gold": "schemaModuleVersion",
+    "proposed": "versionZeroOneZero"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "iDi",
+    "gold": "cidrv4Pattern",
+    "proposed": "ipv4CidrRegex"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "iFi",
+    "gold": "googleOauthAuthorizeUrl",
+    "proposed": "googleAuthUrl"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "iG",
+    "gold": "defaultResultLimit",
+    "proposed": "twoHundred"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "iRr",
+    "gold": "thirtySecondMsAlt",
+    "proposed": "thirtySecondsMs"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "iVr",
+    "gold": "sixtySecondMs",
+    "proposed": "oneMinuteMs"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "i_t",
+    "gold": "remoteClaudeHomePath",
+    "proposed": "remoteClaudeDir"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "ibe",
+    "gold": "makeDomException",
+    "proposed": "createAbortException"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "isCode",
+    "gold": "isShortcutModifierCode",
+    "proposed": "isReservedCode"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "ivt",
+    "gold": "slugPattern",
+    "proposed": "alphanumericNameRegex"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "ize",
+    "gold": "isoDateRegexSource",
+    "proposed": "leapYearDatePattern"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "j2r",
+    "gold": "dotenvVariantNames",
+    "proposed": "envExampleFileNames"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "j3r",
+    "gold": "bedrockModelErrorPattern",
+    "proposed": "modelNotReadyRegex"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "jFr",
+    "gold": "makeCancelablePromise",
+    "proposed": "promisifyWithCleanup"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "jJr",
+    "gold": "fifteenSecondMsAlt",
+    "proposed": "fifteenSecondsMs"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "jUi",
+    "gold": "twoMinuteMsThird",
+    "proposed": "twoMinutesMs"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "jaA",
+    "gold": "logLevelNumericMap",
+    "proposed": "logLevelValues"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "jin",
+    "gold": "mcpEnvPassthroughPatterns",
+    "proposed": "passthroughEnvVarRegexes"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "jji",
+    "gold": "jsonSchemaPropsAlt",
+    "proposed": "jsonSchemaDraft07Meta"
+  },
+  {
+    "file": "ipc__filesystem-bridge-consta.ts",
+    "orig": "v_e",
+    "gold": "caseFoldCacheLimit",
+    "proposed": "maxCacheSize"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "J$t",
+    "gold": "isStoredBooleanFlagEnabled",
+    "proposed": "isValueTrue"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "J3i",
+    "gold": "buildHintsRequest",
+    "proposed": "buildHintRequestPayload"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "JY",
+    "gold": "validateSettingsFields",
+    "proposed": "collectSettingsValidationWarnings"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Jii",
+    "gold": "pruneSupersededIntegrations",
+    "proposed": "dedupeIntegrations"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "JkA",
+    "gold": "dedupeSortFilteredLinesWrapper",
+    "proposed": "normalizeEntries"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Jlr",
+    "gold": "loadSettingsTiers",
+    "proposed": "resolveManagedSettingsTiers"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Jqr",
+    "gold": "isBypassPermissionRule",
+    "proposed": "isComputerUseTool"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "JuA",
+    "gold": "isFileNotFound",
+    "proposed": "isEnoentError"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "K$t",
+    "gold": "isNonEmptyStringKey",
+    "proposed": "isValidAttributeKey"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "K1t",
+    "gold": "isInternalMetricName",
+    "proposed": "isInternalSpanAttribute"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "K2r",
+    "gold": "prefixServerToolName",
+    "proposed": "makeNamespacedToolName"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "K9e",
+    "gold": "truncateEachToLength",
+    "proposed": "truncateStringsTo"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "KIr",
+    "gold": "resolveSettingsKind",
+    "proposed": "getComputerUseMode"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "KOA",
+    "gold": "bigintReplacer",
+    "proposed": "bigIntJsonReplacer"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "KVt",
+    "gold": "isElectronRenderer",
+    "proposed": "isRendererProcess"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Kae",
+    "gold": "isValidSelectionPayload",
+    "proposed": "isValidExtensionConfig"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Kgr",
+    "gold": "filterGatedFeatures",
+    "proposed": "getEnabledFeatures"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Khr",
+    "gold": "getEnvironment",
+    "proposed": "getEnv"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Kni",
+    "gold": "isValidNamedOrigin",
+    "proposed": "isOriginRecord"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Koi",
+    "gold": "isValidFileAppInfo",
+    "proposed": "isFileAttachmentInfo"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Kqr",
+    "gold": "hasBypassPermissionAllow",
+    "proposed": "hasComputerUsePermission"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Kst",
+    "gold": "hasNativeMessagingDir",
+    "proposed": "isNativeMessagingHostInstalled"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "L2i",
+    "gold": "connectMcpServerWithAuth",
+    "proposed": "connectMcpServerByTransport"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "L6A",
+    "gold": "resolveAllowedSettingsSources",
+    "proposed": "getEnabledSettingsSources"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "L7i",
+    "gold": "objectKeysAll",
+    "proposed": "getOwnEnumerableKeys"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "LD",
+    "gold": "deriveCredentialKind",
+    "proposed": "resolveInferenceCredentialKind"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "LIA",
+    "gold": "onWrapReady",
+    "proposed": "onWrapped"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "LLt",
+    "gold": "wrapConfigResult",
+    "proposed": "runConfigOpSafely"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "MTi",
+    "gold": "emitJsonSchema",
+    "proposed": "zodRegistryToJsonSchema"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "O6A",
+    "gold": "isChicagoPlatformEnabled",
+    "proposed": "isComputerUsePlatformEligible"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Plr",
+    "gold": "isMergeParentBehavior",
+    "proposed": "shouldMergeParentSettings"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "QZe",
+    "gold": "isValidScheduledTaskTemplate",
+    "proposed": "isScheduledTaskCreateInput"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "RsA",
+    "gold": "summarizeOutputEnvelope",
+    "proposed": "summarizeEnvelopeOrRedact"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "TP",
+    "gold": "isRendererProcess",
+    "proposed": "isBrowserMainContext"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "UI",
+    "gold": "buildLeveledLogger",
+    "proposed": "resolveLogger"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "WQr",
+    "gold": "dedupeSortFilteredLines",
+    "proposed": "dedupeSortValidEntries"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "Z3r",
+    "gold": "classifyInferenceError",
+    "proposed": "classifyCliAuthError"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "_any",
+    "gold": "makeAnySchema",
+    "proposed": "anyType"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "_undefined",
+    "gold": "makeUndefinedSchema",
+    "proposed": "undefinedType"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "any",
+    "gold": "anySchema",
+    "proposed": "anyType"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "c3t",
+    "gold": "resolveFrameContexts",
+    "proposed": "applyContextLines"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "doA",
+    "gold": "filterInternalMetrics",
+    "proposed": "stripInternalAttributes"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "e6r",
+    "gold": "getFileDiffOldNewText",
+    "proposed": "getGitFileDiffPair"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "eIr",
+    "gold": "copyFileIfExists",
+    "proposed": "copyFileIgnoreMissing"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "nE",
+    "gold": "applyRedactions",
+    "proposed": "applyRedactionReplacements"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "q2r",
+    "gold": "buildBridgeToolRegistry",
+    "proposed": "announceConnectedStdioTools"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "qsi",
+    "gold": "isValidUpdateInfo",
+    "proposed": "isUpdateStatusRecord"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "t$t",
+    "gold": "hasWrap",
+    "proposed": "isWrapped"
+  },
+  {
+    "file": "misc__config-settings-and-json-utils",
+    "orig": "undefined",
+    "gold": "undefinedSchema",
+    "proposed": "undefinedType"
+  }
+]

@@ -1,0 +1,233 @@
+sdt	screenshotMaskingDefaults	literal object {screenshotFiltering:'mask', platform:'win32'}
+set	mapStringOrArray	curried (A)=>(e)=> maps fn over string or array of strings
+sgi	accountSetDetailsDispatcher	IPC dispatcher for interface "Account" method setAccountDetails
+slA	maxDirectoryEntries	used in config-settings-and-json-utils as the directory-listing output cap ("Output is capped at ${slA} entries")
+sne	anonymousSourceName	literal 'anonymous'; used as fallback span/source name in cluster-2875
+snn	oneHourMs	3600*1e3; used in auto-archive-engine as `t - n >= snn` archive-age threshold
+soA	emptySchemaCache	empty object {} schema cache
+srA	defaultLaunchPreviewPartition	'persist:launch-preview-static'; cluster-2862 fallback session partition
+sri	ipv4Pattern	regex matching dotted-quad IPv4 address
+sst	manifestJsonFilename	literal 'manifest.json' (aliased accountDetailsAlias in wake-scheduler)
+str	credentialsSuffix	literal '-credentials'
+sv	coworkArtifactScheme	'cowork-artifact'; cluster-2863 builds `${sv}://local/...` URL scheme
+sxA	toError	coerces any value into an Error instance
+sxr	initialBackoffMs	500; sse-transport `Math.min(sxr * Math.pow(2, r-1), axr)` exponential backoff base
+szA	lowerAlnumDashUnderscorePattern	regex /^[a-z0-9_-]+$/
+t0i	uuidPattern	UUID v1-8 regex
+t2r	initFailedBackoffMs	3e4; chrome-extension-bridge sets initFailedUntil = now + t2r after init failure
+t3A	tokenRefreshThresholdMs	30; cached-token-provider compares remaining lifetime `i > t3A` to trigger backgroundRefresh
+t3t	maxLineNumber	1e4; cluster-2863 guards `A.lineno > t3t` (line/column sanity bound)
+t4	skillsDirName	literal 'skills'; local-skills-plugin joins path with t4
+t6r	oauthAnthropicBetaHeader	'oauth-2025-04-20'; teleport-to-cloud sends as 'anthropic-beta' header
+t7i	numberTag	'[object Number]' toString tag
+tBt	dxtSpecVersion	literal date '2025-11-25'
+tDe	resolveProxyTimeoutMs	2e3; zod-mcp-protocol `resolveProxy timed out after ${tDe}ms`
+tDi	ipv4Pattern2	duplicate dotted-quad IPv4 regex
+tDr	tokenName128Pattern	/^[A-Za-z0-9._-]{1,128}$/ identifier/name format
+tFr	nonPrintableAsciiPattern	regex matching non-printable / non-Latin1 chars (global)
+tGe	dismissTaskName	literal 'dismiss_task'; zod-checks-date uses as tool name
+tKe	planPromoLabels	map of plan ids (seven_day_opus,...) to display labels (Opus, Sonnet, Claude Code...)
+tPe	maxTotalUploadBytes	100*1024*1024; zod-checks-base64 `g > tPe` "exceeds the 100MB per-call limit"
+tQi	ulidPattern	Crockford base32 26-char ULID regex
+tRr	defaultVmReadyTimeoutMs	5e3; zod-checks-e164 picks `iRr : tRr` as VM-ready wait timeout
+tVr	maxPaginationPages	20; gh-rest-client loop bound `n < tVr` page fetch limit
+tWi	rateLimitWindowMs	5*6e4; zod-schema-methods evicts entries older than tWi window
+tWr	thirtySecondMs	3e4 duration constant
+tXi	humanTurnMarker	literal '\n\nHuman:' prompt turn marker
+tYe	gitDiffMemoTtlMs	3e4; git-status-service uses tYe as gitDiff/gitDiffStats memo TTL
+tZt	escapedCommaPattern	regex /\\,/g
+thi	bcp47TagPattern	regex matching BCP-47-like language subtag sequences
+tmr	uploadSizeTiers	[512KB, 2MB, 5MB] size thresholds
+tmt	boldAnsiMarkerPattern	regex /\[1m\]/i
+tne	fastifyLifecycleHooks	ordered Fastify request lifecycle hook names
+tpt	devDebugChannel	literal 'dev-debug'
+trt	oauthServerMetadataPath	'.well-known/oauth-authorization-server'; cluster-2862 appends to base URL
+tsA	maxRetryAttempts	3; remote-dispatch retry loop `o < tsA` with backoff
+txe	pipeEndErrorForwarder	wires stream 'end'/'error' to a callback, returns first arg
+u1i	noUppercasePattern	regex /^[^A-Z]*$/
+u2A	defaultCacheTtlMs	15e3; github-pr cache `Date.now() + (... ?? u2A)` expiry default
+u2i	thirtySecondMs2	3e4 duration constant
+u4t	aiPromptMessagesKey	'ai.prompt.messages'; remapped to 'gen_ai.request.messages' in zod-checks-net
+u7i	uint8ArrayTag	'[object Uint8Array]' toString tag
+u8	imageTokenSizing	{pxPerToken:28, maxTargetPx:1568, maxTargetTokens:1568} image-to-token sizing
+uDr	maxScanIndex	5e3; zod-schema-methods bound `g <= uDr` scan limit
+uEi	jsonSchemaDraft07Uri	'http://json-schema.org/draft-07/schema#'
+uIr	arm64BuildId	'16777228'-numeric; cluster-2864 arm64 expected value vs CIr
+uJr	deviceListDirToolName	'device_list_dir'; config-settings uses as tool name
+uKe	authTokenMaxLifetimeMs	5*6e4; zod-checks-int clamps token expiry to uKe
+uLe	skillsSyncIntervalMs	6e5; local-skills-plugin _syncIntervalMs default (10 min)
+uLi	unixTimeIntegerSchema	builds {type:'integer',format:'unix-time'} JSON schema from min/max checks
+uUi	defaultChunkSize	64*1024; cluster-2854 default arg `e = uUi`
+uV	cachedInputTokensKey	'gen_ai.usage.input_tokens.cached' telemetry attribute
+uWe	nonNegativeIntPattern	'0|[1-9]\\d*' regex fragment
+uXA	maxRecursionDepth	5; config-settings/axios-core "walks subdirectories up to depth ${uXA}"
+u_i	desktopCallbackUrl	'https://claude.ai/desktop/callback' OAuth redirect
+ua	remoteMarketplaceMigrationTag	'[remoteMarketplaceMigration]' log prefix
+uen	diagnosticReportSections	diagnostic-collection section descriptors (system-info, logs, crash...)
+uet	vmPipeClosedErrorCode	'ERR_VM_PIPE_CLOSED'; cluster-2854 compares against EPIPE
+ufA	apiEndpointKinds	{CHAT:'chat', RESPONSES:'responses', EMBEDDINGS:'embeddings'}
+ugi	coworkUserFilesDispatcher	IPC dispatcher for interface "CoworkUserFiles"
+ugr	pendingErrorReports	cluster-2854 `ugr.push({type:'error', error})` queue of errors buffered before the reporter (UTe) is ready
+ume	hashWithPrefix	Ex hash of _Si prefix + stringified arg
+utt	autoRespawnGapMs	3*6e4; cluster-2862 "no ${utt/6e4}m gap" auto-respawn budget window
+uu	uuencodeExtension	'.uu' extension constant
+uve	dockerNameWords	scientist surnames list (albattani, allen, archimedes...) for name generation
+ux	sessionStaleReloginCode	'session_stale_relogin' error code
+uxe	runtimeSourceModes	['bundled','system']
+v0	remoteOrgPluginsLogTag	'[custom-3p:remote-org-plugins]' log prefix
+v1t	mcpPromptResultMessageContentKey	'mcp.prompt.result.message_content' telemetry attr
+v3i	undefinedValue	undefined constant
+v4A	telemetryScrubPrefix	'desktop-telemetry-scrub-v1:'
+v4i	applyArrayConstraints	applies minItems/maxItems and array type to a JSON schema node
+v7e	isoDatePattern	date regex fragment (leap-year aware YYYY-MM-DD)
+vAn	mainProcessDebuggerMenuItem	builds 'Enable Main Process Debugger' checkbox menu item
+vDi	googleAccountsHost	'accounts.google.com'
+vFr	defaultPortsByProtocol	{http:80, https:443, ws:80, wss:443, ftp:21}
+vMi	tenSecondTimeoutMs	1e4; connection-registry setTimeout(n, vMi)
+vRi	hostnamePattern	regex for dotted lowercase hostname labels
+vSi	hexColorPattern	regex /^#[0-9A-Fa-f]{6}$/
+vUe	memoryDirPlaceholder	'{{memoryDir}}'; cluster-2862 replaces in memory-guidelines template
+vVr	nonGitDirCacheTtlMs	6e4; git-status-service treats cache fresh if `< vVr`
+vXi	argumentsTag	'[object Arguments]' toString tag
+vZi	functionTag	'[object Function]' toString tag
+v_i	maxSlugLength	300; config-settings slices generated slug to v_i
+veA	transcriptTailBytes	50*1024*1024; disk-transcript-loader tail-loads last `veA/1024/1024` MB
+ven	viewMenuTemplate	builds the View menu (Reload, Back, Forward, Zoom...) menu template
+vf	sourceNameSchema	{name:{type:'string', description:'Source name.'}} schema fragment
+vfA	baggageHeaderName	'baggage'; baggage-propagator sets header named vfA
+vkt	sensitiveDotfileNames	dotfiles to redact (.gitconfig, .bashrc, .env, .netrc...)
+vxt	commaOrEqualsPattern	regex /,|=/
+w1r	gapPenaltyWeight	3; fuzzy-path-index scoring `w1r + v*m1r` gap penalty
+w1t	mcpServerNameKey	'mcp.server.name' telemetry attribute
+w4t	aiToolCallArgsKey	'ai.toolCall.args'; remapped to 'gen_ai.tool.input'
+w6t	commaOrEqualsPattern2	regex /,|=/
+w8e	chatsCreateMethod	'chats.create' method name
+wHi	parentDirPaths	splits a path into successive ancestor directory paths
+wIi	objectTypeName	literal 'object'; used as JSON-schema type value
+wKr	fortyFiveSecondTimeoutMs	45e3; ccr-sse-transport setTimeout(..., wKr)
+wPA	dashSeparator	literal '--'; cluster-2863 disambiguates names with wPA join
+wQr	claudePluginDirName	'.claude-plugin'
+wRe	authHeaderNames	['authorization','proxy-authorization'] redaction list
+wSA	tabEnablementPredicates	predicates for coworkTab/chatTab/claudeCodeForDesktop enabled flags
+wTe	zodUnionToJsonSchema	maps a zod union's options to JSON-schema anyOf
+wWi	mediaAppNames	consumer media/streaming app names (netflix, spotify, kindle...)
+wXA	byocAnthropicBetaHeader	'ccr-byoc-2025-07-29'; zod-checks-email sends as 'anthropic-beta'
+wZA	cdnLibraryAssets	CDN url+SRI+hint entries for Chart.js, Grid.js, Mermaid
+wZe	autoUpdaterDispatcher	IPC dispatcher for interface "AutoUpdater"
+wft	haloAttachEvent	'halo_attach'; cluster-2854 compares `A === wft`
+wgi	orbitDeploysDispatcher	IPC dispatcher for interface "OrbitDeploys"
+wlA	maxResultsLimit	2e3; cluster-2860 loop bound `i.length < wlA`
+wrn	dedupResetController	{resetDedup} clears module-level SU dedup state
+wst	defaultFetchTimeoutMs	300*1e3; plugin-api-client/fetcher default request timeout
+wur	coworkSystemPrompt	Cowork-mode application_details/claude_behavior system prompt
+wxe	maxEphemeralEventBytes	61440; ccr-worker-client drops stream_event over `>${wxe} bytes`
+x1t	mcpClientToServerNotificationKey	'mcp.notification.client_to_server' telemetry attr
+x2i	fiveSecondTimeoutMs	5e3; chrome-extension-bridge-client setTimeout(..., x2i)
+x2r	dedupFlag	mutable boolean dedup guard (init false)
+x4i	applyDefaultToSchema	copies a zod default value onto a JSON schema node
+x5t	redisSetCommands	['set','setex']
+x7e	loopbackHosts	['127.0.0.1','localhost']
+x8r	previewToolNames	preview/browser MCP tool names (preview_stop, computer, find...)
+xDi	pluginTelemetryNamespace	'claude-plugin-telemetry-v1'; zD hashes xDi+arg
+xG	launchDispatcher	IPC dispatcher for interface "Launch" (preview servers)
+xGt	logTailBytes	50*1024; zod-schema-methods reads last xGt bytes of a file
+xIr	armBuildFlagId	'2486083521'; cluster-2862 feature-flag id passed to lt()
+xJt	ignoredErrorPatterns	error messages/patterns to ignore (Script error, ResizeObserver loop...)
+xL	minReconnectDelayMs	60*1e3; zod-checks-net `Math.min(xL * 2**(s-1), n7)` reconnect backoff floor
+xNe	computerBusyMessage	'Another Claude session is currently using the computer...' lock-held message
+xPe	bashToolName	'Bash'; config-settings checks `e === xPe || e.startsWith(xPe + '(')`
+xSi	chatRestrictionsLabel	intl {defaultMessage:'Chat restrictions'}
+xSr	coworkArtifactBridgeDispatcher	IPC dispatcher for interface "CoworkArtifactBridge"
+xTe	legacyToolNameAliases	maps old tool names to new (Task->Agent, KillShell->TaskStop...)
+xUi	fiveMinuteMs	5*6e4 duration constant
+xWr	defaultExecTimeoutMs	3e4; cluster-2860 destructures `timeout: n = xWr`
+xWt	maxBaggageEntryLength	4096; baggage-propagator filters entries `length <= xWt`
+xXA	sftpOpTimeoutMs	6e4; cluster-2862 sftp op timeout 'sftpReaddir: timed out'
+xXe	globalShortcutDispatcher	IPC dispatcher for interface "GlobalShortcut"
+xYi	wrapOnReadEntryResume	wraps tar onReadEntry to always resume the stream
+x_r	memoryGuidanceLines	markdown lines for "Before applying/recommending a memory"
+xfe	dxtVersionDefault	'0.2'; zod-v3-runtime dxt_version default (deprecated)
+xgA	executableFileExtensions	executable/script extensions (.sh, .bat, .ps1, .js, .py...)
+xje	timestampPadWidth	9; cluster-2875 `Math.pow(10, xje)` and zero-pad width
+xpr	markChapterToolSchema	JSON schema for mark_chapter (title/summary) tool
+xur	lineEndings	['\n','\r','\r\n']
+xwt	debugJsonlFilename	'debug.jsonl'; cluster-2854 joins artifact dir with xwt
+xxe	attestationStates	['UNSPECIFIED','ABSENT','VERIFIED','VERIFIED_BY_GATE','INVALID','UNCHECKED']
+xxt	traceIdPattern	'(?![0]{16})[\\da-f]{16}' 16-hex non-zero id fragment
+xyr	conversationLengthLimitMessage	'This conversation has reached its length limit...'
+xzA	apiTimeoutMs	9e5; deep-link uses as API_TIMEOUT_MS, local-session-manager adds 1min
+y1r	topLevelCacheSize	100; fuzzy-path-index M1r(e, y1r) cache size
+y1t	mcpServerVersionKey	'mcp.server.version' telemetry attribute
+y5e	retryBackoffStepMs	50; remote-dispatch `setTimeout(y5e * (o+1))` per-retry delay step
+y6i	clickCoordinateDescriptions	pixels vs normalized_0_100 x/y coordinate field docs
+y8t	positiveInfinity	1/0
+yCr	keepAlivePingTimeoutMs	5e3; zod-xid 'Keep-alive ping timed out' timeout
+yF	oauthScopes	'user:inference user:file_upload user:profile' scope string
+yHi	getProcessUmask	returns process.umask()
+yIi	dataRefSchemaFragment	{$data:{type:'string', anyOf:[relative-json-pointer, json-pointer]}}
+yJt	thisMessageBaseUri	'thismessage:/'; zod-checks-guid base for relative URLs
+yKA	maxTokensRequestKey	'gen_ai.request.max_tokens' telemetry attribute
+yKe	chartJsGuidanceMarkdown	Chart.js + D3 choropleth artifact authoring guidance
+yOi	websocketReconnectConfig	{initialReconnectionDelay, maxReconnectionDelay, growFactor, maxRetries}
+yPt	semverComparatorMap	maps comparison operators ('>','>=',...) to compare-result sets
+yQr	tenCount	10 integer constant
+yVe	semverPattern	named-group semantic-version regex
+yVr	pendingBucketTtlMs	12e4; zod-format-error returns yVr when no pending bucket
+yYi	splitTarPathSegments	splits a path to fit tar 100-byte name/prefix fields
+yZe	coworkArtifactsDispatcher	IPC dispatcher for interface "CoworkArtifacts"
+yZt	escapeGlobSpecialChars	escapes glob metacharacters in a path
+ybt	coworkArtifactRunScheduledTaskAllowedKey	'coworkArtifactRunScheduledTaskAllowed'; zod-checks-int wr.get(ybt)
+ydt	titleBarHeightPx	45; claude-swift-binding/zod-xid compute inset from ydt and zoom
+yfA	linuxDistroVersionParsers	per-distro (ubuntu, fedora, arch...) os-release version extractors
+ygA	wslClaudeCodePath	'/mnt/c/Program Files/ClaudeCode' WSL install path
+ygi	localSessionEnvironmentDispatcher	IPC dispatcher for interface "LocalSessionEnvironment"
+yht	redactedValuePlaceholder	'••••••'; zod-checks-email returns yht for short/redacted values
+ypr	listSessionsToolDescription	description for list_sessions tool
+yri	aboutWindowDispatcher	IPC dispatcher for interface "AboutWindow"
+yte	promiseStateFulfilled	1; sentry promise polyfill compares _state === yte (resolved)
+yur	effortLevelHelpText	'Higher effort means more thorough responses...' help string
+yxe	sseLivenessTimeoutMs	45e3; sse-transport 'no frame in ${yxe/1e3}s' liveness timeout
+z$e	mcpMethodNameKey	'mcp.method.name' telemetry attribute
+z2i	localPluginsDirName	'.local-plugins'
+z3	toolResultsReadGlob	builds a Read(...) glob over projects/**/tool-results/**
+z4r	transcriptStaleMs	10080*60*1e3; disk-transcript-loader skips if newer than z4r (7 days)
+z5r	fiveSecondTimeoutMs2	5e3; zod-format-error AbortSignal.timeout(z5r)
+z7e	platformClaudeHost	'platform.claude.com'; main-view builds oauth/authorize URL
+z7r	maxWindowWidthPx	520; zod-checks-string `Math.min(z7r, width - ctA)` window-width clamp
+z8i	dataRefMetaSchemaTitle	'Meta-schema for $data reference...' description
+z9i	assertPositiveInteger	throws unless arg is a non-negative integer
+zAn	logLevelLinePattern	regex matching [error]/[warn]/[custom-3p]/[updater]... log lines
+zAt	deploymentEnvironments	['production','staging','local']
+zD	hashWithPluginTelemetryPrefix	tAt hash of xDi + arg
+zFr	http2RequestAdapter	{request} performing an HTTP/2 request via session
+zFt	defineEnumerableProperty	defines/sets an enumerable writable property
+zJi	stealthRelaunchMarkerTtlMs	300*1e3; tar-2 stealth-relaunch marker freshness window
+zJr	maxReconnectDelayMs	3e4; sdk-trace-base reconnect `Math.min(WJr*1.5**n, zJr)` ceiling
+zL	claudeAgentSdkPackage	'@anthropic-ai/claude-agent-sdk'
+zOe	stripBracketsAndTrailingDots	strips surrounding [ ] and trailing dots from a string
+zOr	twentySecondMs	2e4 duration constant
+zOt	anchoredClock	clock combining epoch + monotonic performance time (now())
+zQr	aumidCacheTtlMs	300*1e3; wake-scheduler aumidCache freshness window
+zSi	claudeAiHost	'claude.ai'; zod-schema-methods default host arg
+zSr	thumbnailFilename	'thumbnail.png'; mcp-sdk-disposable joins artifact dir with zSr
+zVA	nullLockResolver	{label:'none', resolve->null, everResolved->true} no-op lock
+zXi	booleanTag	'[object Boolean]' toString tag
+zY	sessionMgmtMcpNamespace	'ccd_session_mgmt'; anthropic-sdk-headers builds `mcp__${zY}__...`
+zZr	simulatorDispatcher	IPC dispatcher for interface "Simulator"
+z_e	reconnectDelaySlackMs	300*1e3; zod-checks-net subtracts z_e from computed delay
+zar	tokenName128Pattern2	/^[A-Za-z0-9._-]{1,128}$/ identifier format
+zeA	maxPostRetries	3; config-settings event_logging retry loop `a <= zeA`
+zei	firebaseIntegration	integration factory named 'Firebase' (setupOnce)
+zk	maxAttachmentCount	20; cluster-2862 'dropping ... over the ${zk} cap' attachment limit
+zkA	previewMcpTimeoutMs	3e4; zod-checks-net '[Preview MCP] timed out after ${zkA}ms'
+znA	escapeChar	'\x1B' (ESC); main-view builds ANSI escape regex from znA
+zot	dataCacheTtlMs	3e5; zod-schema-methods $r(..., 'dataCacheTtlMs', zot, ...) default
+zp	requestMessagesKey	'gen_ai.request.messages' telemetry attribute
+zqA	microsoftLoginHost	'login.microsoftonline.com'
+zur	framebufferLaunchConfigHelp	help text for adding a framebuffer entry to .claude/launch.json
+zvA	escapeChar2	'\x1B' (ESC); ssh-server-controller builds ANSI strip regex
+zwi	whitespacePattern	regex matching unicode whitespace/bidi chars
+zxe	systemVolumesDataPrefix	'/system/volumes/data'; zod-format-error strips this prefix
+zyi	nanoid21Pattern	/^[a-z0-9_-]{21}$/i nanoid format
+name	firebaseIntegrationName	literal 'Firebase'; used as integration name in zei
+JSONSchema	jsonSchemaCache	empty object {} reused as a JSON-schema accumulator (exported as snr)

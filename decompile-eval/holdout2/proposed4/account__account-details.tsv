@@ -1,0 +1,233 @@
+JSONSchema	jsonSchemaRegistry	var {} accumulating JSON schema definitions (exported as snr)
+name	firebaseIntegrationName	const = 'Firebase' (used as integration name in zei)
+sdt	screenshotMaskWin32Defaults	literal { screenshotFiltering:'mask', platform:'win32' }
+set	mapStringOrArray	(A)=>(e)=> applies A to string e or each string in array e
+sgi	accountDispatcher	IPC dispatcher for channel interface "Account" (setAccountDetails)
+slA	twoThousand	const = 2e3
+sne	anonymousLabel	const = 'anonymous'
+snn	oneHourMs	const = 3600 * 1e3
+soA	emptyObjectMap	const = {} (mutable string-keyed map)
+srA	launchPreviewStaticPartition	const = 'persist:launch-preview-static'
+sri	ipv4Pattern	regex matching dotted IPv4 address
+sst	manifestJsonFilename	const = 'manifest.json'
+str	credentialsSuffix	const = '-credentials'
+sv	coworkArtifactLabel	const = 'cowork-artifact'
+sxA	coerceToError	coerces any value into an Error instance
+sxr	fiveHundred	const = 500
+szA	lowerAlnumDashUnderscorePattern	regex /^[a-z0-9_-]+$/
+t0i	uuidPattern	regex matching a UUID
+t2r	thirtyThousand	const = 3e4
+t3A	thirty	const = 30
+t3t	tenThousand	const = 1e4
+t4	skillsLabel	const = 'skills'
+t6r	oauthProtocolVersion	const = 'oauth-2025-04-20'
+t7i	objectNumberTag	const = '[object Number]'
+tBt	dateNov2025	const = '2025-11-25'
+tDe	twoThousand2	const = 2e3
+tDi	ipv4Pattern2	regex matching dotted IPv4 address
+tDr	nameToken1To128Pattern	regex /^[A-Za-z0-9._-]{1,128}$/
+tFr	nonPrintableCharPattern	regex matching non-printable chars
+tGe	dismissTaskLabel	const = 'dismiss_task'
+tKe	sevenDayPromoPlanNames	map of seven_day_* keys to product display names
+tPe	hundredMegabytes	const = 100 * 1024 * 1024
+tQi	ulidPattern	regex /^[0-9A-HJKMNP-TV-Z]{26}$/i (Crockford base32, ULID)
+tRr	fiveThousand	const = 5e3
+tVr	twenty	const = 20
+tWi	fiveMinuteMs	const = 5 * 6e4
+tWr	thirtyThousand2	const = 3e4
+tXi	humanPromptMarker	const = '\n\nHuman:'
+tYe	thirtyThousand3	const = 3e4
+tZt	escapedCommaPattern	regex /\,/g
+thi	languageTagPattern	regex matching BCP47-style subtag sequence
+tmr	uploadSizeThresholdsBytes	[512KB, 2MB, 5MB]
+tmt	boldAnsiMarkerPattern	regex /\[1m\]/i
+tne	fastifyHookNames	array of request lifecycle hook names
+tpt	devDebugLabel	const = 'dev-debug'
+trt	oauthAuthServerWellKnownPath	const = '.well-known/oauth-authorization-server'
+tsA	three	const = 3
+txe	pipeEndErrorToCallback	wires stream end/error to a callback, returns first arg
+u1i	noUppercasePattern	regex /^[^A-Z]*$/
+u2A	fifteenThousand	const = 15e3
+u2i	thirtyThousand4	const = 3e4
+u4t	promptMessagesAttr	const = 'ai.prompt.messages'
+u7i	objectUint8ArrayTag	const = '[object Uint8Array]'
+u8	imageTokenSizing	{ pxPerToken, maxTargetPx, maxTargetTokens }
+uDr	fiveThousand2	const = 5e3
+uEi	jsonSchemaDraft07Url	const = 'http://json-schema.org/draft-07/schema#'
+uIr	aboveSixteenMegabytes	const = 16777228 (just over 16 MiB)
+uJr	deviceListDirLabel	const = 'device_list_dir'
+uKe	fiveMinuteMs2	const = 5 * 6e4
+uLe	tenMinuteMs	const = 6e5
+uLi	zodUnixTimeToJsonSchema	maps a zod date/int schema to integer unix-time JSON schema
+uUi	sixtyFourKilobytes	const = 64 * 1024
+uV	cachedInputTokensAttr	const = 'gen_ai.usage.input_tokens.cached'
+uWe	semverNumericIdentifierPattern	const = '0|[1-9]\\d*'
+uXA	five	const = 5
+u_i	desktopCallbackUrl	const = 'https://claude.ai/desktop/callback'
+ua	remoteMarketplaceMigrationLogPrefix	const = '[remoteMarketplaceMigration]'
+uen	diagnosticCollectors	array of diagnostic-report collector descriptors
+uet	vmPipeClosedErrorCode	const = 'ERR_VM_PIPE_CLOSED'
+ufA	endpointKinds	{ CHAT, RESPONSES, EMBEDDINGS }
+ugi	coworkUserFilesDispatcher	IPC dispatcher for channel interface "CoworkUserFiles"
+ugr	emptyArray	var = []
+ume	hashSiSiPrefixed	hashes _Si prefix + stringified arg via Ex
+utt	threeMinuteMs	const = 3 * 6e4
+uu	frontmostAllowlistToolNote	const describing frontmost-app allowlist requirement
+uve	dockerNameAdjectivesOrSurnames	array of scientist/inventor surnames (Docker-style names)
+ux	sessionStaleReloginLabel	const = 'session_stale_relogin'
+uxe	runtimeSourceKinds	['bundled', 'system']
+v0	remoteOrgPluginsLogPrefix	const = '[custom-3p:remote-org-plugins]'
+v1t	mcpPromptResultContentAttr	const = 'mcp.prompt.result.message_content'
+v3i	undefinedValue	const = undefined
+v4A	telemetryScrubPrefix	const = 'desktop-telemetry-scrub-v1:'
+v4i	zodArrayToJsonSchema	maps a zod array schema to JSON schema with min/max items
+v7e	isoDatePattern	regex source for ISO calendar date incl leap-year Feb 29
+vAn	mainProcessDebuggerMenuItem	builds 'Enable Main Process Debugger' checkbox menu item
+vDi	googleAccountsHost	const = 'accounts.google.com'
+vFr	defaultProtocolPorts	{ http:80, https:443, ws:80, wss:443, ftp:21 }
+vMi	tenThousand2	const = 1e4
+vRi	hostnamePattern	regex matching dot-separated hostname labels
+vSi	hexColorPattern	regex /^#[0-9A-Fa-f]{6}$/
+vUe	memoryDirPlaceholder	const = '{{memoryDir}}'
+vVr	sixtyThousandMs	const = 6e4
+vXi	objectArgumentsTag	const = '[object Arguments]'
+vZi	objectFunctionTag	const = '[object Function]'
+v_i	threeHundred	const = 300
+veA	fiftyMegabytes	const = 50 * 1024 * 1024
+ven	viewMenuTemplate	builds the View menu (reload/back/forward/zoom items)
+vf	sourceNameJsonSchema	{ name: { type:'string', description:'Source name.' } }
+vfA	baggageLabel	const = 'baggage'
+vkt	dotfileNames	array of sensitive dotfile names (.gitconfig, .env, ...)
+vxt	commaOrEqualsPattern	regex /,|=/
+w1r	three2	const = 3
+w1t	mcpServerNameAttr	const = 'mcp.server.name'
+w4t	toolCallArgsAttr	const = 'ai.toolCall.args'
+w6t	commaOrEqualsPattern2	regex /,|=/
+w8e	chatsCreateEvent	const = 'chats.create'
+wHi	dirnameSegmentsReducer	splits path and reduces to accumulated dir segments
+wIi	objectTypeName	const = 'object'
+wKr	fortyFiveThousand	const = 45e3
+wPA	doubleDash	const = '--'
+wQr	claudePluginDirName	const = '.claude-plugin'
+wRe	authorizationHeaderNames	['authorization', 'proxy-authorization']
+wSA	tabEnablementChecks	predicates for cowork/claudeCodeForDesktop/chat tab enablement
+wTe	zodUnionToJsonSchema	maps a zod union schema to JSON anyOf
+wWi	mediaAndPiracyAppNames	array of streaming/reading/torrent app names
+wXA	ccrByocProtocolVersion	const = 'ccr-byoc-2025-07-29'
+wZA	cdnLibraryEntries	chart.js/grid.js/mermaid CDN url+sri+hint entries
+wZe	autoUpdaterDispatcher	IPC dispatcher for channel interface "AutoUpdater"
+wft	haloAttachLabel	const = 'halo_attach'
+wgi	orbitDeploysDispatcher	IPC dispatcher for channel interface "OrbitDeploys"
+wlA	twoThousand3	const = 2e3
+wrn	dedupResetter	{ resetDedup: clears module-level SU }
+wst	fiveMinuteMs3	const = 300 * 1e3
+wur	coworkSystemPrompt	Cowork mode system prompt text
+wxe	sixtyKilobytes	const = 61440
+x1t	mcpClientToServerNotificationAttr	const = 'mcp.notification.client_to_server'
+x2i	fiveThousand3	const = 5e3
+x2r	mutableFalseFlag	let = false
+x4i	zodDefaultToJsonSchema	applies a zod default's value into JSON schema
+x5t	redisSetCommandNames	['set', 'setex']
+x7e	loopbackHosts	['127.0.0.1', 'localhost']
+x8r	previewToolNames	array of preview_*/browser tool names
+xDi	pluginTelemetryNamespace	const = 'claude-plugin-telemetry-v1'
+xG	launchDispatcher	IPC dispatcher for channel interface "Launch"
+xGt	fiftyKilobytes	const = 50 * 1024
+xIr	numericIdString	const = '2486083521'
+xJt	ignoredErrorPatterns	array of regex/strings for benign errors to ignore
+xL	sixtyThousandMs2	const = 60 * 1e3
+xNe	computerInUseMessage	message: another Claude session is using the computer
+xPe	bashToolName	const = 'Bash'
+xSi	chatRestrictionsLabel	{ defaultMessage:'Chat restrictions', id }
+xSr	coworkArtifactBridgeDispatcher	IPC dispatcher for channel interface "CoworkArtifactBridge"
+xTe	legacyToolNameAliases	maps legacy tool names to current names
+xUi	fiveMinuteMs4	const = 5 * 6e4
+xWr	thirtyThousand5	const = 3e4
+xWt	fourKilobytes	const = 4096
+xXA	sixtyThousandMs3	const = 6e4
+xXe	globalShortcutDispatcher	IPC dispatcher for channel interface "GlobalShortcut"
+xYi	wrapOnReadEntryResume	wraps onReadEntry to also resume the entry stream
+x_r	memoryApplicationGuidanceLines	markdown lines about applying a memory
+xfe	versionZeroPointTwo	const = '0.2'
+xgA	executableFileExtensions	array of script/executable extensions (.sh, .bat, ...)
+xje	nine	const = 9
+xpr	chapterToolSchema	JSON schema for chapter title/summary tool
+xur	lineEndingSequences	['\n', '\r', '\r\n']
+xwt	debugJsonlFilename	const = 'debug.jsonl'
+xxe	attestationStates	['UNSPECIFIED','ABSENT','VERIFIED',...]
+xxt	nonZeroHex16Pattern	regex source for non-zero 16-hex-digit value
+xyr	conversationLengthLimitMessage	message: conversation reached its length limit
+xzA	fifteenMinuteMs	const = 9e5
+y1r	hundred	const = 100
+y1t	mcpServerVersionAttr	const = 'mcp.server.version'
+y5e	fifty	const = 50
+y6i	clickCoordinateDescriptions	pixel and normalized_0_100 x/y coordinate descriptions
+y8t	positiveInfinity	const = 1 / 0
+yCr	fiveThousand4	const = 5e3
+yF	oauthScopeString	const = 'user:inference user:file_upload user:profile'
+yHi	getProcessUmask	() => process.umask()
+yIi	dataRefSchemaFragment	{ $data: relative/json-pointer schema }
+yJt	thisMessageUri	const = 'thismessage:/'
+yKA	requestMaxTokensAttr	const = 'gen_ai.request.max_tokens'
+yKe	chartsHtmlGuidance	Chart.js/D3 maps HTML authoring guidance text
+yOi	reconnectionBackoffConfig	{ initial/maxReconnectionDelay, growFactor, maxRetries }
+yPt	comparatorOperatorOffsets	map of comparison operator to allowed compare results
+yQr	ten	const = 10
+yVe	semverPattern	named-group regex matching a semantic version
+yVr	oneHundredTwentyThousandMs	const = 12e4
+yYi	splitTarPathName	splits a path into tar name/prefix within byte limits
+yZe	coworkArtifactsDispatcher	IPC dispatcher for channel interface "CoworkArtifacts"
+yZt	escapeGlobMagicChars	escapes glob special chars in a string
+ybt	coworkArtifactRunScheduledTaskAllowedKey	const = 'coworkArtifactRunScheduledTaskAllowed'
+ydt	fortyFive	const = 45
+yfA	linuxDistroVersionParsers	per-distro release-string version extractors
+ygA	windowsClaudeCodeProgramPath	const = '/mnt/c/Program Files/ClaudeCode'
+ygi	localSessionEnvironmentDispatcher	IPC dispatcher for channel interface "LocalSessionEnvironment"
+yht	maskedValuePlaceholder	const = '••••••'
+ypr	listSessionsToolDescription	description for listing the user's CCD sessions
+yri	aboutWindowDispatcher	IPC dispatcher for channel interface "AboutWindow"
+yte	one	const = 1
+yur	effortLevelHint	hint text about higher effort tradeoffs
+yxe	fortyFiveThousand2	const = 45e3
+z$e	mcpMethodNameAttr	const = 'mcp.method.name'
+z2i	localPluginsDirName	const = '.local-plugins'
+z3	readProjectsToolResultsRule	builds a Read(...) permission rule for project tool-results
+z4r	oneWeekMs	const = 10080 * 60 * 1e3 (7 days)
+z5r	fiveThousand5	const = 5e3
+z7e	platformClaudeHost	const = 'platform.claude.com'
+z7r	fiveHundredTwenty	const = 520
+z8i	dataRefMetaSchemaTitle	const = 'Meta-schema for $data reference...'
+z9i	assertNonNegativeInteger	throws unless arg is a non-negative integer
+zAn	logErrorWarnPattern	regex matching error/warn/custom-3p log lines
+zAt	deploymentEnvironments	['production', 'staging', 'local']
+zD	pluginTelemetryHasher	hashes the plugin-telemetry namespace + arg
+zFr	http2RequestAdapter	{ request } adapter wrapping an HTTP/2 session request
+zFt	defineOrAssignProperty	defines or assigns an enumerable property on A
+zJi	fiveMinuteMs5	const = 300 * 1e3
+zJr	thirtyThousand6	const = 3e4
+zL	claudeAgentSdkPackageName	const = '@anthropic-ai/claude-agent-sdk'
+zOe	stripBracketsAndTrailingDots	strips surrounding [] and trailing dots
+zOr	twentyThousand	const = 2e4
+zOt	epochMonotonicClock	clock combining epoch millis with a monotonic clock
+zQr	fiveMinuteMs6	const = 300 * 1e3
+zSi	claudeAiHost	const = 'claude.ai'
+zSr	thumbnailPngFilename	const = 'thumbnail.png'
+zVA	noopResolver	{ label:'none', resolve→null, everResolved→true }
+zXi	objectBooleanTag	const = '[object Boolean]'
+zY	sessionMgmtNamespace	const = 'ccd_session_mgmt'
+zZr	simulatorDispatcher	IPC dispatcher for channel interface "Simulator"
+z_e	fiveMinuteMs7	const = 300 * 1e3
+zar	nameToken1To128Pattern2	regex /^[A-Za-z0-9._-]{1,128}$/
+zei	firebaseIntegration	() => ({ name: 'Firebase', setupOnce() {...} }) Sentry-style integration factory
+zeA	three3	const = 3
+zk	twenty2	const = 20
+zkA	thirtyThousand7	const = 3e4
+znA	escapeChar	const = '\x1B' (ESC)
+zot	threeHundredThousandMs	const = 3e5
+zp	requestMessagesAttr	const = 'gen_ai.request.messages'
+zqA	microsoftLoginHost	const = 'login.microsoftonline.com'
+zur	framebufferLaunchConfigHelp	help text for adding a framebuffer launch entry
+zvA	escapeChar2	const = '\x1B' (ESC)
+zwi	whitespaceCharPattern	regex matching unicode whitespace chars
+zxe	systemVolumesDataPath	const = '/system/volumes/data'
+zyi	nanoid21Pattern	regex /^[a-z0-9_-]{21}$/i (21-char nanoid)

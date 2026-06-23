@@ -1,0 +1,1 @@
+modules/island/ipc/main-view-window-wiring.ts

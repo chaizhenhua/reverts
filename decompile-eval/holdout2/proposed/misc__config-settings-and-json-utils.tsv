@@ -1,0 +1,197 @@
+Iye	makeGreaterThanCheck	returns new check {check:'greater_than', value, inclusive:false}; used in zod-mcp-protocol as A.gt/positive check builder
+J$t	isExperimentMetaUiEnabled	returns A.getValue(H$t) === true; boolean getValue predicate
+J3i	buildComputerUseHintsPayload	builds {version:1, requests:[{type, parameters.website, keywords, reason, required}], goal} from A.entries; consumed by q3i hints request
+J5t	estimateSerializedByteLength	measures byteLength/string length/JSON.stringify length of value or array sum; used in settings-extension-dispatchers
+J7A	getPrimaryDisplayInfo	returns hGt(pGt) — display lookup; used in image-handling for glowWindow bounds
+J7i	copyArray	classic lodash copyArray: for(;++t<i;) e[t]=A[t]
+J8i	deepMergeObjects	shallow-clones A then deep-merges nested plain objects from e per key
+J8r	getCachedGlobalQ	returns gQ (cached global)
+JGi	describeTokenParseError	returns explanatory message for malformed token output (starts with '{', multiple lines, control chars)
+JHe	deleteSessionAndLogDeletion	extracts inferenceLogIds, deleteSession, then uzr cowork-deletion event; used in remote-dispatch
+JLt	readConfigSafely	LLt('readConfig', () => V2A(A))
+JOr	startKeepaliveHeartbeat	sets heartbeatTimer interval emitting session_keepalive_heartbeat, calls activityCallback when CLAUDE_CODE_REMOTE_SEND_KEEPALIVES
+JRi	validateHostnameList	pushes errors when not array / wrong host format / wildcard / numeric / private; settings hostname validation
+JV	resolveSyntheticModel	returns pI().syntheticAllowedModels[A] ?? A
+JWt	parseBaggageHeader	splits on SoA, parses each via bje into key/value record (W3C baggage)
+JY	collectSettingsValidationWarnings	concats Ecr + ucr(hooks) + dcr validation warnings for a settings file
+Jae	isValidAgainstIuaSchema	iUA.safeParse(A).success
+Jai	isApprovedPermissionEntry	checks A.toolName is string
+Jar	createAjvInstance	new Yar.default({strict:false,validateFormats,allErrors}) + Har formats; Ajv factory
+Jb	redactCredentialsInText	redacts bedrock-api-key, AWS key id, sk-ant-* keys, Entra secret; used widely as credential scrubber
+Jhr	getResolvedPathEnv	returns (await zz()).PATH
+Jie	firstWordLowercase	A.split(' ')[0].toLowerCase()
+Jii	dropConflictingSentryIntegrations	for {userAdded,toRemove} in Hii removes toRemove integration when userAdded present
+Jk	isOauthHttpTransport	(transport==='http'||'sse') && !!A.oauth
+JkA	dedupeAndSortStrings	WQr(A) wrapper — dedupe/sort allowlist strings
+Jlr	resolveManagedSettingsTiers	merges admin/parentSlice from remote/system/file/user managed settings tiers
+Jme	selectMatchingArgRules	filters rule list by match/flag/unless_flag against args; permission arg matching
+Joi	isAppInfoWithIcon	checks appName string + optional appIconBase64
+Jqr	isComputerUseToolPermission	tool === xPe or startsWith(xPe+'(')
+Jte	posixJoinPath	classic path.join: builds normalized POSIX path from segments
+Jti	resolvePreloadDefaultPath	require.resolve('../../preload/default.js') with fileURLToPath fallback
+JuA	isEnoentError	_Q(A) === 'ENOENT'
+Jur	parseJsonWithComments	JSONC parser into JS value via lQt visitor; aliased parseJsonWithComments in wake-scheduler
+Jvt	readRemoteFileWithTimeout	Promise.race readFile vs setTimeout 'remote file read timed out'
+Jxt	setStoredValue	A.setValue(bJA, e)
+K$t	isNonEmptyStringKey	typeof string && !== ''; OTel attribute key validity
+K0t	applyProxyToRequestOptions	sets Proxy-Authorization basic auth + host/hostname/port/path from proxy; axios proxy
+K1t	isInternalMetricAttribute	J1t.has or prefixed by ktA./k1t./b1t. (and not _count/_error)
+K2r	encodeServerToolName	`${server.replace(/[^a-zA-Z0-9_-]/g,'_')}__${tool}`; bridged MCP tool name key
+K3	isAbortOrCanceledError	name==='AbortError' or message includes 'FetchRequestCanceledException'
+K3i	parsePartnerValidationResponse	parses {success,error} buffer to approved/invalid('partner_validation')/notProvided
+K7e	isBuiltinMcpServer	!!A && A.server !== undefined; aliased isBuiltinMcpServer
+K8r	getCachedDb	returns db
+K9e	truncateStringsToLength	maps A[i].substr(0,e); used for monthNamesShort
+K9i	mapSetEntry	lodash MapCache set: FuA(this,A).set, adjusts size
+KAA	clampRoundedNumber	Math.max(t, Math.min(i, Math.round(A))) with default; clamps window bounds in chrome-extension
+KBt	baseMergeDeep	lodash baseMerge recursion via Lcr/jcr/wXi stack
+KDi	redactEmails	A.replace(JDi, '<email>')
+KHi	getDxtMaxTotalSizeBytes	(ia().dxtMaxTotalSizeMB ?? JHi) * 1024 * 1024
+KIr	getComputerUseOptedOutHint	returns 'stub'/'settings' based on platform/feature; used as computerUseOptedOutHint
+KJr	buildRemoteFileToolset	builds device_list_dir/stage/commit_files tool dispatcher for remote file transfer
+KLi	normalizeJsonSchemaTarget	maps target to 'draft-7' or 'draft-2020-12'
+KLt	writeConfigSafely	LLt('writeConfig', () => $2A(A, ...))
+KOA	bigintJsonReplacer	JSON.stringify replacer converting bigint to string
+KOr	registerActivityCallback	sets activityCallback and starts heartbeat if refcount>0
+KRi	isAllNumericHostname	every dot-segment is decimal or hex; IP-vs-hostname check
+KTA	buildFormDataKey	axios toFormData key builder: concat tokens with dots/brackets
+KV	noop	empty function
+KVA	isTerminalSsoRefreshError	HVA && status 400/401/403; AWS SSO terminal rejection
+KVt	isRendererProcess	Xn.process?.type === 'renderer'
+Kae	isValidXriEntry	xri.safeParse(A).success
+Kcr	safeGetProperty	guards constructor/__proto__ access; lodash safeGet, aliased $xA
+Ker	hashStringToInt	djb2-like (e<<5)-e+charCodeAt hash
+Kfr	parseKeyChord	splits 'a+b' combo into {key,modifiers,text}; used in preview-context
+Kgr	getEnabledBuildGatedFeatures	Jgr.filter(A => fBA[A].buildGate())
+Kgt	validateTeachStepArgs	validates explanation/next_preview/actions/anchor for teach step
+Kh	resolveSafeSubdirectory	att path then gtt symlink-safe traversal check
+Khr	getEnvironment	returns zz()
+Kie	stripSourceContextFrames	deletes pre_context/context_line/post_context from stack frame
+Kin	buildReadTerminalToolset	read_terminal MCP tool reading integrated terminal panel buffer
+Kjt	detectIcuLocaleAndTimezone	probes Intl ICU for locale + timeZone via 'enero' check
+Kk	redactCommandOutputInMessage	replaces 'Output:' tail with RsA(redacted); used for error_message scrubbing
+Klr	loadSettingsForSource	dispatches policySettings/flagSettings source loading + merge
+Kni	isNamedOriginEntry	checks A.name string + A.origin string
+Koi	isFileAttachmentInfo	checks filePath/fileName/appName strings
+Kqr	hasComputerUsePermissionAllowed	A.permissions.allow.some(Jqr) computer-use check
+Ksi	isKnownUpdateStatus	Jsi.has(A)
+Kst	isNativeMessagingHostInstalled	finds host by name and checks Jst(e) !== null
+Kte	trimEmptyEdgeSegments	slices off leading/trailing empty path segments
+Kur	parseJsonTree	builds JSONC node tree (object/property/array/literal) via lQt visitor
+Kve	newTokenRateLimitWindow	{windowStartMs:Date.now(), inputTokens:0, outputTokens:0}
+Kvt	joinUrlPath	`${A.replace(/\/$/,'')}/${e}` URL/path joiner
+Kxt	deleteStoredValue	A.deleteValue(bJA)
+Kyi	getCachedEnumA	returns Jyi
+Kzr	buildCoworkFilePreviewImpl	returns {isEnabled,isVmReady,show,hide,parkAndCapture}; cowork native file preview impl
+Kzt	extractHttpStatusCode	reads status/statusCode/status_code/output.statusCode, default 500
+L$	sanitizeOtelAttributes	copies own props with valid key/value, warns via de.diag; OTel attribute sanitizer
+L0t	stripArraySuffix	removes trailing '[]' from key; axios form key helper
+L2A	isUnsafeRelativePath	absolute or contains '..'; path-traversal guard
+L2i	connectMcpServer	dispatches stdio/http(oauth)/sse/lazy connect for MCP config
+L6A	getOrderedSettingsSources	allowedSources set + flagSettings/policySettings filtered by Ygr order
+L6t	getMcpServersValue	A.getValue(XKA)
+L7A	probeEgressHosts	batched _Lt reachability probes up to V5r hosts
+L7i	collectAllKeys	lodash keysIn: enumerable + inherited keys
+LD	resolveInferenceCredentialKind	derives credential kind from inferenceProvider; aliased inferenceCredentialKind
+LEA	getUserDataDir	resolves Electron userData dir with Claude suffix; used as config base
+LFi	getStartupWarnings	returns {warnings:[...NAt()]} or {}
+LGe	createDeferred	returns {promise,resolve,reject} deferred
+LIA	onWrapInstalled	registers callback to fire when A._wrap is installed (shimmer-style)
+LJe	reloadWindowSoon	setImmediate(() => A.reload()) unless destroyed
+LKi	formatZodErrorTree	builds nested {_errors} tree from zod issues (zod formatError)
+LLt	runWithOkResult	wraps async op into {ok:true,...result} or {ok:false,error}
+LMi	resolveSessionParkReason	'needs-auth' or A.parkReason
+LsA	toNonEmptyStringArray	coerces value to filtered string array
+M0i	resolveGatewaySsoMode	'external-idp'/'gateway-as' for inference gateway OIDC
+MTi	convertZodRegistryToJsonSchema	converts Zod registry/schema to JSON schema via Cye emitter
+N2i	connectMcpServerSync	dispatches stdio/http/sse connect (sync variant) for MCP config
+NAt	getCollectedWarnings	lR() then returns hsA warnings buffer
+Not	connectStdioMcpServer	spawns managed stdio MCP server, connects client, lists tools
+O6A	isComputerUseSupported	platform in hBA && wBA() && !chicagoEnabled feature
+OUr	objectToFormData	axios toFormData: serializes object to FormData with visitor
+PF	describeValueType	returns 'null'/'undefined'/'array'/typeof
+Plr	shouldMergeParentSettings	!A || parentSettingsBehavior === 'merge'
+QZe	isScheduledTaskCreatePayload	validates name/prompt/description + optional cron/model fields
+R0i	resolveInferenceGatewayBaseUrl	returns gateway base url when interactive https gateway
+RKt	relativePosixPath	computes '../'-prefixed relative path between two POSIX paths
+RRi	argListMatchesFlag	checks if arg list contains a flag/=value form; permission flag matching
+RsA	summarizeOutputEnvelope	returns envelope summary or redacted prefix of output
+SKt	normalizePathSegments	resolves '.'/'..' in path segment array
+Sfr	handleComputerUseRequestAccess	request_access handler showing enable prompt / TCC permissions
+TP	isBrowserLikeContext	window defined and (!JVt() || renderer)
+UI	resolveLoggerFns	builds {error,warn,info,debug} bound to logger at logLevel; cached
+Ulr	logSettingsReadFailure	logs broken symlink vs read failure for settings.json
+V2r	emptyToolDispatcher	{tools:[], handleCall returns Unknown tool}
+VXA	removeNativeHostManifest	unlinks Chrome native host manifest file
+Ver	hashStringToBase36	Math.abs(Ker(A)).toString(36); short id suffix
+WB	isKnownPermissionMode	msi.has(A)
+WQr	dedupeFilterSortStrings	trims, filters by length/$Qr, dedupes, sorts allowlist entries
+WWr	buildAddedFileDiff	produces git-style added-file diff for a new path
+Wit	summarizeHelperRun	builds credential-helper run summary {state,outputFormat,parseWarnings,...}
+XT	concatArrayMerge	merge customizer concatenating arrays via qlr
+Ylr	buildParentSettingsSlice	extracts allowed managed-only fields/permissions/sandbox into parent slice
+Z3r	classifyInferenceProbeError	classifies stderr into auth/model_rejected/unreachable/error
+Z7	bindLoggerMethod	returns noop or bound logger method by level threshold
+Z8A	getNativeMessagingHostDirs	per-platform Chrome/Edge NativeMessagingHosts paths
+ZzA	isModelVisibleTool	tool _meta.ui.visibility includes 'model'
+_Lt	probeHostReachability	validates host then HEAD-fetches to test reachability
+aL	isVmGuestConnected	go().isGuestConnected() cowork VM check
+bIA	logInfo	Rb('info', ...A)
+bKA	logWarn	Rb('warn', ...A)
+bje	parseBaggageEntry	parses single baggage key=value;metadata entry
+c3t	resolveStackFrameContexts	fills context_line for frames lacking it from source map
+dcr	validateSettingsArrayFields	validates array-typed settings fields against schemas
+doA	stripInternalMetricAttributes	drops K1t internal attrs unless sendDefaultPii
+drA	reportSessionErrorToSentry	scrubs + sends ccd session error to Sentry with tags/fingerprint
+e6r	readGitFileBothRevisions	git show old + working-tree new for a path
+eIr	copyFileIgnoreEnoent	copyFile, swallow ENOENT
+edt	resolvePolicySettings	resolves helper/admin/parentSlice/hkcu policy settings merge
+fZe	isScheduledTaskUpdatePayload	validates scheduledTaskId + optional update fields
+gQt	getOrResetTokenWindow	returns valid token window or resets via Kve when expired
+gtt	assertNoSymlinkInPath	lstat each dir segment, throw if symlink/non-dir
+hGt	getDisplayById	getPrimaryDisplay or getAllDisplays().find(id)
+hje	contextStartLine	Math.max(1, A - e) pre-context start line
+hvt	installNativeHostManifest	writes Chrome native host manifest json with allowed_origins
+i4A	scrubSensitiveLine	redacts userinfo + ip + email in a log line
+i6	isKnownChromePermissionMode	jni.has(A)
+i6i	handleTeachStep	teach_step handler: validate, run qgt, return result
+jDi	redactIpAddresses	replaces ip patterns with '<ip>'
+jWr	isLikelyBinaryContent	>3 replacement chars and >1% ratio; binary file detection
+jXe	getDeploymentModeFilePath	join(userDataDir, $Xe) deployment-mode persisted file
+kLt	isBuiltinMcpServerConfig	object && K7e(A)
+l3t	fillFrameSourceContext	sets pre/context/post_context lines for a stack frame
+l7A	isCoworkNativeFilePreviewEnabled	$r flag 'coworkNativeFilePreview'
+lQt	walkJsonWithVisitor	JSONC scanner driving onObject/Array/Literal visitor callbacks
+lmt	zodToInputSchema	bit(ze(A)) -> {type:'object',properties,required}
+log	logError	Rb('error', ...A)
+m3r	syncUnixNativeHostManifests	installs/removes Chrome/Edge native host manifests on macOS/Linux
+mot	validateArchiveEntry	enforces file count/size/total/compression-ratio limits (zip-bomb guard)
+nE	applyTextReplacements	applies WDi replacement pairs to string; scrub helper
+oz	isSafeRelativeArchivePath	no '..' and not absolute
+promiseAllObject	promiseAllObject	resolves object of promises into object of results (zod util)
+q2r	buildStdioBridgeToolset	announces connected stdio MCP servers' tools as a bridge dispatcher
+q3i	requestComputerUseHints	sends attested hints request, parses partner-validation response
+qUi	refreshAwsSsoToken	refreshes AWS SSO token, persists to credentials file
+qsi	isUpdateStatusObject	validates status + optional hash/currentHash
+qur	jsonNodeType	'boolean'/'number'/'string'/'array'/'object'/'null' for JSON node
+qvt	verifyRealpathWithinRoot	realpath helper to check path stays within root (within/escape/unverifiable)
+qzt	isServerErrorStatus	Kzt(A) >= 500
+rMe	isPlainObjectValue	non-null object and not array
+t$t	hasWrapFunction	typeof A._wrap === 'function'
+uae	describeProcessExit	maps exit reason to {message,level,log,messageFmt}
+ucr	validateHooksField	validates/cleans settings 'hooks' object, returns warnings
+undefined	undefinedSchema	zod undefined() schema factory (alias Jnr)
+uzr	sendCoworkSessionDeletionEvent	POSTs CoworkSessionDeletionEvent batches with retry/backoff
+wvt	syncNativeHostManifests	platform dispatch to y3r/m3r native host sync
+wye	zodToJsonSchema	converts zod schema to JSON schema (registry or single)
+xT	isScheduledTaskRecord	validates full scheduled-task record shape
+y3r	syncWindowsNativeHostManifests	writes/removes Windows registry native host entries
+yft	parseModifierBitmask	OR-combines alt/ctrl/meta/shift bits from '+'-joined string
+zBt	resolveRemoteManagedSettings	parses remote managed settings, returns {settings,errors}
+zDi	truncateAndScrubLine	truncates to nme then scrubs line
+zjt	detectLinuxDistro	reads /etc release files to determine distro name/version
+zlr	findSettingsSourceForKey	finds highest-priority source defining a settings key
+_any	makeAnySchema	new A({type:'any'}); zod any-schema factory (aliased JCt)
+any	anySchema	_any(mut); zod any() schema factory (alias Knr)
+_undefined	makeUndefinedSchema	new A({type:'undefined', ...ui(e)}); zod undefined-schema factory (alias YCt)
+LFr	isHostInNoProxyList	checks URL host against no_proxy/NO_PROXY env list

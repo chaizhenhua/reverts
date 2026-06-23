@@ -1,0 +1,158 @@
+Ltn	isSameOrSubdomain	compares two hosts: A===e or one endsWith ".${other}"
+Ly	formatHexOrNull	A!=null ? `0x${A.toString(16)}` : 'null'
+Lzr	registerCoworkFilePreviewProtocol	sets permission handlers + protocol.handle(NlA) for cowork-file preview
+M2A	maxColumns	rg --max-columns String(M2A) and preview.slice(0,M2A); =200
+M3r	initChromeExtensionMcpHost	[Chrome Extension MCP] native host setup, calls Vst+access
+M7e	setHardwareAccelerationDisabled	e.isHardwareAccelerationDisabled = A then persist
+MBA	deleteVMReinstallFiles	[deleteVMBundle] deletes reinstall files via YCr() list
+MDr	buildExtensionsSubmenu	returns Install/Open Extensions Folder menu items
+MGi	office365McpEntryPath	joins resources path with 'office365-mcp' and _Gi
+MPe	prepareUploadHardlinks	[prepareUploads] hardlink/copy into uploads dir, returns mappings
+MZ	getRemoteSessionFolderGrants	Ci('remoteSessionFolderGrants') ?? {}
+MZA	promoteScratchpadFile	[present_files] Promoted scratchpad file, reads VM file into outputs
+MZe	coworkScheduledTasksDispatcher	getDispatcher over CoworkScheduledTasks ipc interface
+MaA	chromeNativeHostBinaryName	'chrome-native-host'
+Met	saveStealthRelaunchMarker	[stealth-relaunch] writes marker file then quitAndInstall
+Mgi	claudeNestProtocolScheme	'claude-nest:'
+Mqr	resolveManagedSettingsDir	returns managed settings dir per platform (ClaudeCode)
+Myi	stripUnsupportedSidebarMode	deletes preferences.sidebarMode when 'operon'
+N$A	verifyMcpbSignature	reads file, parses pkcs7, returns signed/self-signed/unsigned
+N2A	codeSessionUserActivityType	'com.anthropic.claude.code.session'
+N6r	coworkFeedbackUserAgent	`claude-cli/cowork-feedback ${platform}...`
+NDr	getMcpAndExtensionFlags	returns {localMcpEnabled, extensionsEnabled, ...Ti()}
+NGi	migrateLegacyMsalCache	[builtin-mcp] migrates legacy MSAL cache for microsoft365
+NJr	grantRemoteSessionFolders	grantRemoteSessionFolders: adds normalized folders to grants
+NZ	awaitSessionPromisesWithTimeout	Promise.race of session promise set vs setTimeout
+Ngi	claudeNestDevProtocolScheme	'claude-nest-dev:'
+NiA	isSkillFile	A.toLowerCase().endsWith('.skill')
+NlA	coworkFileProtocolScheme	'cowork-file'
+NqA	appPreferencesDispatcher	getDispatcher over AppPreferences ipc interface
+Nzr	listFilesInFolder	listFilesInFolder validates session folders and readdir
+O1r	readPackedRefBranches	reads packed-refs and extracts refs/heads branch names
+O2r	prepareUploadEntries	maps paths through F2r into pending-uploads dir
+O6r	qualtricsSurveyHost	'anthropic.qualtrics.com'
+O7r	computerUseTeachScriptPath	joins appPath with '.vite/build/computerUseTeach.js'
+O8	stagePluginSymlinkPath	[HostLoop] stages plugin symlink for paths with spaces
+OCr	isCompressedCacheValid	checks .zst exists and origin file matches so.sha
+OGt	buildOpenFileMenuItems	returns Open File… menu item when Lj()
+OHi	formatMinutesSeconds	`${e}m ${t}s` from seconds A
+OJe	legacyAllowlistCacheKey	'dxt:allowlistCache'
+OLe	updateCapsLockDictationListener	on/off capsLockChanged listener based on bfr()
+OLt	applyDeploymentOverlay	await kt().overlayApplied() then b5r()
+OUt	readCachedExtensionUpdate	reads cached update metadata json for extension A
+OWr	cleanupVMBundleIfUnsupported	[cleanupVMBundleIfUnsupported] deletes stale VM bundle
+OXr	trackEnterpriseHostModeChange	tracks requireCoworkFullVmSandbox MDM key change
+ObA	submitQuickEntryText	Z7A({text}) when text>2 else iUt()+EJA()
+Obt	detectInstallManifestChanges	reads .install-manifests json, diffs files, returns changedFiles
+Oen	computeQuickWindowPosition	computes quick window x/y from saved monitor position
+OqA	isCoworkSdkDebuggingEnabled	ia().isCoworkSdkDebuggingEnabled ?? false
+Otn	runExternalIdpPkceGrant	[custom-3p:idp] external IdP PKCE grant
+Our	buildHostManagedEnvVars	returns DISABLE_AUTOUPDATER and host/3p env vars
+Ozr	createCoworkFilePreviewView	new WebContentsView for cowork-file preview, blocks navigation
+PCA	claudeExtensionsDir	join userData with 'Claude Extensions'
+PXA	resolveCodeSessionModel	[resolveCodeSessionModel] validates model, falls back to default
+PZ	runDisposeStack	SuppressedError-based dispose stack runner
+Pp	ZipExtractionError	class extends Error, name 'ZipExtractionError'
+PqA	mergePreferencesWithDefaults	merges jGA defaults with stored preferences
+Pwe	showConfigParseErrorDialog	Error reading or parsing config file, shows error dialog
+Q1A	nestOnlyPrototypesStub	no-op initialize/cleanup/getPrototypeMenuItems
+Q1r	validateUploadFilePath	[prepareUploads] validates path is regular local file
+Q8r	sshConfigsFileName	'ssh_configs.json'
+QAe	wellKnownSymbol	returns Symbol[A] ?? Symbol.for('Symbol.'+A)
+QCr	formatVpnDiagnostics	returns 'VPN Diagnostics:' multiline string
+QDr	encodeImageDataUri	returns data:${mime};base64 for image extensions
+Qb	roundPendingHours	Math.round(pu)
+Qft	startQuickEntryDictation	desktop_quick_entry_dictation_start, Nr.quickAccess.dictation
+RJi	validateZipEntryPath	throws on too-long path/filename or nested .zip
+RPe	maxUploadCopyBytes	20*1024*1024 hardlink-copy size limit
+RUt	resolveOidcEndpoints	resolves OIDC discovery authorization/token endpoints
+Rgi	claudeDevProtocolScheme	'claude-dev:'
+Rp	zipExtractionLimits	{MAX_FILE_COUNT, MAX_TOTAL_SIZE_MB, ...}
+Ryi	readDesktopConfigFile	reads/parses claude_desktop_config.json, validates MCP servers
+SBA	getFeatureSupportStatus	merges Dw() with louderPenguin/cowork feature gates
+SaA	isHiddenOrTempFile	startsWith '.' or '~$' or '~'+'.tmp'
+T3r	publishBridgeSessionActivity	resolves bridge session id then k2A handoff
+TJi	extractZipToDir	yauzl fromBuffer extraction with limits to dir
+U6r	postCoworkFeedbackBundle	POST /api/claude_cli_feedback/bundle, returns feedbackId
+Ubt	installManifestsDirName	'.install-manifests'
+Uen	buildAppMenuTemplate	assembles full app menu template array
+Ufr	normalizeDictationLocale	maps locale codes to supported dictation locale
+UgA	compressedCachePath	join A with `${e}.zst`
+VXr	handleFolderDropIfDir	if dir, registers Z2A folder handler
+VeA	uuidPattern	UUID regex /^[0-9a-fA-F]{8}-.../
+Vit	legacyMsalCachePath	~/.mcp-office365/msal-cache.json
+Vst	resolveChromeNativeHostPath	resolves chrome-native-host binary path per platform
+WXA	handleClaudeDeepLink	claudeURLHandler dispatches deep link by host/path
+Wjr	searchFileContents	rg then git grep fallback file content search
+XeA	notFoundResponse	new Response('Not found', {status:404})
+Xjr	searchFileContentsGitGrep	git grep --no-index fallback search
+YAn	buildPrototypesMenu	Prototypes menu, visible:false
+YCr	listVMReinstallFileNames	V6A names + '.origin' + efivars.fd on darwin
+Z0r	resolveAvailableFileName	finds non-colliding filename by suffixing -r
+Z2A	dispatchFolderDropToCowork	dispatchOnCoworkFromMain with selected directory
+ZBA	previewExtensionFile	previews dxt/mcpb manifest+signature, returns extensionId
+ZLt	getDeploymentBootstrapState	kt().getBootstrapState()
+ZTt	writeSshConfigStorage	writes SSH config storage file
+Zjr	searchFileContentsRipgrep	rg --json search, parses match results
+Zz	buildClaudeCodeEnvVars	returns CLAUDE_CODE_* env vars for session
+_7e	setGlobalShortcut	e.globalShortcut = A then persist
+_Gi	office365McpScriptName	'office365-mcp.mjs'
+aAn	clearLegacyAllowlistCache	deletes legacy global allowlist cache keys
+ah	updatePreferenceField	sets ia()[A]=e if changed then p6
+bfr	isQuickEntryDictationEnabled	wzA() && quickEntryDictationShortcut !== 'off'
+btn	tenSecondMs	1e4 used as AbortSignal.timeout for OIDC discovery
+c7A	coworkFilePreviewSession	session.fromPartition(persist:cowork-file-preview)
+cTt	listFilesRecursive	recursively lists files under dir as relative paths
+d1r	dedupeFileName	appends md5 hash slice when name already in set
+dTt	managedSettingsFilePath	join managed dir with 'managed-settings.json'
+dwt	buildExtensionsMenuItem	Extensions menu item with MDr submenu
+eQ	stripModelVersionSuffix	strips '[..]' and '-20XXXXXX' from model name
+ebA	isDuplicateLoginCallback	dedup login callback delivery via fHe set
+fft	configureDictationLanguage	sets Nr.quickAccess.dictation language from locale
+fp	runOrQueueFileHandler	calls handler now if ready else queues onto OnA
+gBr	writeVMFileAtomicByName	resolves path via izA then writes atomically
+gin	checkAndCacheExtensionUpdate	checks for and caches newer extension update
+hXA	listSessionFolderGrants	collects granted folders for session/cse aliases
+hqA	buildExtensionId	builds id from author.name and name (slug or fnv hash)
+ilA	resolveSessionModel	[resolveSessionModel] validates model, falls back to default
+jGA	defaultPreferences	default preferences object (menuBarEnabled etc)
+jXr	processCliFileArguments	processes argv files: folders/skills/dxt/positional
+jjr	defaultSearchResultLimit	200 default max search results
+k2A	publishCodeSessionActivity	darwin setUserActivity for code session handoff
+kgi	claudeNestProdProtocolScheme	'claude-nest-prod:'
+kt	getDeploymentMode	throws if c8 unset else returns deployment mode
+kyi	showSkippedMcpServersDialog	warns about skipped invalid MCP server entries
+l9r	warmDownloadVMUpdate	[warm] VM warm download when YukonSilver supported
+lKe	tenMinuteMs	600*1e3 idle countdown for stealth update
+luA	isLocalDevMcpEnabled	Ti().isLocalDevMcpEnabled and feature flag
+mmt	stagePluginConfigDir	[HostLoop] stages config dir and rewrites plugin paths
+mzA	isHardwareBuddyActive	Nr !== null && wzA()
+oBr	writeVMFileAtomic	opens vm fs and writes file atomically
+oin	loadMcpbExtension	verifies signature + extracts manifest from dxt/mcpb
+p6	persistConfigExclusive	runExclusive write of config file
+paA	pendingUploadsDir	join userData with 'pending-uploads'
+qAn	buildFileMenu	File menu with New Conversation + Open File
+rPe	cleanupSessionState	cleans up session caches and folder grants on clear
+rUe	openFolderInShell	opens folder via shell, error dialog on failure
+sAn	loadAllowlistCache	loads and decrypts dxt allowlist cache
+timeout	eightSecondMs	8e3 search subprocess timeout
+tnA	pdfViewerExtensionOrigin	chrome-extension PDF viewer origin
+utn	StealthUpdateScheduler	class scheduling stealth update on idle
+vF	isDxtOrMcpbFile	endsWith '.dxt' or '.mcpb'
+vzr	coworkFilePreviewPartition	'persist:cowork-file-preview'
+w3r	copyChromeNativeHostBinary	[Chrome Extension MCP] copies native host binary
+wJe	lastVmSandboxMdmKey	'lastSeenRequireCoworkFullVmSandbox'
+wen	buildCoworkVMDebugMenuItems	Cowork VM debug logging menu items
+wzA	isNativeQuickEntrySupported	Dw().nativeQuickEntry?.status === 'supported'
+x1r	listGitBranches	merges refs/heads files and packed-refs branches
+x2A	isQualtricsSurveyUrl	https url with host O6r
+xCr	decompressCachedVMFile	[cache] decompresses cached .zst VM file with checksum
+xZ	addToDisposeStack	registers disposable on dispose stack
+ylA	eightSecondMs	export alias of timeout binding (8e3) via `timeout as ylA`
+xft	clearLaunchPreviewSessions	clears launch-preview persisted workspace sessions
+yaA	isUploadableSourceKind	kind local/cloud-sync/network-drive
+yn	setPreferenceAndBroadcast	persists preference and dispatches preferencesChanged
+yst	makeInvalidZipError	new ZipExtractionError for invalid zip archive
+z2A	isDirectorySafe	statSync(A).isDirectory() guarded
+zTt	sshConfigsFilePath	join userData with ssh_configs.json
+zjr	isRipgrepMatchEvent	type === 'match' on rg json object

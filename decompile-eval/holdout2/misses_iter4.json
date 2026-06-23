@@ -1,0 +1,2054 @@
+[
+  {
+    "orig": "sdt",
+    "gold": "screenshotFilteringDefaults",
+    "proposed": "screenshotMaskWin32Defaults",
+    "file": "account-details"
+  },
+  {
+    "orig": "set",
+    "gold": "mapStringDeep",
+    "proposed": "mapStringOrArray",
+    "file": "account-details"
+  },
+  {
+    "orig": "slA",
+    "gold": "dispatchDebounceMs",
+    "proposed": "twoThousand",
+    "file": "account-details"
+  },
+  {
+    "orig": "sne",
+    "gold": "anonymousUserName",
+    "proposed": "anonymousLabel",
+    "file": "account-details"
+  },
+  {
+    "orig": "soA",
+    "gold": "emptyFormatRegistry",
+    "proposed": "emptyObjectMap",
+    "file": "account-details"
+  },
+  {
+    "orig": "sxr",
+    "gold": "defaultRetryDelayMs",
+    "proposed": "fiveHundred",
+    "file": "account-details"
+  },
+  {
+    "orig": "szA",
+    "gold": "lowercaseSlugPattern",
+    "proposed": "lowerAlnumDashUnderscorePattern",
+    "file": "account-details"
+  },
+  {
+    "orig": "t2r",
+    "gold": "thirtySecondTimeoutMs",
+    "proposed": "thirtyThousand",
+    "file": "account-details"
+  },
+  {
+    "orig": "t3A",
+    "gold": "defaultRetryCount",
+    "proposed": "thirty",
+    "file": "account-details"
+  },
+  {
+    "orig": "t3t",
+    "gold": "tenSecondTimeoutMs",
+    "proposed": "tenThousand",
+    "file": "account-details"
+  },
+  {
+    "orig": "t4",
+    "gold": "skillsDirName",
+    "proposed": "skillsLabel",
+    "file": "account-details"
+  },
+  {
+    "orig": "tBt",
+    "gold": "protocolVersionDate",
+    "proposed": "dateNov2025",
+    "file": "account-details"
+  },
+  {
+    "orig": "tDe",
+    "gold": "twoSecondDelayMs",
+    "proposed": "twoThousand2",
+    "file": "account-details"
+  },
+  {
+    "orig": "tDr",
+    "gold": "pluginNamePattern",
+    "proposed": "nameToken1To128Pattern",
+    "file": "account-details"
+  },
+  {
+    "orig": "tRr",
+    "gold": "fiveSecondTimeoutMs",
+    "proposed": "fiveThousand",
+    "file": "account-details"
+  },
+  {
+    "orig": "tVr",
+    "gold": "defaultBatchSize",
+    "proposed": "twenty",
+    "file": "account-details"
+  },
+  {
+    "orig": "tWr",
+    "gold": "thirtySecondTimeoutMsB",
+    "proposed": "thirtyThousand2",
+    "file": "account-details"
+  },
+  {
+    "orig": "tYe",
+    "gold": "thirtySecondTimeoutMsC",
+    "proposed": "thirtyThousand3",
+    "file": "account-details"
+  },
+  {
+    "orig": "thi",
+    "gold": "bcp47TagPattern",
+    "proposed": "languageTagPattern",
+    "file": "account-details"
+  },
+  {
+    "orig": "tsA",
+    "gold": "defaultRetryAttempts",
+    "proposed": "three",
+    "file": "account-details"
+  },
+  {
+    "orig": "txe",
+    "gold": "resumeStreamOnEnd",
+    "proposed": "pipeEndErrorToCallback",
+    "file": "account-details"
+  },
+  {
+    "orig": "u2A",
+    "gold": "fifteenSecondTimeoutMs",
+    "proposed": "fifteenThousand",
+    "file": "account-details"
+  },
+  {
+    "orig": "u2i",
+    "gold": "thirtySecondTimeoutMsD",
+    "proposed": "thirtyThousand4",
+    "file": "account-details"
+  },
+  {
+    "orig": "uDr",
+    "gold": "fiveSecondTimeoutMsB",
+    "proposed": "fiveThousand2",
+    "file": "account-details"
+  },
+  {
+    "orig": "uIr",
+    "gold": "maxMessageBytes",
+    "proposed": "aboveSixteenMegabytes",
+    "file": "account-details"
+  },
+  {
+    "orig": "uXA",
+    "gold": "defaultMaxRetries",
+    "proposed": "five",
+    "file": "account-details"
+  },
+  {
+    "orig": "uen",
+    "gold": "diagnosticBundleSections",
+    "proposed": "diagnosticCollectors",
+    "file": "account-details"
+  },
+  {
+    "orig": "ugr",
+    "gold": "pendingEntriesBuffer",
+    "proposed": "emptyArray",
+    "file": "account-details"
+  },
+  {
+    "orig": "ume",
+    "gold": "hashPayload",
+    "proposed": "hashSiSiPrefixed",
+    "file": "account-details"
+  },
+  {
+    "orig": "uve",
+    "gold": "dockerNameWords",
+    "proposed": "dockerNameAdjectivesOrSurnames",
+    "file": "account-details"
+  },
+  {
+    "orig": "uxe",
+    "gold": "bundledSystemModes",
+    "proposed": "runtimeSourceKinds",
+    "file": "account-details"
+  },
+  {
+    "orig": "v3i",
+    "gold": "undefinedSentinel",
+    "proposed": "undefinedValue",
+    "file": "account-details"
+  },
+  {
+    "orig": "vMi",
+    "gold": "tenSecondTimeoutMsB",
+    "proposed": "tenThousand2",
+    "file": "account-details"
+  },
+  {
+    "orig": "vVr",
+    "gold": "oneMinuteMs",
+    "proposed": "sixtyThousandMs",
+    "file": "account-details"
+  },
+  {
+    "orig": "v_i",
+    "gold": "defaultThumbnailPx",
+    "proposed": "threeHundred",
+    "file": "account-details"
+  },
+  {
+    "orig": "veA",
+    "gold": "maxUploadBytes",
+    "proposed": "fiftyMegabytes",
+    "file": "account-details"
+  },
+  {
+    "orig": "vfA",
+    "gold": "baggageHeaderName",
+    "proposed": "baggageLabel",
+    "file": "account-details"
+  },
+  {
+    "orig": "vkt",
+    "gold": "sensitiveDotfiles",
+    "proposed": "dotfileNames",
+    "file": "account-details"
+  },
+  {
+    "orig": "vxt",
+    "gold": "baggageDelimiterPattern",
+    "proposed": "commaOrEqualsPattern",
+    "file": "account-details"
+  },
+  {
+    "orig": "w1r",
+    "gold": "defaultConcurrency",
+    "proposed": "three2",
+    "file": "account-details"
+  },
+  {
+    "orig": "w6t",
+    "gold": "baggageDelimiterPatternB",
+    "proposed": "commaOrEqualsPattern2",
+    "file": "account-details"
+  },
+  {
+    "orig": "wHi",
+    "gold": "dirChainFromPath",
+    "proposed": "dirnameSegmentsReducer",
+    "file": "account-details"
+  },
+  {
+    "orig": "wKr",
+    "gold": "fortyFiveSecondTimeoutMs",
+    "proposed": "fortyFiveThousand",
+    "file": "account-details"
+  },
+  {
+    "orig": "wWi",
+    "gold": "mediaServiceNames",
+    "proposed": "mediaAndPiracyAppNames",
+    "file": "account-details"
+  },
+  {
+    "orig": "wlA",
+    "gold": "twoSecondTimeoutMs",
+    "proposed": "twoThousand3",
+    "file": "account-details"
+  },
+  {
+    "orig": "x2i",
+    "gold": "fiveSecondTimeoutMsC",
+    "proposed": "fiveThousand3",
+    "file": "account-details"
+  },
+  {
+    "orig": "x2r",
+    "gold": "loggedFlag",
+    "proposed": "mutableFalseFlag",
+    "file": "account-details"
+  },
+  {
+    "orig": "x5t",
+    "gold": "redisSetCommands",
+    "proposed": "redisSetCommandNames",
+    "file": "account-details"
+  },
+  {
+    "orig": "xL",
+    "gold": "oneMinuteMsB",
+    "proposed": "sixtyThousandMs2",
+    "file": "account-details"
+  },
+  {
+    "orig": "xNe",
+    "gold": "computerBusyMessage",
+    "proposed": "computerInUseMessage",
+    "file": "account-details"
+  },
+  {
+    "orig": "xWr",
+    "gold": "thirtySecondTimeoutMsE",
+    "proposed": "thirtyThousand5",
+    "file": "account-details"
+  },
+  {
+    "orig": "xWt",
+    "gold": "defaultChunkBytes",
+    "proposed": "fourKilobytes",
+    "file": "account-details"
+  },
+  {
+    "orig": "xXA",
+    "gold": "sixtySecondTimeoutMs",
+    "proposed": "sixtyThousandMs3",
+    "file": "account-details"
+  },
+  {
+    "orig": "x_r",
+    "gold": "memoryVerificationGuidance",
+    "proposed": "memoryApplicationGuidanceLines",
+    "file": "account-details"
+  },
+  {
+    "orig": "xfe",
+    "gold": "apiVersionString",
+    "proposed": "versionZeroPointTwo",
+    "file": "account-details"
+  },
+  {
+    "orig": "xje",
+    "gold": "defaultPrecisionDigits",
+    "proposed": "nine",
+    "file": "account-details"
+  },
+  {
+    "orig": "xxe",
+    "gold": "verificationStates",
+    "proposed": "attestationStates",
+    "file": "account-details"
+  },
+  {
+    "orig": "xxt",
+    "gold": "spanIdHexPattern",
+    "proposed": "nonZeroHex16Pattern",
+    "file": "account-details"
+  },
+  {
+    "orig": "y1r",
+    "gold": "defaultPageLimit",
+    "proposed": "hundred",
+    "file": "account-details"
+  },
+  {
+    "orig": "y5e",
+    "gold": "defaultBatchSizeB",
+    "proposed": "fifty",
+    "file": "account-details"
+  },
+  {
+    "orig": "yCr",
+    "gold": "fiveSecondTimeoutMsD",
+    "proposed": "fiveThousand4",
+    "file": "account-details"
+  },
+  {
+    "orig": "yF",
+    "gold": "oauthScopes",
+    "proposed": "oauthScopeString",
+    "file": "account-details"
+  },
+  {
+    "orig": "yKe",
+    "gold": "chartJsGuidance",
+    "proposed": "chartsHtmlGuidance",
+    "file": "account-details"
+  },
+  {
+    "orig": "yQr",
+    "gold": "defaultMaxItems",
+    "proposed": "ten",
+    "file": "account-details"
+  },
+  {
+    "orig": "yVr",
+    "gold": "twoMinuteMs",
+    "proposed": "oneHundredTwentyThousandMs",
+    "file": "account-details"
+  },
+  {
+    "orig": "ydt",
+    "gold": "defaultLineLimit",
+    "proposed": "fortyFive",
+    "file": "account-details"
+  },
+  {
+    "orig": "yfA",
+    "gold": "osReleaseParsers",
+    "proposed": "linuxDistroVersionParsers",
+    "file": "account-details"
+  },
+  {
+    "orig": "yte",
+    "gold": "defaultRetryCountB",
+    "proposed": "one",
+    "file": "account-details"
+  },
+  {
+    "orig": "yur",
+    "gold": "effortHelpText",
+    "proposed": "effortLevelHint",
+    "file": "account-details"
+  },
+  {
+    "orig": "yxe",
+    "gold": "fortyFiveSecondTimeoutMsB",
+    "proposed": "fortyFiveThousand2",
+    "file": "account-details"
+  },
+  {
+    "orig": "z4r",
+    "gold": "sevenDayMs",
+    "proposed": "oneWeekMs",
+    "file": "account-details"
+  },
+  {
+    "orig": "z5r",
+    "gold": "fiveSecondTimeoutMsE",
+    "proposed": "fiveThousand5",
+    "file": "account-details"
+  },
+  {
+    "orig": "z7r",
+    "gold": "defaultStatusCode",
+    "proposed": "fiveHundredTwenty",
+    "file": "account-details"
+  },
+  {
+    "orig": "z9i",
+    "gold": "assertPositiveInteger",
+    "proposed": "assertNonNegativeInteger",
+    "file": "account-details"
+  },
+  {
+    "orig": "zAn",
+    "gold": "logNoiseRegex",
+    "proposed": "logErrorWarnPattern",
+    "file": "account-details"
+  },
+  {
+    "orig": "zJr",
+    "gold": "thirtySecondTimeoutMsF",
+    "proposed": "thirtyThousand6",
+    "file": "account-details"
+  },
+  {
+    "orig": "zOr",
+    "gold": "twentySecondTimeoutMs",
+    "proposed": "twentyThousand",
+    "file": "account-details"
+  },
+  {
+    "orig": "zVA",
+    "gold": "nullResolver",
+    "proposed": "noopResolver",
+    "file": "account-details"
+  },
+  {
+    "orig": "zar",
+    "gold": "pluginNamePatternB",
+    "proposed": "nameToken1To128Pattern2",
+    "file": "account-details"
+  },
+  {
+    "orig": "zeA",
+    "gold": "defaultRetryAttemptsB",
+    "proposed": "three3",
+    "file": "account-details"
+  },
+  {
+    "orig": "zk",
+    "gold": "defaultMaxItemsB",
+    "proposed": "twenty2",
+    "file": "account-details"
+  },
+  {
+    "orig": "zkA",
+    "gold": "thirtySecondTimeoutMsG",
+    "proposed": "thirtyThousand7",
+    "file": "account-details"
+  },
+  {
+    "orig": "zot",
+    "gold": "fiveMinuteMsD",
+    "proposed": "threeHundredThousandMs",
+    "file": "account-details"
+  },
+  {
+    "orig": "zvA",
+    "gold": "ansiEscapeCharB",
+    "proposed": "escapeChar2",
+    "file": "account-details"
+  },
+  {
+    "orig": "I$t",
+    "gold": "gzipChunkSize",
+    "proposed": "eightKiB",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "I2i",
+    "gold": "maxMessagePortPayloadBytes",
+    "proposed": "sixtyFourKiB",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "I9",
+    "gold": "spanOperationTypes",
+    "proposed": "honoHandlerKind",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "IFr",
+    "gold": "defaultPortByProtocol",
+    "proposed": "defaultProtocolPorts",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "IG",
+    "gold": "maxWindowDimension",
+    "proposed": "maxInt16Signed",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "IIr",
+    "gold": "gzipMagicCookie",
+    "proposed": "machoFatMagic",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "IRe",
+    "gold": "coworkPluginsMountPath",
+    "proposed": "coworkPluginsDirSegment",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "IU",
+    "gold": "trimDanglingTokens",
+    "proposed": "trimIncompleteTrailingTokens",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "IUi",
+    "gold": "tenSecondTimeoutMs",
+    "proposed": "tenThousand",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "IVr",
+    "gold": "maxRetryAttempts",
+    "proposed": "twenty",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Iae",
+    "gold": "oneSecondMs",
+    "proposed": "oneThousand",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Inn",
+    "gold": "maxRedirectCount",
+    "proposed": "three",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Iu",
+    "gold": "padZero",
+    "proposed": "padStartZeros",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Ixe",
+    "gold": "monthCacheObject",
+    "proposed": "emptyObjectSingleton",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "J$r",
+    "gold": "remoteDeployErrorMessages",
+    "proposed": "remoteSetupFailureMessages",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "J4i",
+    "gold": "applyReadonlySchema",
+    "proposed": "zodReadonlyToJsonSchema",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "J5r",
+    "gold": "ipPortPattern",
+    "proposed": "ipv4WithOptionalPortPattern",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "JFr",
+    "gold": "httpsSchemePattern",
+    "proposed": "httpProtocolPattern",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "JHi",
+    "gold": "maxToolNameBytes",
+    "proposed": "defaultMaxTotalSizeMB",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "JHt",
+    "gold": "dataCategoryByEnvelopeType",
+    "proposed": "sentryDataCategoryMap",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "JOt",
+    "gold": "maxAvailableToolNames",
+    "proposed": "maxBaggageEntries",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "JZi",
+    "gold": "regexEscapePattern",
+    "proposed": "regexSpecialCharsPattern",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "JZt",
+    "gold": "globNonSlashClass",
+    "proposed": "notSlashClass",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "JaA",
+    "gold": "permissionAccessLevels",
+    "proposed": "permissionTierRank",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Jet",
+    "gold": "globStarToken",
+    "proposed": "wildcardSegment",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Jit",
+    "gold": "tenSecondMs",
+    "proposed": "tenThousand",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Jtn",
+    "gold": "tenSecondTimeout",
+    "proposed": "tenThousand",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "K$A",
+    "gold": "normalizeOptions",
+    "proposed": "normalizeOptionAliases",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "K1r",
+    "gold": "zlibMagicCookie",
+    "proposed": "stackBufferOverrunExitCode",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "KEA",
+    "gold": "appPathKey",
+    "proposed": "appName",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "KHe",
+    "gold": "twentyMegabyteLimit",
+    "proposed": "twentyMiB",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "KOt",
+    "gold": "maxToolNameLength",
+    "proposed": "maxBaggageEntryLength",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "KWr",
+    "gold": "twoHundredFiftySixKilobytes",
+    "proposed": "twoFiftySixKiB",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "KY",
+    "gold": "importGateId",
+    "proposed": "someFeatureGateId",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Kar",
+    "gold": "JsonSchemaValidator",
+    "proposed": "ajvValidatorFactory",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Kit",
+    "gold": "eightByteWidth",
+    "proposed": "eight",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Kji",
+    "gold": "jsonSchemaDraftPropsAlt",
+    "proposed": "jsonSchemaDraft07Url",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Kme",
+    "gold": "tenItemLimit",
+    "proposed": "ten",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "L4A",
+    "gold": "getUserDataRoot",
+    "proposed": "detectWindowsUserDataScope",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "L4i",
+    "gold": "applyUnionSchema",
+    "proposed": "zodUnionToJsonSchema",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "L8t",
+    "gold": "openTelemetrySdkVersion",
+    "proposed": "versionString",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "LKt",
+    "gold": "userManagementMethods",
+    "proposed": "userManagementMethodNames",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "LYi",
+    "gold": "parsePaxRecord",
+    "proposed": "parsePaxHeaderLine",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "L_r",
+    "gold": "feedbackEntityTypes",
+    "proposed": "scopeNames",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Ldi",
+    "gold": "languageTagPattern",
+    "proposed": "hyphenatedAlnumPattern",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Lgt",
+    "gold": "oneKilobyte",
+    "proposed": "oneKiB",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Lot",
+    "gold": "hundredItems",
+    "proposed": "oneHundred",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "M4i",
+    "gold": "applyEnumSchema",
+    "proposed": "zodEnumToJsonSchema",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "M6t",
+    "gold": "traceParentSpanIdGroup",
+    "proposed": "traceId16HexPattern",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "MB",
+    "gold": "assignIfNumber",
+    "proposed": "assignNumericIfValid",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "MGt",
+    "gold": "availableToolsGateId",
+    "proposed": "anotherFeatureGateId",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "MHi",
+    "gold": "listTarArchive",
+    "proposed": "streamFileIntoParser",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "MIr",
+    "gold": "fiftyItemLimit",
+    "proposed": "fifty",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "MOi",
+    "gold": "collectTransferables",
+    "proposed": "collectTransferableBuffers",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "MPA",
+    "gold": "fiveSecondTimeoutAlt",
+    "proposed": "fiveSecondMs",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "MSA",
+    "gold": "desktopOauthScope",
+    "proposed": "oauthApiKeyScope",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "MXt",
+    "gold": "semverComparatorGroupAlt",
+    "proposed": "comparatorOperatorGroup",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "NYi",
+    "gold": "formatOctalField",
+    "proposed": "toOctalPadded",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "Pmr",
+    "gold": "closeOpenBrackets",
+    "proposed": "balanceJsonBrackets",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "WOe",
+    "gold": "isLoopbackHost",
+    "proposed": "isLoopbackAddress",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "fDe",
+    "gold": "serializeFunction",
+    "proposed": "serializeFunctionsToSource",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "nnt",
+    "gold": "gzipDeflateExports",
+    "proposed": "gzipModuleParts",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "ns",
+    "gold": "writeLittleEndian",
+    "proposed": "writeUint32LE",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "oYi",
+    "gold": "normalizeAlias",
+    "proposed": "resolveOptionAlias",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "ooA",
+    "gold": "pathSlashSeparator",
+    "proposed": "slash",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "vHi",
+    "gold": "appendToTarArchive",
+    "proposed": "appendEntriesToTarFile",
+    "file": "chrome-extension"
+  },
+  {
+    "orig": "core",
+    "gold": "coreNamespacePlaceholder",
+    "proposed": "emptyObjectModule",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "fEi",
+    "gold": "jsonSchemaProps",
+    "proposed": "jsonSchemaDraft7Definition",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "fHt",
+    "gold": "credentialedUrlPattern",
+    "proposed": "gitRemoteUrlPattern",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "fJr",
+    "gold": "defaultRetryCount",
+    "proposed": "threeRetries",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "fKr",
+    "gold": "oneSecondMs",
+    "proposed": "oneThousand",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "fS",
+    "gold": "twoDigitDayPattern",
+    "proposed": "oneOrTwoDigitsPattern",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "fXi",
+    "gold": "dataViewByteLength",
+    "proposed": "twoHundred",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "fgi",
+    "gold": "fileSystemBridgeFactory",
+    "proposed": "fileSystemInterfaceDispatcher",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "fgr",
+    "gold": "streamChunkSize",
+    "proposed": "eightKilobytes",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "fme",
+    "gold": "modelsMessageDescriptor",
+    "proposed": "modelsMenuLabel",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "fqA",
+    "gold": "dxtSpecVersion",
+    "proposed": "versionZeroPointFour",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "g0r",
+    "gold": "pollIntervalMs",
+    "proposed": "fiveHundred",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "g5i",
+    "gold": "oidcFederationFeatureFlag",
+    "proposed": "oidcFederationProfileDate",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "g6r",
+    "gold": "acceleratorModifierMap",
+    "proposed": "modifierKeyAliasTable",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "g7r",
+    "gold": "fiveSecondMs",
+    "proposed": "fiveThousand",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "g8r",
+    "gold": "pluginNamePattern",
+    "proposed": "identifierTokenPattern",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gEr",
+    "gold": "crashBugPatterns",
+    "proposed": "crashPatternBugTypeTable",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gFi",
+    "gold": "twoMinuteMs",
+    "proposed": "oneTwentyThousandMs",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gGt",
+    "gold": "isKnownKey",
+    "proposed": "isInSet",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gUi",
+    "gold": "twoMinuteMsAlt",
+    "proposed": "oneTwentyThousandMs",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gX",
+    "gold": "localeHourCycleMap",
+    "proposed": "hourCycleByRegionTable",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gZr",
+    "gold": "mntClaudeRelativePathLeadingDot",
+    "proposed": "relativeMntClaudeDir",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "g_r",
+    "gold": "setDisplayNamePrompt",
+    "proposed": "displayNameSettingDescription",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gde",
+    "gold": "parseMonthIndex",
+    "proposed": "decrementToZeroBased",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gdt",
+    "gold": "maxLogLines",
+    "proposed": "fifty",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "ggi",
+    "gold": "desktopNotificationsBridgeFactory",
+    "proposed": "desktopNotificationsInterfaceDispatcher",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "ggr",
+    "gold": "appDirectoryPaths",
+    "proposed": "platformAppDataPaths",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gie",
+    "gold": "genaiTrackedMethods",
+    "proposed": "geminiStreamingMethodNames",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gj",
+    "gold": "commandExecution",
+    "proposed": "BoundedCommandResultCollector",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gk",
+    "gold": "maxFileSizeBytes",
+    "proposed": "fiveHundredMegabytes",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "gtr",
+    "gold": "safeFilenamePattern",
+    "proposed": "dottedIdentifierPattern",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "h1r",
+    "gold": "maxRedirectDepth",
+    "proposed": "six",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "hCr",
+    "gold": "platformDiskSpaceLimits",
+    "proposed": "diskSpaceLimitByPlatformArch",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "hKi",
+    "gold": "openConfirmationScreenPrompt",
+    "proposed": "selectExtensionPromptText",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "hS",
+    "gold": "generalRestrictionsMessageDescriptor",
+    "proposed": "generalRestrictionsLabel",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "hZr",
+    "gold": "mntClaudeRelativePathNoLeading",
+    "proposed": "mntClaudeDir",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "hcr",
+    "gold": "fiveSecondMsAlt",
+    "proposed": "fiveThousandMs",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "het",
+    "gold": "fiftyItemLimit",
+    "proposed": "fifty",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "hgi",
+    "gold": "openDocumentsBridgeFactory",
+    "proposed": "openDocumentsInterfaceDispatcher",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "hkt",
+    "gold": "envKeyword",
+    "proposed": "envString",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "hmr",
+    "gold": "pickHeadersAndBody",
+    "proposed": "jsonRequestBodyEncoder",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "hpr",
+    "gold": "requestDirectoryAccessPrompt",
+    "proposed": "requestDirectoryToolDescription",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "hx",
+    "gold": "envVarNamePattern",
+    "proposed": "upperSnakeCasePattern",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "i$r",
+    "gold": "httpClientVersion",
+    "proposed": "versionOneSeventeenZero",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "i1t",
+    "gold": "hundredItemLimit",
+    "proposed": "oneHundred",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "i9t",
+    "gold": "schemaModuleVersion",
+    "proposed": "versionZeroOneZero",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "iDi",
+    "gold": "cidrv4Pattern",
+    "proposed": "ipv4CidrPattern",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "iG",
+    "gold": "defaultResultLimit",
+    "proposed": "twoHundred",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "iJt",
+    "gold": "fiveSecondMsThird",
+    "proposed": "fiveThousandMs",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "iRr",
+    "gold": "thirtySecondMsAlt",
+    "proposed": "thirtyThousandMs",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "iXi",
+    "gold": "anthropicAssistantTurn",
+    "proposed": "humanTurnSeparator",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "i_t",
+    "gold": "remoteClaudeHomePath",
+    "proposed": "remoteClaudeDir",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "isCode",
+    "gold": "isShortcutModifierCode",
+    "proposed": "isKnownCode",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "ivt",
+    "gold": "slugPattern",
+    "proposed": "alphanumDashUnderscorePattern",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "j2r",
+    "gold": "dotenvVariantNames",
+    "proposed": "envExampleFilenames",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "jFr",
+    "gold": "makeCancelablePromise",
+    "proposed": "promiseWithCancel",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "jJr",
+    "gold": "fifteenSecondMsAlt",
+    "proposed": "fifteenThousandMs",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "jUi",
+    "gold": "twoMinuteMsThird",
+    "proposed": "oneTwentyThousandMs",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "jji",
+    "gold": "jsonSchemaPropsAlt",
+    "proposed": "jsonSchemaDraft7Definition",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "k0t",
+    "gold": "isDefinedAndNotGlobstar",
+    "proposed": "isMeaningfulValue",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "tPr",
+    "gold": "typeName",
+    "proposed": "describeValueType",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "v_e",
+    "gold": "caseFoldCacheLimit",
+    "proposed": "tenThousand",
+    "file": "filesystem-bridge-constants"
+  },
+  {
+    "orig": "AAe",
+    "gold": "claudeAiImportTokenCache",
+    "proposed": "claudeAiImportTokensByKey",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "AQ",
+    "gold": "persistedFocusedApp",
+    "proposed": "persistedFocusedWindowHandle",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "DU",
+    "gold": "pendingEnrollmentPromise",
+    "proposed": "trustedDeviceEnrollInFlight",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "DW",
+    "gold": "buddyBridgeReady",
+    "proposed": "buddyBleInstalled",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "EO",
+    "gold": "buddyReconnectAttempts",
+    "proposed": "pairRetryAttempts",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "GZ",
+    "gold": "getRemotePluginDeploys",
+    "proposed": "getPluginRegistry",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "JJe",
+    "gold": "cuLockActive",
+    "proposed": "computerUseToolsEnabled",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "JbA",
+    "gold": "pendingRemoteDeploysPromise",
+    "proposed": "pluginRegistryInitPromise",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "JlA",
+    "gold": "importAuthListeners",
+    "proposed": "claudeAiImportListeners",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "KFt",
+    "gold": "devToolsInstallerModule",
+    "proposed": "electronDevtoolsInstaller",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "KJe",
+    "gold": "remoteToolsDeviceClosePending",
+    "proposed": "unusedBooleanFlag",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Lin",
+    "gold": "widgetResourceDefs",
+    "proposed": "visualizeMcpResources",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Mtn",
+    "gold": "coworkAuthorizeUrl",
+    "proposed": "consoleOauthAuthorizeUrl",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "PGt",
+    "gold": "configShapeKeys",
+    "proposed": "enterpriseDeploymentConfigKeys",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "PbA",
+    "gold": "appProtocolOriginUrl",
+    "proposed": "claudeOriginUrl",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "QP",
+    "gold": "buddyTokensToday",
+    "proposed": "dailyTokenUsage",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "QQ",
+    "gold": "buddyScanSession",
+    "proposed": "buddyDeviceScanState",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Qnn",
+    "gold": "trustedAuthorAssociations",
+    "proposed": "prReviewAuthorAssociations",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "RQ",
+    "gold": "buddyReconnectTimer",
+    "proposed": "buddyPairRetryTimer",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "RQA",
+    "gold": "scheduleBuddyReconnect",
+    "proposed": "scheduleBuddyPairRetry",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Stn",
+    "gold": "startHidden",
+    "proposed": "skipStartupHidden",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Trn",
+    "gold": "loadBuddyTokensToday",
+    "proposed": "loadDailyTokenUsage",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Ty",
+    "gold": "startupPerfMarks",
+    "proposed": "startupTimings",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "UbA",
+    "gold": "chainedQuickEntryOp",
+    "proposed": "pendingTimingPromise",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "V7A",
+    "gold": "sidePanelStateEnabled",
+    "proposed": "computerUseUiActive",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "WlA",
+    "gold": "pendingPairingPinCallback",
+    "proposed": "buddyPairingPinResponder",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "XnA",
+    "gold": "buddyStateHandler",
+    "proposed": "buddyConnectionStateCallback",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "YnA",
+    "gold": "mainViewContents",
+    "proposed": "wiredMainViewEvent",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "ZnA",
+    "gold": "buddyRxHandler",
+    "proposed": "buddyBleRxCallback",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "aKe",
+    "gold": "extensionUpdateCacheMap",
+    "proposed": "unusedMap",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "ain",
+    "gold": "extensionUpdateCacheModule",
+    "proposed": "cachedUpdatesModule",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "bG",
+    "gold": "sshMcpServerManagerInstance",
+    "proposed": "unusedNullRef",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "bUt",
+    "gold": "errorResponseSchema",
+    "proposed": "entraTokenErrorSchema",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "bin",
+    "gold": "widgetToolDefs",
+    "proposed": "visualizeMcpToolDefs",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "cJA",
+    "gold": "quickEntryComposerStateByContents",
+    "proposed": "unusedWeakMap",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "con",
+    "gold": "cluster2675Namespace",
+    "proposed": "electronDevtoolsInstallerNamespace",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "dnn",
+    "gold": "reviewRejectionStates",
+    "proposed": "prReviewBlockingStates",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "drn",
+    "gold": "remoteUploadsMigrationDeps",
+    "proposed": "remotePluginSyncTestExports",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "dtA",
+    "gold": "dxtUpdateInProgress",
+    "proposed": "dxtUpdateCheckRunning",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "dtn",
+    "gold": "webAuthnRelyingPartyId",
+    "proposed": "webauthnRpIdSuffix",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "eT",
+    "gold": "buddySessionMessagesMap",
+    "proposed": "unusedMapForSessions",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "gon",
+    "gold": "cluster2675Default",
+    "proposed": "electronDevtoolsInstallerDefault",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "gtn",
+    "gold": "filterAppProtocolRequest",
+    "proposed": "validateClaudeProtocolFrame",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "iUt",
+    "gold": "restoreFocusedAppHandle",
+    "proposed": "restorePersistedFocus",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "inFlight",
+    "gold": "pluginSyncInFlightByDir",
+    "proposed": "inFlight",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "itn",
+    "gold": "registerClaudeAiImportIpc",
+    "proposed": "wireClaudeAiImportWindow",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "jtn",
+    "gold": "pendingGrantErrorCodes",
+    "proposed": "entraDeviceAuthPendingErrors",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "lV",
+    "gold": "pendingDeviceAuthPromise",
+    "proposed": "claudeAiImportTokenPromise",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "nj",
+    "gold": "cachedRemoteDeploys",
+    "proposed": "pluginRegistry",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "ntn",
+    "gold": "allowedRemoteStoreKeys",
+    "proposed": "remoteSyncedSettingKeys",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "oFt",
+    "gold": "startBuddyBridge",
+    "proposed": "ensureBuddyBleBridge",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "oKe",
+    "gold": "importAuthPromiseGeneration",
+    "proposed": "claudeAiImportTokenPromiseGeneration",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "oj",
+    "gold": "buddySessionMessages",
+    "proposed": "buddySessionMessageBuffers",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "sAe",
+    "gold": "createTrayIcon",
+    "proposed": "updateTray",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "tUt",
+    "gold": "persistFocusedAppHandle",
+    "proposed": "persistFocusedWindow",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "uFt",
+    "gold": "rolloverBuddyTokensDay",
+    "proposed": "rollDailyTokenUsageDate",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "wJA",
+    "gold": "buddyStatusTimeouts",
+    "proposed": "buddyStatusTimeoutCount",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "xbA",
+    "gold": "pendingImportPromise",
+    "proposed": "claudeAiImportRunPromise",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "J$t",
+    "gold": "isStoredBooleanFlagEnabled",
+    "proposed": "isTracingSuppressed",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "J7A",
+    "gold": "getDefaultDisplay",
+    "proposed": "getPrimaryDisplayInfo",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "JWt",
+    "gold": "parseBaggageHeader",
+    "proposed": "parseDelimitedKeyValuePairs",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "JY",
+    "gold": "validateSettingsFields",
+    "proposed": "collectSettingsValidationWarnings",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Jae",
+    "gold": "isValidPluginConfig",
+    "proposed": "isValidByIuaSchema",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Jai",
+    "gold": "isValidApprovedPermission",
+    "proposed": "isToolPermissionEntry",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Jii",
+    "gold": "pruneSupersededIntegrations",
+    "proposed": "dropConflictingIntegrations",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "JkA",
+    "gold": "dedupeSortFilteredLinesWrapper",
+    "proposed": "dedupeAndSortEntries",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Jlr",
+    "gold": "loadSettingsTiers",
+    "proposed": "collectManagedSettingsTiers",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Jme",
+    "gold": "matchPermissionRules",
+    "proposed": "selectApplicableRules",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Joi",
+    "gold": "isValidAppInfo",
+    "proposed": "isAppNameDescriptor",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Jqr",
+    "gold": "isBypassPermissionRule",
+    "proposed": "isTargetToolRule",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Jte",
+    "gold": "resolvePath",
+    "proposed": "joinPosixPath",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Jur",
+    "gold": "parseJsonTree",
+    "proposed": "parseJsonWithErrors",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Jxt",
+    "gold": "setStoreValue",
+    "proposed": "storeContextMetadataValue",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "K1t",
+    "gold": "isInternalMetricName",
+    "proposed": "isExcludedAttributeKey",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "K2r",
+    "gold": "prefixServerToolName",
+    "proposed": "makeNamespacedToolName",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "K3",
+    "gold": "isAbortError",
+    "proposed": "isRequestCancelledError",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "KBt",
+    "gold": "baseMergeDeep",
+    "proposed": "mergeRecursive",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "KDi",
+    "gold": "redactEmail",
+    "proposed": "redactEmails",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "KIr",
+    "gold": "resolveSettingsKind",
+    "proposed": "resolveOptedOutHintKind",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "KJr",
+    "gold": "buildRemoteFileTools",
+    "proposed": "makeRemoteFileToolset",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "KOr",
+    "gold": "setKeepaliveActivityCallback",
+    "proposed": "registerActivityHeartbeat",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "KVt",
+    "gold": "isElectronRenderer",
+    "proposed": "isRendererProcess",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Kae",
+    "gold": "isValidSelectionPayload",
+    "proposed": "isValidByXriSchema",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Kgr",
+    "gold": "filterGatedFeatures",
+    "proposed": "listGatedBuilds",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Kh",
+    "gold": "resolveSafeDir",
+    "proposed": "resolveAndCheckDirSegments",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Kie",
+    "gold": "stripFrameContext",
+    "proposed": "clearFrameContextLines",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Kk",
+    "gold": "redactOutputSection",
+    "proposed": "replaceOutputTailWithSummary",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Kni",
+    "gold": "isValidNamedOrigin",
+    "proposed": "isNameOriginDescriptor",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Koi",
+    "gold": "isValidFileAppInfo",
+    "proposed": "isFileAppDescriptor",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Ksi",
+    "gold": "isValidUpdateStatus",
+    "proposed": "isKnownIntegrityStatus",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Kve",
+    "gold": "newTokenWindow",
+    "proposed": "makeEmptyTokenWindow",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Kxt",
+    "gold": "deleteStoreValue",
+    "proposed": "clearContextMetadataValue",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Kyi",
+    "gold": "getJyiGlobal",
+    "proposed": "getImportedValue",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Kzr",
+    "gold": "createCoworkPreviewController",
+    "proposed": "makeNativeFilePreviewController",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "L2i",
+    "gold": "connectMcpServerWithAuth",
+    "proposed": "connectMcpTransport",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "L6t",
+    "gold": "getStoreValue",
+    "proposed": "readContextOtherMetadataValue",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "L7i",
+    "gold": "objectKeysAll",
+    "proposed": "listEnumerableKeys",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "LD",
+    "gold": "deriveCredentialKind",
+    "proposed": "resolveInferenceCredentialKind",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "LGe",
+    "gold": "createDeferred",
+    "proposed": "makeDeferred",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "LIA",
+    "gold": "onWrapReady",
+    "proposed": "makeOnceWrapHook",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "LKi",
+    "gold": "formatZodError",
+    "proposed": "flattenIssuesToErrorTree",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "LLt",
+    "gold": "wrapConfigResult",
+    "proposed": "runWithOkErrorResult",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "N2i",
+    "gold": "connectMcpServer",
+    "proposed": "describeMcpServerConfig",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "NAt",
+    "gold": "getStartupWarningsList",
+    "proposed": "getCachedWarnings",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "O6A",
+    "gold": "isChicagoPlatformEnabled",
+    "proposed": "isFeatureAvailableOnPlatform",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "QZe",
+    "gold": "isValidScheduledTaskTemplate",
+    "proposed": "isCreateScheduledTaskInput",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "RRi",
+    "gold": "flagMatchesArgs",
+    "proposed": "matchesEnvOrFlagArg",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "SKt",
+    "gold": "normalizePathSegments",
+    "proposed": "resolveDotSegments",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "TP",
+    "gold": "isRendererProcess",
+    "proposed": "isBrowserLikeEnvironment",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "UI",
+    "gold": "buildLeveledLogger",
+    "proposed": "getOrBuildLogger",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Ulr",
+    "gold": "reportSettingsReadError",
+    "proposed": "logSettingsReadFailure",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "V2r",
+    "gold": "emptyToolRegistry",
+    "proposed": "makeEmptyToolset",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "WQr",
+    "gold": "dedupeSortFilteredLines",
+    "proposed": "dedupeAndSortValidEntries",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Wit",
+    "gold": "buildHelperResult",
+    "proposed": "summarizeHelperOutcome",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "XT",
+    "gold": "mergeArrayCustomizer",
+    "proposed": "concatArraysMergeCustomizer",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Z3r",
+    "gold": "classifyInferenceError",
+    "proposed": "classifyCliProbeFailure",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "Z7",
+    "gold": "bindLogMethod",
+    "proposed": "bindLoggerMethodOrNoop",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "c3t",
+    "gold": "resolveFrameContexts",
+    "proposed": "resolveFramesContextLines",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "doA",
+    "gold": "filterInternalMetrics",
+    "proposed": "filterExcludedAttributes",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "e6r",
+    "gold": "getFileDiffOldNewText",
+    "proposed": "loadFileVersionsDiff",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "eIr",
+    "gold": "copyFileIfExists",
+    "proposed": "copyFileIgnoreMissing",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "hje",
+    "gold": "contextStartLine",
+    "proposed": "clampPreContextStart",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "i4A",
+    "gold": "redactSensitiveUrl",
+    "proposed": "redactUrlUserinfoAndPii",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "l3t",
+    "gold": "addFrameSourceContext",
+    "proposed": "fillFrameContextLines",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "lQt",
+    "gold": "visitJson",
+    "proposed": "walkJsonTokens",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "nE",
+    "gold": "applyRedactions",
+    "proposed": "applyTextReplacements",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "q2r",
+    "gold": "buildBridgeToolRegistry",
+    "proposed": "buildBridgeStdioToolset",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "qsi",
+    "gold": "isValidUpdateInfo",
+    "proposed": "isIntegrityStatusDescriptor",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "t$t",
+    "gold": "hasWrap",
+    "proposed": "isWrapped",
+    "file": "config-settings-and-json-utils"
+  },
+  {
+    "orig": "wvt",
+    "gold": "syncNativeHostManifests",
+    "proposed": "syncNativeMessagingHosts",
+    "file": "config-settings-and-json-utils"
+  }
+]

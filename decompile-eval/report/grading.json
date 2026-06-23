@@ -1,0 +1,39 @@
+{
+  "expectations": [
+    {
+      "text": "Join coverage >= 90% (fingerprint/partition stable)",
+      "passed": true,
+      "evidence": "binding coverage 100.0%, cluster 100.0%"
+    },
+    {
+      "text": "Binding naming coverage >= gold-relative 80%",
+      "passed": true,
+      "evidence": "100.0%"
+    },
+    {
+      "text": "Binding naming accuracy (lenient) >= 70%",
+      "passed": true,
+      "evidence": "exact 100.0%, lenient 100.0%"
+    },
+    {
+      "text": "Vendored package precision >= 95% (no false attributions)",
+      "passed": false,
+      "evidence": "precision 65.4%, recall 44.0%"
+    },
+    {
+      "text": "Vendored package recall >= 90%",
+      "passed": false,
+      "evidence": "recall 44.0%"
+    },
+    {
+      "text": "Island anchor precision >= 95%",
+      "passed": true,
+      "evidence": "precision 100.0%, recall 97.2%"
+    },
+    {
+      "text": "Externalized package count >= gold",
+      "passed": true,
+      "evidence": "fresh 22 vs gold 8"
+    }
+  ]
+}

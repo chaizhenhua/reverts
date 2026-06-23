@@ -1,0 +1,173 @@
+fEi	jsonSchemaDraft07Meta	Object is the JSON Schema draft-07 meta-schema ($id/$schema/$ref/definitions/properties keywords)
+fGA	braceCharClass	String '[_0-9a-z-*/]' used as a brace-expansion character class
+v_e	maxCacheSize	Numeric 1e4 used as size cap for GL/uMA cache eviction (GL.size - v_e)
+fHi	getNormalizedUpperCase	Normalizes via NFD + toLocaleLowerCase/toLocaleUpperCase('en') with LRU cache eviction
+fHt	gitRemoteUrlRegex	Regex parsing scheme://user:pass@host:port/path of a remote URL
+fJr	defaultMaxRetries	Constant 3, retry-count shape
+fKr	oneSecondMs	Constant 1000 milliseconds
+fMi	windowsUncDevicePathRegex	Regex /^[\\/]{2}[?.][\\/]/ matching Windows UNC/device path prefix
+fS	oneOrTwoDigitsPattern	Date-token regex fragment '\d\d?' (one or two digits)
+fUr	toArrayCopy	Returns array as-is if array-like else copies elements into a new array
+name	prismaIntegrationName	String literal 'Prisma' used as Sentry integration name
+pWe	prismaIntegration	Sentry integration factory: name 'Prisma', spanStart hook tagging 'prisma:' spans
+fXi	defaultBatchSize	Constant 200
+fYi	parseBase256	Decodes base256 tar-style number, throws 'invalid base256 encoding'
+pYi	parseBase256Positive	Sums bytes * 256^pos for positive base256 value
+fZr	claudeMountDir	Path string './mnt/.claude'
+fcr	convertToJsonArgs	CLI args ['-convert','json','-o','-','--']
+ffe	versionZeroPointFour	Version string '0.4'
+fgi	fileSystemBridgeDispatcher	IPC dispatcher registering FileSystem interface handlers (writeFileDownload, browseFolder, listDirectory, etc.)
+fgr	eightKilobytes	Constant 8192
+isCode	isReservedCode	Returns KCA.has(A) membership test
+flA	claudeMediaProtocol	String 'claude-media'
+fme	modelsMessage	i18n message defaultMessage 'Models'
+fqA	versionZeroPointFour	Version string '0.4'
+fv	desktopBundleId	macOS bundle id 'com.anthropic.claudefordesktop'
+g$t	equalsSign	String '='
+g0r	fiveHundred	Constant 500
+g5i	oidcFederationKey	String 'oidc-federation-2026-04-01'
+g5r	downloadUrl	URL 'https://claude.com/download'
+g6r	modifierKeyMap	Maps accelerator modifier names (Command/Control/Alt/Shift) to char + order
+g7i	dataViewTag	Object-tag string '[object DataView]'
+g7r	fiveThousandMs	Constant 5000
+g8r	identifierNameRegex	Regex /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/
+gCr	macErrorCodeRegex	Regex /0x8037[0-9a-f]{4}/i matching mac error codes
+gDe	googleTokenUrl	URL 'https://oauth2.googleapis.com/token'
+gEr	crashBugPatterns	List mapping crash log patterns to bugType (null_dereference, kernel_oops)
+gF	worktreeKeepFile	Filename '.worktree-keep'
+gFi	twoMinutesMs	Constant 120000 (12e4)
+gGt	hasGtSet	Returns sGt.has(A) membership test
+gQi	ipv4Regex	IPv4 address regex
+gUi	twoMinutesMs	Constant 120000 (12e4)
+gV	showAndFocusWindow	Shows and focuses Ny window if not destroyed
+gX	hourCycleByRegion	Maps region/locale codes to preferred hour-cycle arrays (H/h/hB/hb)
+gYi	identity	Identity function (A) => A
+gZr	claudeMountDir	Path string './mnt/.claude'
+g_i	oneYearSeconds	365*24*60*60 seconds
+g_r	displayNameSettingDescription	Description text for setting display name in sidebar/header
+gae	mdmpMagic	String 'MDMP' (minidump magic)
+gde	monthIndexFromOneBased	Returns +A - 1 (one-based to zero-based month)
+gdt	fifty	Constant 50
+gft	tieredAppsHelpText	Help text describing app permission tiers (browsers/terminals/full)
+ggi	desktopNotificationsBridgeDispatcher	IPC dispatcher for DesktopNotifications interface (getAuthorizationStatus, showNotification)
+ggr	getAppDataPaths	Builds data/config/cache/log/temp paths under Library for an app name
+ggt	callBrowserTool	Dispatches chrome-extension browser tool calls (switch_browser/list_connected_browsers/select_browser)
+giA	emptyObject	Empty object literal {}
+gie	geminiStreamingMethods	List of Gemini API methods (models.generateContent, chats.create, sendMessage)
+rfc5322Email	rfc5322EmailRegex	RFC 5322 email validation regex
+gj	CommandRunner	Class tracking command output/timeout/exit with MAX_OUTPUT_BYTES truncation
+gjr	bootSweepController	Object with resetBootSweep / chainActiveSweep methods
+gk	fiveHundredMegabytes	Constant 500*1024*1024
+gri	ipv6Regex	IPv6 address regex
+gsA	isPromise	Returns A instanceof Promise
+gtr	safeFilenameRegex	Regex /^[a-zA-Z0-9._-]+$/
+gur	fifteenSecondsMs	Constant 15000 (15e3)
+gxr	streamOption	Object { stream: true }
+gxt	versionTwoTwoZero	Version string '2.2.0'
+h$t	printableAsciiRegex	Regex matching printable ASCII range
+h1r	six	Constant 6
+h1t	mcpSessionIdAttr	Telemetry attribute key 'mcp.session.id'
+h4t	completionTokensAttr	Telemetry attribute key 'ai.usage.completionTokens'
+hCr	diskSpaceLimitsByPlatform	Per-platform/arch disk-space limits (darwin/win32 arm64/x64 = 15GB)
+hFr	streamToAsyncIterable	Async generator yielding from stream/arrayBuffer of a body
+hIi	ajvDataRefSchemaUrl	URL to ajv data.json ref schema
+hJe	fiftyMegabytes	Constant 50*1024*1024
+hJr	hundredMegabytes	Constant 100*1024*1024
+hJt	oneHourMs	Constant 3600000 (36e5)
+hKi	selectExtensionPrompt	Prompt text about confirmation screen in connected Chrome extension
+hKr	thirtySecondsMs	Constant 30000 (3e4)
+hOr	emptyUsageStats	Zeroed token-usage stats object (input_tokens, cache_read_input_tokens, etc.)
+hRi	pluginShimPrefix	String 'plugin-shim:'
+hS	generalRestrictionsMessage	i18n message defaultMessage 'General restrictions'
+hTA	fortyFiveSecondsMs	Constant 45000 (45e3)
+hVr	pullRequestTemplatePaths	List of PR template file paths
+hX	ansiLogColors	ANSI color codes for error/warn/info/debug/reset
+hYA	configTestOverrides	Test config (test_replace/test_footer with mode + text)
+hYi	parseBase256Negative	Decodes negative base256 number via two's-complement
+tot	twosComplementByte	Returns (255 ^ A) + 1 & 255 (two's complement of a byte)
+hZA	coworkArtifactMetaKey	String 'cowork-artifact-meta'
+hZr	claudeMountDirNoPrefix	Path string 'mnt/.claude'
+hcr	fiveSecondsMs	Constant 5000 (5e3)
+hdi	localePlaceholderRegex	Regex matching ${locale} placeholder
+hdt	otelEnvVarNames	List of OTEL/telemetry env var names
+het	fifty	Constant 50
+hgi	openDocumentsBridgeDispatcher	IPC dispatcher for OpenDocuments interface (getOpenDocuments, readOpenDocumentAsBase64)
+hkt	envKey	String 'env'
+hmr	jsonBodySerializer	Serializes request body to JSON with content-type header
+hmt	fetchPageToolDescription	Tool description for fetching a web page at a URL
+hpr	requestDirectoryToolDescription	Tool description for requesting access to a directory
+htn	desktopAppType	String 'desktop_app'
+hx	constantNameRegex	Regex /^[A-Z][A-Z0-9_]*$/ (UPPER_SNAKE constant name)
+i$r	versionOnePoint17	Version string '1.17.0'
+i0r	oneMillion	Constant 1e6
+i1A	notSlashClass	Glob char class '[^/]'
+i1t	hundred	Constant 100
+i2A	twentyMegabytes	Constant 20*1024*1024
+i2r	fiveMinutesMs	Constant 5*60000
+i6r	haikuModelId	Model id 'claude-haiku-4-5-20251001'
+i7i	plainObjectTag	Object-tag string '[object Object]'
+i8t	plainObjectTag	Object-tag string '[object Object]'
+i9t	versionZeroOneZero	Version string '0.1.0'
+iDi	ipv4CidrRegex	IPv4 CIDR range regex
+iFi	googleAuthUrl	Google OAuth2 authorize URL
+iG	twoHundred	Constant 200
+iGe	markChapterAction	String 'mark_chapter'
+iOr	composeAbortSignal	Combines abort signals with optional timeout into one AbortController signal
+tPr	getTypeName	Returns NaN/number/array/null/constructor-name/typeof of a value
+iPr	makeZodErrorMapper	Builds Zod error-message mapper (invalid_type/too_big/invalid_format messages)
+iPt	twenty	Constant 20
+iQi	uuidRegex	UUID format regex
+iRi	internalTldSuffixes	List ['.internal','.local','.lan']
+iRr	thirtySecondsMs	Constant 30000 (3e4)
+iVr	oneMinuteMs	Constant 60000 (6e4)
+iWi	five	Constant 5
+iWt	logLevelToSeverity	Maps log level names (silly/debug/error) to severity (trace/fatal)
+iXi	assistantTurnMarker	String '\n\nAssistant:'
+iZt	escapedDotRegex	Regex /\./g matching escaped dot
+i_t	remoteClaudeDir	Path '/home/claude/.claude/remote'
+ibe	createAbortException	Returns DOMException or fallback abort error
+rbe	getAbortReason	Resolves abort reason to an Error from a signal
+iie	aiPromptAttr	Telemetry attribute key 'ai.prompt'
+iii	thirty	Constant 30
+Class	EmptyBase	Empty class with no-op constructor used as a base
+ije	scopeContextKey	String '_scopeContext'
+ime	globalBackingKey	String '__gb__'
+iri	jwtRegex	Regex matching three dot-separated base64url segments (JWT)
+irt	tenThousand	Constant 1e4
+itt	builtinMcpDesiredKey	String 'builtinMcpDesired'
+ivA	logLocalMcpBridge	Logs '[localMcpBridge] ...' via D.info
+ivt	alphanumericNameRegex	Regex /^[a-zA-Z0-9_-]+$/
+ize	leapYearDatePattern	Regex fragment validating dates incl Feb-29 leap years
+j0i	oneDayMs	Constant 1440*60*1000 (one day in ms)
+j1	trimToUndefined	Trims string, returns undefined when empty
+j2r	envExampleFileNames	List of .env example/template file names
+j3r	modelNotReadyRegex	Regex matching ValidationException/model not found/ModelNotReady
+j4r	eight	Constant 8
+j8A	browserExtensionBundleId	String 'com.anthropic.claude_browser_extension'
+jAn	redactedPlaceholder	String '<redacted>'
+jD	twoDigitsPattern	Date-token regex fragment '\d\d'
+jFr	promisifyWithCleanup	Wraps callback-style fn into a Promise with cleanup
+jJr	fifteenSecondsMs	Constant 15000 (15e3)
+jQr	forty	Constant 40
+jUi	twoMinutesMs	Constant 120000 (12e4)
+jV	emptyObject	Empty object literal {}
+jXi	argumentsTag	Object-tag string '[object Arguments]'
+wd	mergeOptions	Object.assign({}, A, e) shallow option merge
+jZt	createMinimatchWithDefaults	Builds minimatch instance bound to default options (Minimatch/AST/filter/makeRe)
+jaA	logLevelValues	Maps log level names to numeric values (error 200, debug 500)
+tke	validateLogLevel	Validates a log-level value against jaA keys, warns if invalid
+jgt	computerUseToolSchema	JSON schema for computer-use action tool (key/type/click/scroll actions)
+jin	passthroughEnvVarRegexes	Regexes for env vars to pass through (MCP_/DEBUG/LOG_LEVEL/NODE_ENV)
+jjA	hookEventNames	List of hook event names (PreToolUse, SessionStart, etc.)
+jji	jsonSchemaDraft07Meta	JSON Schema draft-07 meta-schema object (duplicate of fEi)
+jjt	linuxDistroReleaseFiles	Maps release file names to Linux distros
+jlA	showWidgetWidgetUri	String 'ui://imagine/show-widget.html'
+jlt	oneMegabyte	Constant 1048576
+jme	ten	Constant 10
+jpe	numberFormatPatternRegex	Regex for number format pattern (.0/#/0#)
+jrA	doubleColonSeparator	String '::'
+jsA	gcpCredentialsFileName	String '.gcp-credentials.json'
+jwi	dateFormatTokenRegex	Regex matching date-format tokens (y/M/d/h/m/s etc.) outside quotes
+jxt	undefinedTag	Object-tag string '[object Undefined]'
+jyi	ulidRegex	Regex /^[0-9A-HJKMNP-TV-Z]{26}$/i matching ULID
+k0t	isDefinedNonGlobstar	Returns true when value is not sP(A) and not the mT sentinel

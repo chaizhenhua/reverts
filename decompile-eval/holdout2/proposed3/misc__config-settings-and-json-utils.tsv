@@ -1,0 +1,198 @@
+Iye	makeGreaterThanCheck	new ktt({check:'greater_than', value, inclusive:false})
+J$t	isValueTrue	returns A.getValue(H$t)===true
+J3i	buildHintsRequestPayload	maps A.entries to {version:1,requests:[{type,parameters,keywords,reason,required}]}
+K3i	parseValidationResponse	JSON.parse body, checks success boolean -> approved/invalid/notProvided
+q3i	sendHintsRequest	attestedMachRequest with hints payload, returns Tp transport result
+J5t	estimateSerializedSize	byteLength/length/JSON.stringify length, sums arrays
+hGt	getDisplayById	null->primary display else find by id in getAllDisplays
+J7A	getConfiguredDisplay	hGt(pGt)
+J7i	copyArray	copies A[t] into e[t] over length
+rMe	isPlainObject	non-null object and not Array
+J8i	mergeShallowObjects	merges e into copy of A, deep-merges nested plain objects
+J8r	getGlobalQ	returns gQ
+nE	applyReplacements	replaces each [t,i] pair from WDi in string
+Wit	buildHelperProbeResult	assembles helper result (state,outputFormat,parseError,redacted stderr)
+JGi	describeTokenParseError	returns human message for invalid token output
+uzr	postCoworkSessionDeletionEvent	POSTs CoworkSessionDeletionEvent to event_logging/v2/batch with retries
+JHe	deleteSessionAndLogDeletion	extractInferenceLogIds, deleteSession, then post deletion event
+LLt	wrapResultWithError	try operation -> {ok:true,...} else {ok:false,error}
+JLt	readConfigSafe	LLt('readConfig', readConfig)
+KLt	writeConfigSafe	LLt('writeConfig', writeConfig with suppliedKeys omitted)
+JOr	startKeepaliveHeartbeat	setInterval emitting session_keepalive_heartbeat every OOr
+KOr	registerActivityCallback	sets activityCallback and starts heartbeat if refcount>0
+JRi	validateHostnameArray	pushes errors if not array of bare/wildcard hostnames
+KRi	isAllNumericHost	splits on '.', every label is digits or 0x hex
+JV	resolveSyntheticModel	looks up A in syntheticAllowedModels else returns A
+bje	parseBaggageEntry	splits baggage entry into {key,value,metadata}
+JWt	parseBaggageHeader	splits header on SoA, parses each entry into object
+PF	describeValueType	returns 'null'/'undefined'/'array'/typeof
+ucr	validateHooksField	validates settings 'hooks' object, returns warnings
+dcr	validateArrayFields	validates array-typed config fields against schemas
+JY	collectConfigValidationWarnings	concatenates Ecr+ucr+dcr warnings
+Jae	isValidIUA	iUA.safeParse(A).success
+i6	isChromePermissionMode	jni.has(A)
+WB	isPermissionMode	msi.has(A)
+Jai	isToolPermissionEntry	object with string toolName
+xT	isScheduledTaskRecord	validates scheduled-task record shape (id,cronExpression,fireAt,enabled,...)
+QZe	isScheduledTaskCreate	validates create-task shape (name,prompt,description,...)
+fZe	isScheduledTaskUpdate	validates update-task shape (scheduledTaskId,...)
+Jar	createAjvInstance	new Ajv {strict:false,validateFormats:true,allErrors:true}+formats
+Jb	redactSecrets	regex-redacts bedrock/aws/sk-ant/entra secrets
+Z3r	classifyProbeError	maps stderr to {kind:auth|model_rejected|unreachable|error}
+Jhr	getPathEnv	returns (await zz()).PATH
+Jie	firstWordLower	A.split(' ')[0].toLowerCase()
+zjt	detectLinuxDistro	reads /etc release files to identify Linux distro+version
+Jii	removeSupersededIntegrations	filters out toRemove when userAdded integration present
+Jk	isOAuthHttpTransport	transport http/sse and has oauth
+N2i	connectMcpServer	dispatches by transport type to connector
+WQr	dedupeSortValidEntries	trims, filters by length/pattern, dedupes, sorts
+JkA	normalizeEntries	WQr(A)
+zBt	loadRemoteManagedSettings	parses remote managed settings, returns {settings,errors}
+Plr	isMergeParentBehavior	parentSettingsBehavior==='merge' or falsy
+Ylr	extractParentManagedSlice	builds parent settings slice (permissions,sandbox,managed flags)
+Jlr	resolveManagedSettingsTiers	merges admin/parent settings tiers with errors
+RRi	flagPresentInArgs	checks if flag/arg present in argv list
+LsA	toStringArray	normalizes string|array to filtered string[]
+Jme	matchApplicableRules	filters rules by match/flag/unless_flag
+Joi	isAppNameEntry	object with string appName, optional appIconBase64
+Jqr	isXPeTool	tool equals xPe or starts with 'xPe('
+Kqr	hasXPeAllowPermission	permissions.allow some Jqr
+SKt	normalizePathSegments	resolves '.'/'..' in path segment array
+Jte	resolvePath	posix-style path.resolve over segments
+Jti	resolvePreloadDefaultPath	resolves ../../preload/default.js
+getElementAtPath	getElementAtPath	reduce path keys into nested object
+JuA	isENOENT	_Q(A)==='ENOENT'
+Ulr	logSettingsReadError	logs broken-symlink or settings read failure
+eIr	copyFileIgnoreMissing	copyFile, swallow ENOENT
+Jur	parseJsonToObject	jsonc visitor parse, builds plain object tree
+lQt	visitJson	jsonc tokenizer-driven visitor parser
+Jvt	readFileWithTimeout	Promise.race readFile vs timeout
+Kvt	joinPathSegment	`${A trimmed}/${e}`
+L2A	isUnsafeRelativePath	absolute, drive-letter, or contains '..'
+qvt	resolveRealPathWithin	realpath via helper, classify within/escape/unverifiable
+jWr	isLikelyBinary	too many U+FFFD replacement chars
+WWr	buildAddedFileDiff	reads new file, builds 'added' diff entry
+e6r	getOldNewFileText	git show old + read new via realpath
+Jxt	setRpcMetadata	A.setValue(bJA, e)
+L$	sanitizeAttributes	copies only valid attribute key/value pairs
+K$t	isNonEmptyString	typeof string and !==''
+LFr	isNoProxyHost	checks URL against no_proxy/NO_PROXY env
+K0t	applyProxyToRequest	sets proxy auth/host/port on request options
+K1t	isInternalMetricKey	matches known internal metric key prefixes
+doA	filterInternalMetrics	drops internal metric keys unless flag
+ZzA	isModelVisibleTool	_meta.ui.visibility includes 'model' or absent
+K2r	makeNamespacedToolName	`${A sanitized}__${e}`
+q2r	announceConnectedStdioTools	collects connected stdio MCP tools, returns dispatcher
+V2r	emptyToolDispatcher	returns {tools:[],handleCall returns Unknown tool}
+K3	isAbortError	AbortError name or FetchRequestCanceledException message
+K7e	hasServerField	A.server!==undefined
+kLt	isServerObject	object and K7e(A)
+K8r	getDb	returns db
+K9e	truncateEach	substr(0,e) for each string in array
+K9i	mapSetEntry	Map set helper updating size
+KAA	clampRounded	clamp+round A to [t,i] else default e
+KBt	mergeDeepWith	recursive deep merge with customizer
+KDi	redactEmails	A.replace(JDi,'<email>')
+jDi	redactIps	replaces ip patterns with '<ip>'
+i4A	redactSensitive	redacts userinfo, ips, emails
+zDi	truncateAndRedact	truncate to nme then redact
+KHi	getDxtMaxTotalSizeBytes	dxtMaxTotalSizeMB*1024*1024
+oz	isSafeRelativePath	no '..' and not absolute
+mot	validateArchiveEntry	checks file count/size/total/compression-ratio limits
+O6A	isComputerUseSupported	platform supported, wBA(), chicagoEnabled off
+KIr	getComputerUseMode	returns 'stub' or 'settings' when supported
+Sfr	handleComputerUseRequestAccess	computer-use enable/permission request handler
+lmt	zodToInputSchema	zod schema -> jsonSchema7 {type:object,properties,required}
+KJr	buildRemoteFileToolset	builds list/stage/commit remote-file MCP toolset
+MTi	emitJsonSchemaFromRegistry	emits json schema(s) from zod registry
+KLi	normalizeJsonSchemaTarget	maps target alias to 'draft-7'/'draft-2020-12'
+wye	toJsonSchema	dispatches registry vs single zod to-json-schema
+KOA	bigintToString	stringifies bigint values
+L0t	stripArraySuffix	removes trailing '[]'
+KTA	buildFormDataKey	builds bracket/dot form-data key path
+OUr	objectToFormData	serializes object into FormData (axios toFormData)
+KV	noop	empty function
+Z7	boundLogMethod	binds logger method if level permits else noop
+UI	resolveLogger	builds bound logger from logger+logLevel, cached
+KVA	isTerminalAuthError	HVA with status 400/401/403
+qUi	refreshAwsSsoToken	refreshes AWS SSO token, persists creds
+TP	isRendererLike	window defined and (not electron or renderer)
+KVt	isRendererProcess	process.type==='renderer'
+Kae	isValidXri	xri.safeParse(A).success
+Kcr	safeGetProperty	guards constructor/__proto__ access
+Ker	hashString	djb2-style string hash
+Ver	hashStringBase36	abs(Ker).toString(36)
+yft	parseModifierFlags	bitmask from alt/ctrl/meta/shift tokens
+Kfr	parseKeyChord	splits chord into {key,modifiers,text}
+Kgr	getEnabledFeatureGates	filters Jgr by fBA[A].buildGate()
+Kgt	parseTeachStepArgs	validates teach-step args (explanation,actions,anchor)
+i6i	handleTeachStep	teach-mode step handler
+gtt	assertDirSegmentsNotSymlink	lstat each dir segment, reject symlinks
+Kh	resolveDirChecked	att+assert dir segments
+Khr	getEnvSnapshot	zz()
+c3t	resolveContextForFrames	fills source context for stack frames
+Kie	clearFrameContext	deletes pre/context/post_context
+l3t	addSourceContextToFrame	populates pre/context/post_context lines
+hje	contextStartLine	max(1, A-e)
+Kin	buildReadTerminalTool	read_terminal MCP tool definition+handler
+Kjt	detectLocaleAndTimezone	probes Intl for locale/timezone
+RsA	summarizeOutputEnvelope	summarizes JSON envelope or redacts/truncates output
+Kk	redactOutputTail	replaces 'Output:' tail via RsA
+drA	reportCcdError	captures CCD error to Sentry (jr) with tags/extra
+edt	loadPolicySettings	resolves helper/admin/parent/hkcu settings
+Klr	loadSettingsBySource	loads settings for source kind, merges flag/policy
+XT	mergeArrays	concat arrays via qlr
+Kni	isNamedOriginEntry	object with string name and origin
+Koi	isFileAttachmentEntry	object with filePath/fileName/appName
+Ksi	isUpdateStatus	Jsi.has(A)
+qsi	isUpdateStatusRecord	object with valid status, optional hash fields
+Kst	isNativeHostInstalled	checks if native messaging host manifest exists
+Z8A	getNativeHostDirs	per-platform Chrome/Edge NativeMessagingHosts dirs
+VXA	removeNativeHostManifest	unlinks native host manifest, ignores ENOENT
+hvt	writeNativeHostManifest	writes Claude browser extension native host manifest
+m3r	syncNativeHostManifests	install/remove native host manifests per browser
+y3r	syncWindowsNativeHostRegistry	writes native host registry entries on Windows
+wvt	syncNativeHost	platform dispatch for native host sync
+Kte	trimEmptyEnds	slices off leading/trailing empty strings
+RKt	relativePath	computes relative path between two posix paths
+promiseAllObject	promiseAllObject	Promise.all over object values keyed back
+Kur	parseJsonToTree	jsonc visitor parse building node tree
+qur	jsonNodeType	typeof value -> json node type string
+Kve	newTokenWindow	{windowStartMs:now,inputTokens:0,outputTokens:0}
+gQt	rollTokenWindow	resets token window when expired
+Kxt	deleteRpcMetadata	A.deleteValue(bJA)
+Kyi	getJyi	returns Jyi
+aL	isVmGuestConnected	go().isGuestConnected()
+l7A	isCoworkNativeFilePreviewEnabled	feature flag coworkNativeFilePreview
+Kzr	buildNativeFilePreviewController	{isEnabled,isVmReady,show,hide,parkAndCapture}
+Kzt	getStatusCode	reads status/statusCode/status_code, parses int else 500
+qzt	isServerError	Kzt(A)>=500
+Not	connectStdioMcpServer	spawns managed stdio MCP server, connects client
+L2i	connectMcpServerAsync	dispatches MCP connect by transport (stdio/oauth)
+L6A	getAllowedSettingsSources	adds flag/policy to allowedSources, filters Ygr
+zlr	findSettingsSourceForKey	finds last source tier defining key A
+L6t	getXKAValue	A.getValue(XKA)
+_Lt	probeHostReachability	validates host then HEAD-fetches for reachability
+L7A	probeHostsBatched	probes host list in batches of dJe
+L7i	objectKeys	collects enumerable keys of object
+LD	resolveCredentialKind	maps inferenceProvider to credential kind
+R0i	resolveGatewayBaseUrl	validates gateway base URL for interactive provider
+M0i	resolveGatewayAuthMode	external-idp vs gateway-as based on OIDC config
+LEA	getUserDataDir	resolves Electron userData dir
+jXe	getConfigFilePath	join(userDataDir, $Xe)
+NAt	getStartupWarnings	lR(), returns hsA
+LFi	buildStartupWarningsResult	{warnings:[...]} if any
+LGe	deferred	returns {promise,resolve,reject}
+LIA	onWrapped	registers callback fired when A._wrap invoked
+t$t	isWrapped	typeof A._wrap==='function'
+LJe	scheduleReload	setImmediate reload window if not destroyed
+bIA	logInfo	Rb('info',...A)
+bKA	logWarn	Rb('warn',...A)
+log	logError	Rb('error',...A)
+uae	describeProcessExit	maps exit reason to {message,level,log,messageFmt}
+LKi	flattenZodError	builds nested _errors tree from zod issues
+LMi	resolveParkReason	desired disabled or no parkReason -> 'needs-auth'
+_any	makeAnySchema	new A({type:'any'})
+any	anySchema	_any(mut)
+_undefined	makeUndefinedSchema	new A({type:'undefined',...ui(e)})
+undefined	undefinedSchema	_undefined(put, A)

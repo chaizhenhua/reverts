@@ -1,0 +1,176 @@
+fEi	jsonSchemaDraft07Properties	JSON Schema draft-07 keyword property map ($id/$schema/$ref/definitions/properties)
+fGA	braceCharClassPattern	literal char-class string '[_0-9a-z-*/]'
+fHt	urlWithCredentialsPattern	regex matching scheme://user:pass@host:port/path
+fJr	three	literal 3
+fKr	oneThousand	literal 1e3
+fMi	windowsDeviceNamespacePattern	regex /^[\\/]{2}[?.][\\/]/ for \\?\ \\.\ device paths
+fS	oneOrTwoDigitsPattern	literal regex source '\d\d?'
+fXi	twoHundred	literal 200
+fZr	mntClaudeDotDir	literal path './mnt/.claude'
+fcr	convertToJsonCliArgs	args ['-convert','json','-o','-','--']
+ffe	versionZeroPointFour	literal '0.4'
+fgi	fileSystemIpcDispatcher	IPC dispatcher for FileSystem interface (writeFileDownload/browseFolder/listDirectory)
+fgr	eightThousandOneNinetyTwo	literal 8192
+flA	claudeMediaProtocol	literal 'claude-media'
+fme	modelsLabelMessage	intl message defaultMessage 'Models'
+fqA	versionZeroPointFour	literal '0.4'
+fv	desktopAppBundleId	literal 'com.anthropic.claudefordesktop'
+g$t	equalsSign	literal '='
+g0r	fiveHundred	literal 500
+g5i	oidcFederation20260401	literal 'oidc-federation-2026-04-01'
+g5r	downloadUrl	literal 'https://claude.com/download'
+g6r	modifierKeyCharMap	maps accelerator modifiers (CommandOrControl/Cmd/Ctrl/Alt) to char+order
+g7i	dataViewTag	literal '[object DataView]'
+g7r	fiveThousand	literal 5e3
+g8r	alphanumericIdentifierPattern	regex /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/
+gCr	ntStatusCodePattern	regex /0x8037[0-9a-f]{4}/i
+gDe	googleOauthTokenUrl	literal 'https://oauth2.googleapis.com/token'
+gEr	crashBugTypePatterns	array mapping crash log patterns to bugType (null_dereference/kernel_oops)
+gF	worktreeKeepFilename	literal '.worktree-keep'
+gFi	oneHundredTwentyThousandMs	literal 12e4 (120000)
+gGt	hasGGtSet	membership check sGt.has(A)
+gQi	ipv4Pattern	IPv4 address regex
+gUi	oneHundredTwentyThousandMs	literal 12e4 (120000)
+gV	showAndFocusWindow	shows+focuses Ny BrowserWindow if not destroyed
+gX	hourCyclePreferencesByRegion	region/locale to hour-cycle preference list (H/h/hB/hb)
+gYi	identity	returns its argument unchanged
+gZr	mntClaudeDotDir	literal './mnt/.claude'
+g_i	oneYearSeconds	365*24*60*60 seconds
+g_r	displayNameSettingDescription	tool description for setting display name
+gae	mdmpMagic	literal 'MDMP' (minidump magic)
+gde	decrementOne	returns +A - 1
+gdt	fifty	literal 50
+ggi	desktopNotificationsIpcDispatcher	IPC dispatcher for DesktopNotifications interface
+ggr	appLibraryPaths	builds macOS Library data/config/cache/log/temp paths
+ggt	dispatchChromeBridgeToolCall	routes Chrome extension bridge tool calls (switch_browser/select_browser)
+giA	emptyObject	empty object literal {}
+gie	genaiTracedMethods	GenAI SDK method names (models.generateContent/chats.create)
+gj	CommandExecution	command run with timeout/output-capture/truncation
+gjr	bootSweepController	resetBootSweep/chainActiveSweep controller
+gk	fiveHundredMegabytes	500*1024*1024 bytes
+gri	ipv6Pattern	IPv6 address regex
+gsA	isPromise	checks A instanceof Promise
+gtr	dotDashAlnumPattern	regex /^[a-zA-Z0-9._-]+$/
+gur	fifteenThousandMs	literal 15e3
+gxr	streamTrueOption	literal { stream: true }
+gxt	versionTwoTwoZero	literal '2.2.0'
+h$t	printableAsciiLinePattern	regex /^[ -~]{0,255}[!-~]$/
+h1r	six	literal 6
+h1t	mcpSessionIdAttr	literal 'mcp.session.id'
+h4t	aiCompletionTokensAttr	literal 'ai.usage.completionTokens'
+hCr	maxModelDownloadBytesByPlatform	15GiB per darwin/win32 arch
+hFr	streamToAsyncIterable	yields stream/arrayBuffer chunks
+hIi	ajvDataRefSchemaUrl	literal ajv data.json ref URL
+hJe	fiftyMegabytes	50*1024*1024 bytes
+hJr	oneHundredMegabytes	100*1024*1024 bytes
+hJt	oneHourMs	36e5 (3600000)
+hKi	selectExtensionConfirmPrompt	UI prompt about selecting Chrome extension
+hKr	thirtyThousandMs	literal 3e4
+hOr	emptyTokenUsage	zeroed token-usage object (input_tokens/cache_creation/output_tokens)
+hRi	pluginShimPrefix	literal 'plugin-shim:'
+hS	generalRestrictionsMessage	intl message defaultMessage 'General restrictions'
+hTA	fortyFiveThousandMs	literal 45e3
+hVr	pullRequestTemplatePaths	PR template file path candidates
+hX	ansiColorCodes	ANSI escape codes error/warn/info/debug/reset
+hYA	configTestRules	test_replace/test_footer prompt-config rules
+hYi	parseSignedBase256	parses negative base-256 encoded number
+hZA	coworkArtifactMetaKey	literal 'cowork-artifact-meta'
+hZr	mntClaudeDir	literal 'mnt/.claude'
+hcr	fiveThousandMs	literal 5e3
+hdi	localePlaceholderPattern	regex /\$\{locale\}/i
+hdt	otelTelemetryEnvVars	OpenTelemetry/Claude telemetry env var names
+het	eventQueueFlushThreshold	value 50; flushes when YT.length >= het (consistent in 2 sites)
+hgi	openDocumentsIpcDispatcher	IPC dispatcher for OpenDocuments interface
+hkt	envString	literal 'env'
+hmr	jsonBodyHeaders	builds content-type application/json body headers
+hmt	fetchUrlToolDescription	tool description for fetching web page contents
+hpr	requestDirectoryToolDescription	tool description for requesting directory access
+htn	desktopAppString	literal 'desktop_app'
+hx	upperSnakeIdentifierPattern	regex /^[A-Z][A-Z0-9_]*$/
+i$r	versionOneSeventeenZero	literal '1.17.0'
+i0r	oneMillion	literal 1e6
+i1A	notSlashCharClass	literal '[^/]'
+i1t	oneHundred	literal 100
+i2A	twentyMegabytes	20*1024*1024 bytes
+i2r	fiveMinutesMs	5*6e4 (300000)
+i6r	claudeHaiku45Model	literal 'claude-haiku-4-5-20251001'
+i7i	objectTag	literal '[object Object]'
+i8t	objectTag	literal '[object Object]'
+i9t	versionZeroOneZero	literal '0.1.0'
+iDi	ipv4CidrPattern	IPv4 CIDR range regex
+iFi	googleOauthAuthorizeUrl	literal Google OAuth v2 auth URL
+iG	twoHundred	literal 200
+iGe	markChapterString	literal 'mark_chapter'
+iJt	fiveThousandMs	literal 5e3
+iKi	chromeExtensionId	literal extension id 'dngcpimnedloihjnnfngkgjoidhnaolf'
+iOr	composeAbortSignal	combines abort signals with optional timeout
+iPr	makeZodErrorMessageFormatter	builds zod issue->message formatter
+iPt	twenty	literal 20
+iQi	uuidPattern	UUID regex
+iRi	internalTldSuffixes	['.internal','.local','.lan']
+iRr	thirtyThousandMs	literal 3e4
+iVr	sixtyThousandMs	literal 6e4
+iWi	five	literal 5
+iWt	logLevelToSeverityMap	winston-style level to severity mapping
+iXi	assistantPromptSuffix	literal '\n\nAssistant:'
+iZt	escapedDotPattern	regex /\\./g
+i_t	remoteClaudeDir	literal '/home/claude/.claude/remote'
+ibe	makeAbortException	creates DOMException/abort error
+rbe	abortReasonError	resolves abort reason to Error
+iie	aiPromptAttr	literal 'ai.prompt'
+iii	thirty	literal 30
+ije	scopeContextKey	literal '_scopeContext'
+ime	globalBrandKey	literal '__gb__'
+iri	jwtPattern	JWT regex (three base64url segments)
+irt	tenThousand	literal 1e4
+itt	builtinMcpDesiredKey	literal 'builtinMcpDesired'
+ivA	logLocalMcpBridge	logs '[localMcpBridge] ...'
+ivt	alnumUnderscoreDashPattern	regex /^[a-zA-Z0-9_-]+$/
+ize	isoDatePattern	ISO date regex source incl leap-year/29-Feb
+j0i	oneDayMs	1440*60*1e3 (86400000)
+j1	trimToUndefined	trims string, returns undefined if empty
+j2r	envExampleFilenames	['.env.example','.env.sample','.env.template','.env.dist']
+j3r	bedrockModelErrorPattern	regex /ValidationException|model.*not found|ModelNotReady/i
+j4r	eight	literal 8
+j8A	browserExtensionBundleId	literal 'com.anthropic.claude_browser_extension'
+jAn	redactedPlaceholder	literal '<redacted>'
+jD	twoDigitsPattern	literal regex source '\d\d'
+jJr	fifteenThousandMs	literal 15e3
+jQr	forty	literal 40
+jUi	oneHundredTwentyThousandMs	literal 12e4 (120000)
+jV	emptyObject	empty object literal {}
+jXi	argumentsTag	literal '[object Arguments]'
+jZt	makeMinimatchWithDefaults	wraps minimatch binding defaults options
+jaA	logLevelNumericMap	off/error/warn/info/debug -> numeric levels
+jgt	computerUseToolInputSchema	JSON schema for computer-use action tool input
+jin	allowedEnvVarPatterns	allowlisted env var name regexes (MCP_/DEBUG/LOG_LEVEL)
+jjA	hookEventNames	hook event name list (PreToolUse/SessionStart/...)
+jji	jsonSchemaDraft07Properties	JSON Schema draft-07 keyword property map
+jjt	linuxDistroReleaseFiles	distro release file -> distro name map
+jlA	showWidgetUiUrl	literal 'ui://imagine/show-widget.html'
+jlt	oneMegabyte	literal 1048576 bytes
+jme	ten	literal 10
+jpe	numberFormatPattern	regex /^\.(?:(0+)(\*)?|(#+)|(0+)(#+))$/g
+jrA	doubleColon	literal '::'
+jsA	gcpCredentialsFilename	literal '.gcp-credentials.json'
+jwi	dateFormatTokenPattern	date-format token regex (era/year/month/day/hour tokens)
+jxt	undefinedTag	literal '[object Undefined]'
+jyi	ulidPattern	ULID regex /^[0-9A-HJKMNP-TV-Z]{26}$/i
+k0t	isDefinedNonString	true when not string and not mT sentinel
+name	prismaIntegrationName	literal 'Prisma'
+pWe	prismaSentryIntegration	Sentry integration tagging prisma spans
+pYi	parseUnsignedBase256	parses unsigned base-256 encoded number
+tPr	typeOfValue	returns refined typeof (NaN/array/null/constructor name)
+tot	twosComplementByte	(255 ^ A) + 1 & 255
+v_e	tenThousand	literal 1e4
+wd	mergeOptions	Object.assign({}, A, e) shallow merge
+fHi	normalizeCaseFoldCached	NFD case-fold cache with size eviction
+fUr	toArrayCopy	copies array-like to a new array
+fYi	parseBase256	dispatches signed/unsigned base-256 parse
+isCode	isKnownCode	membership check KCA.has(A)
+core	emptyObject	empty object literal {} (exported as iIt)
+Class	emptyConstructorClass	no-op variadic constructor class
+rfc5322Email	rfc5322EmailPattern	RFC5322 email validation regex
+gft	tieredAppsDocText	literal markdown doc string describing tiered app access
+jFr	promiseWithProgress	new Promise wiring resolve/reject plus progress callback
+tke	parseLogLevel	validates value against jaA log-level map, warns if invalid

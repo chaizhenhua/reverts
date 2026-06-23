@@ -1,0 +1,367 @@
+Qir	makeBelarusianZodErrorMap	returns zod error-map fn with Belarusian (сімвал/масіў/лік) message strings
+Qnt	pluralCategoryFromOrdinal	maps a small integer (1/<6/9) to a plural-form category index
+QoA	utf8ByteLength	new TextEncoder().encode(A).length of a string
+Qot	makeMkdirpStatHandler	lstat-based mkdirp step: dir/unlink/symlink-error handling, recurses via mkdirp helper
+Qp	emptyArray	const = []
+Qre	equalsSign	const = '='
+Qxt	six	const number = 6
+Qy	assignIfNotNull	A[e]=t only when t != null
+Qyr	twoThousand	const number = 2e3
+R$r	thirtyThousandMs	const = 3e4
+R0r	oauthProtocolVersion	const = 'oauth-2025-04-20'
+R1t	mcpToolResultIsErrorAttr	const = 'mcp.tool.result.is_error'
+R2A	fifteenHundred	const = 1500
+R2i	port53280	const number = 53280
+R4A	localhostPort8000Url	const = 'http://localhost:8000'
+R5e	makeConsoleTransport	builds winston Console transport with ansi color/level formatting
+REA	makeLogTransports	returns [console transport?, file transport] for a logger
+R6i	uuidLowerHexPattern	/^[0-9a-f]{8}-...{12}$/i UUID regex
+rxA	isUuidString	typeof string && uuid regex test
+R6t	hex32NotAllZeroSource	'(?![0]{32})[\\da-f]{32}' regex source fragment
+R7t	versionZeroZeroOne	const = '0.0.1'
+R8A	thirtyOneThousandNineNineNineNine	const = 31999
+RDi	googleDotComHost	const = 'www.google.com'
+RIA	genAiRequestTopPAttr	const = 'gen_ai.request.top_p'
+RJe	tenThousandMs	const = 1e4
+RNi	noLowercaseLettersPattern	/^[^a-z]*$/
+RSA	uuidConstantEecb	const uuid = 'eecb31a3-...'
+RUi	one	const number = 1
+RXr	projectRootMarkerFiles	['.git','package.json','Cargo.toml',...] repo-root markers
+RYi	maxIntByByteWidth	{12: 8589934591, 8: 2097151} max int per byte width
+yS	writeIntFieldOrFallback	tar numeric field writer; out-of-range -> base256 fallback
+nMA	writeDateFieldSeconds	writes Date as unix seconds via int field writer
+RZe	localPluginsIpcDispatcher	getDispatcher/setImplementation over $eipc..._LocalPlugins_$_ channels
+RZi	objectNullTag	const = '[object Null]'
+R_	localhost	const = 'localhost'
+R_r	claudeCodeOauthTokenFdEnv	const = 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR'
+Rbt	fiveHundredTwelve	const number = 512
+Rct	tryJsonParse	JSON.parse wrapped in try/catch returning undefined
+Rd	classPrivateFieldGet	tsc private-field accessor helper
+Rdt	tenThousand	const number = 1e4
+Rpr	archiveSessionToolDescription	tool description string for archiving a CCD session
+_rr	typeOfValueLabel	returns 'number'/'array'/'null'/ctor-name type label
+Rrr	makeTurkishZodErrorMap	zod error-map fn with Turkish (karakter/bayt/öğe) strings
+Rs	orgPluginsLogTag	const = '[custom-3p:org-plugins]'
+Rwr	searchMcpRegistryToolName	const = 'search_mcp_registry'
+Rwt	nineHundredSeconds	const = 900*1e3
+Rxt	CompositePropagator	otel propagator combining inject/extract/fields over child propagators
+S1t	mcpToolNameAttr	const = 'mcp.tool.name'
+S2t	stringSeven	const = '7'
+S3r	fiveHundred	const number = 500
+S6t	stringZeroZero	const = '00'
+S7r	threeHundredTwenty	const number = 320
+SDi	anthropicCdnHost	const = 'a-cdn.anthropic.com'
+ccA	logLevelNumericValues	{off:0,error:200,...,debug:500}
+SGe	validateLogLevelName	returns level if in level map else warns
+SHi	oneThousandTwentyFour	const number = 1024
+SIA	genAiRequestTemperatureAttr	const = 'gen_ai.request.temperature'
+SKe	terminalNotOpenMessage	user-facing 'Terminal is not open...' string
+SKr	numericString583857784	const = '583857784'
+SN	isStdioTransport	A.transport === 'stdio'
+SNA	localPluginsWriterLogTag	const = '[LocalPluginsWriter]'
+SOi	workerThreadsSelfShim	worker_threads onmessage/postMessage bootstrap source string
+SOr	outboundOnlySessionMessage	'This session is outbound-only...' message
+T0t	redefinePropsViaCallback	maps own property descriptors through callback, redefines props
+SUr	makeMethodsReadOnly	non-enumerable, non-writable/throwing setters for function members
+SVe	alphanumDashCharClass	const = '[a-zA-Z0-9-]' regex char class
+name	honoIntegrationName	const = 'Hono' (sentry integration name)
+T7t	makeHonoIntegration	sentry integration {name:'Hono', setupOnce}
+mS	readTarNumericField	high-bit -> base256 else octal parse of tar field
+SYi	nanToUndefined	isNaN(A)?undefined:A
+_Yi	parseOctalField	parses null-trimmed octal string field
+SZe	coworkSpacesIpcDispatcher	dispatcher over $eipc..._CoworkSpaces_$_ channels
+SbA	twoHundred	const number = 200
+m8e	langchainIntegrationName	const = 'LangChain'
+Sei	makeLangchainIntegration	sentry integration {name:'LangChain', setupOnce}
+Sgr	themeNames	['dark','light','light-daltonized',...]
+Sir	typeOfValueLabel2	returns 'number'/'array'/'null'/ctor-name label
+_ir	makeEnglishZodErrorMap	zod error-map fn with English message strings
+Sme	sevenHundredTwentyHoursSeconds	const = 720*60*60
+SoA	comma	const = ','
+Spr	searchSessionTranscriptsToolDescription	tool description for full-text transcript search
+Stt	alnumUnderscoreDashAnchoredPattern	/^[A-Za-z0-9_-]*$/
+Sur	effortLevelNames	['low','medium','high','xhigh','max']
+Szr	fiftyMebibytes	const = 50*1024*1024
+T1t	mcpPromptResultMessageCountAttr	const = 'mcp.prompt.result.message_count'
+T2i	thirtyThousandMs	const = 30*1e3
+T3t	onUnhandledRejectionName	const = 'OnUnhandledRejection'
+v3t	ignoredAiErrorNames	[{name:'AI_NoOutputGeneratedError'}]
+b3t	makeUnhandledRejectionIntegration	integration installing process unhandledRejection handler
+T4i	throwOnUnrepresentableTransform	zod-to-json-schema: throws if transform unrepresentable
+T8e	semicolon	const = ';'
+TBA	scheduledTasksName	const = 'scheduled-tasks'
+TCi	fourDigitsSource	const = '\\d{4}' regex source fragment
+TDi	sentryIngestHost	const = 'o1158394.ingest.us.sentry.io'
+kHi	appendToTarFile	opens tar file, scans entries, appends via pipe
+THi	pipeTarToFileStream	pipes pack stream into write stream at offset
+bHi	addEntriesToPack	adds entries (@-prefixed = file list) to tar pack
+TJe	emptyString	const = ''
+TPe	four	const number = 4
+TRe	browserNativeMessagingHostRegistryKeys	[{name:'Chrome',key:...},{name:'Edge',...}]
+TRi	lowerSnakeStartPattern	/^[a-z][a-z0-9_]*$/
+TSi	twoHundred	const number = 200
+TUe	twenty	const number = 20
+TVe	fifty	const number = 50
+TVr	fiveThousandMs	const = 5e3
+TWi	tradingAndCryptoAppNames	denylist of trading/crypto/wallet app names
+TWr	buddyIpcDispatcher	dispatcher over $eipc..._claude.buddy_$_Buddy_$_ channels
+TZi	objectAsyncFunctionTag	const = '[object AsyncFunction]'
+TaA	makeZodToJsonSchemaTransformer	builds json-schema via zod walk with io/processors
+Tei	makeOpenFeatureIntegration	integration {name:'OpenFeature'}, warns if not browser
+Tg	retryDefaults	{maxRetries:3, retryDelay:100}
+Tk	redactSensitiveRequestFields	masks x-api-key/authorization/cookie headers, strips options.headers
+TlA	pathMigrationLogTag	const = '[pathMigration]'
+Tmr	isNamedBlob	A instanceof Blob && 'name' in A
+Tp	consentStatusFactories	{approved/notProvided/invalid/unavailable/transportError} status builders
+Txt	printableHeaderValuePattern	/^[ -~]{0,255}[!-~]$/
+U0r	oneMillion	const = 1e6
+U1t	mcpLoggingDataTypeAttr	const = 'mcp.logging.data_type'
+U4i	buildRecordJsonSchema	zod record -> json schema patternProperties/additionalProperties
+U4r	pointZeroTwo	const number = .02
+U6t	objectNullTag	const = '[object Null]'
+U8	stripTrailingSlashes	A.replace(/[\\/]+$/, '')
+UN	writeStringFieldOrTruncate	writes string+NUL to tar field, flags overflow
+USi	uuidConstant07c0	const uuid = '07c030f6-...'
+UTe	nullDefault	const = null
+UUe	five	const number = 5
+UVr	claudePlansMarkdownPathPattern	/[/\\]\.claude[/\\]plans[/\\][^/\\]+\.md$/
+U_r	memoryTypesPromptSection	multiline memory-types documentation lines
+Ua	fastifyHookAttributeKeys	{HOOK_NAME,FASTIFY_TYPE,HOOK_CALLBACK_NAME,ROOT}
+UcA	version1_15_2	const = '1.15.2'
+Uet	customConsoleOAuthProviderId	const = 'custom3pAnthropicConsoleOAuth'
+Ujr	fiveThousandMs	const = 5e3
+Ukt	fiftyThousand	const = 5e4
+UoA	slash	const = '/'
+Upr	dismissTaskToolDescription	tool description for withdrawing a spawn_task chip
+Uve	fiveHundred	const number = 500
+Uvt	buddyBleTransportIpcDispatcher	dispatcher over $eipc..._BuddyBleTransport_$_ channels
+Uy	tenThousandMs	const = 1e4
+Uyi	claudeModelKeywords	['claude','sonnet','opus','haiku','anthropic']
+Uyr	promptTooLongMessages	['prompt is too long','prompt too long']
+Uze	normalizePlanTier	returns plan tier if in allowed list else undefined
+hri	planTierNames	['free','claude_pro','claude_max','raven']
+V0i	threeHundredThousandMs	const = 300*1e3
+V5r	twoHundred	const number = 200
+V7r	cuTeachMouseLeaveEvent	const = 'cu-teach:mouse-leave'
+V8A	threeHundredThousandMs	const = 300*1e3
+V9e	monthNamesEnglish	['January','February',...]
+V9i	expectedFunctionMessage	const = 'Expected a function'
+VDi	ipv6AddressPattern	/\b(?:[A-Fa-f0-9]{1,4}:){2,7}...\b/g
+VGe	emptyArray	const = []
+lowercase	noUppercasePattern	/^[^A-Z]*$/
+VJA	sentryProfileIdAttr	const = 'sentry.profile_id'
+VJe	three	const number = 3
+VJr	tenThousandMs	const = 1e4
+VKr	bridgeStateFilename	const = 'bridge-state.json'
+qKt	ten	const number = 10
+VKt	zodErrorsIntegrationName	const = 'ZodErrors'
+XKt	makeZodErrorsIntegration	sentry integration processing zod issues, default limit
+VPe	noop	const = () => {}
+VTe	windowsRegExePath	const = '/mnt/c/Windows/System32/reg.exe'
+VV	emptyObject	mutable {} object
+VWe	amqplibIntegrationName	const = 'Amqplib'
+tei	makeAmqplibIntegration	sentry integration {name:'Amqplib', setupOnce}
+VXe	wakeSchedulerIpcDispatcher	dispatcher over $eipc..._WakeScheduler_$_ channels
+VXi	maxSafeInteger	const = 9007199254740991
+c1A	unwrapMethod	shimmer: restores __original via __unwrap on a patched member
+VXt	massUnwrap	shimmer: unwrap many methods across modules
+VYi	sixteenMebibytes	const = 16*1024*1024
+V_	credentials	const = 'credentials'
+V_e	fifteenThousandMs	const = 15e3
+V_r	httpUrlPattern	/https?:\/\/[^\s<>"'`]+/g
+Vbt	remoteUploadOpsLogTag	const = '[remoteUploadOps]'
+Vet	singleLeadingDashPattern	/^-[^-]/
+Vji	jsonSchemaDraftDefinitions	ajv meta-schema definitions (schemaArray, nonNegativeInteger,...)
+Vme	five	const number = 5
+Vmr	claudeHaiku45ModelId	const = 'claude-haiku-4-5-20251001'
+Vp	remoteMarketplaceOpsLogTag	const = '[remoteMarketplaceOps]'
+VrA	sevenThousandTwoHundredSeconds	const = 7200*1e3
+Vtn	oneDaySeconds	const = 24*3600
+Vxi	mcpbSigEndMarker	const = 'MCPB_SIG_END'
+Vxt	objectObjectTag	const = '[object Object]'
+Vyi	cuidPattern	/^c[^\s-]{8,}$/i
+Vyr	sessionCredentialsExpiredMessage	'Your session credentials expired...' message
+W$A	DoublyLinkedListNode	node with list/next/prev/value links
+W0r	normalizeNfkcLowercase	NFKC + lowercase normalization with reserved-name guard
+W1	bootstrapInferenceConfig	{gatewayBaseUrl,gcpProjectId,gcpRegion,awsRegion,foundryResource} bootstrap defaults
+W2t	oneMinuteMs	const = 60*1e3
+W3r	dnsConnectErrorPattern	/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN/i
+W4	ten	const number = 10
+W4r	twoHundred	const number = 200
+W8A	browserExtensionNativeHostManifestName	const = 'com.anthropic.claude_browser_extension.json'
+W8i	ajvDataRefSchemaUrl	const = ajv data.json schema url
+WAn	five	const number = 5
+WAt	oauthCodeCallbackUrl	const = 'http://localhost:3000/oauth/code/callback'
+WDr	sixtyThousandMs	const = 6e4
+WFr	normalizeAddressFamily	{address,family} with family inferred from '.' presence
+ixe	coerceAddressInput	wraps string/object into address-family object
+WJi	stealthRelaunchTag	const = 'stealth-relaunch'
+WJr	oneThousandMs	const = 1e3
+a0	version0_94_0	const = '0.94.0'
+e5i	buildStainlessRuntimeHeaders	X-Stainless-* headers per runtime (deno/edge/node/browser)
+jNe	normalizeArchLabel	maps arch string to x32/x64/arm/arm64/other
+WNe	normalizeOsLabel	maps platform string to iOS/Android/MacOS/Windows/...
+WPe	fifteenThousandMs	const = 15e3
+WUA	agentToolNames	['Bash','Read','Write','Edit',...] tool name list
+WUt	sixHundredEighty	const number = 680
+WXe	hexDashThirtySixPattern	/^[a-f0-9-]{36}$/
+WXi	objectArrayTag	const = '[object Array]'
+WYi	direntTypeLabel	File/Directory/SymbolicLink/Unsupported from a dirent
+WZ	flagEvaluationPrefix	const = 'flag.evaluation.'
+W_i	sixtyThousandMs	const = 6e4
+Wer	ten	const number = 10
+Wht	tenThousandMs	const = 1e4
+Wnt	StreamPipeProxy	src/dest pipe wrapper with drain/unpipe/end
+Wot	one	const number = 1
+Wte	mcpNotificationOrigin	const = 'auto.mcp.notification'
+Wxe	tenThousandMs	const = 1e4
+Wyi	uuidWordBoundaryPattern	/^[0-9a-fA-F]{8}\b-...{12}$/i
+X$e	clientAddressAttr	const = 'client.address'
+X$t	six	const number = 6
+X0	zipExtraFieldsLength	sums fflate extra-field byte lengths
+kx	writeZipEntryHeader	fflate: writes local/central zip header bytes
+X1r	thirtyThousandMs	const = 3e4
+X4i	defineZodErrorMethods	defines format/flatten/addIssue/isEmpty on a ZodError
+X5r	uuidLowerHexPattern	/^[0-9a-f]{8}-...{12}$/i
+X6	mergeOwnProps	shallow merge of A then e into new object
+d$A	flattenTrieToPaths	recursively flattens nested trie into '/'-joined path map
+X7r	twoHundredTwenty	const number = 220
+X8i	dataRefKeyword	const = ['$data']
+X9i	isBrowserEnvironment	window/document/navigator presence check
+XAA	oneMillion	const = 1e6
+XAt	oauthTokenCacheKey	const = 'oauth:tokenCache'
+XBA	browserWindowOptionPolicy	allowed/creationOnly flags per BrowserWindow option
+XC	sentrySourceAttr	const = 'sentry.source'
+XEA	claudeAiDomainSuffix	const = '.claude.ai'
+XHe	cliSessionMntClaudePathPattern	/\/sessions\/cli-[0-9a-f]{8}\/mnt\/\.claude/g
+XJA	productionEnv	const = 'production'
+XJr	tenThousandMs	const = 1e4
+XOr	ten	const number = 10
+XQr	windowsExplorerAppId	const = 'Microsoft.Windows.Explorer'
+XSr	oneMillion	const = 1e6
+XTt	sixHoursMs	const = 360*60*1e3
+XXi	objectErrorTag	const = '[object Error]'
+XYe	sessionExecutiveSummaryPrompt	prompt asking for an executive session summary
+XZ	one	const number = 1
+XZt	version0_8_0	const = '0.8.0'
+X_r	closingToOpeningBracket	{')':'(',']':'[','}':'{'}
+XcA	pluginOAuthStorageLogTag	const = '[PluginOAuthStorage]'
+XkA	twoHundredFiftySix	const number = 256
+Xlr	settingsScopeNames	['user','project','local']
+XoA	dateFormatPatterns	{default,shortDate,...} moment-style format strings
+j9e	formatDateDefault	applies date-format presets to a date
+Xre	pathSeparators	{win32:{sep:'\\'},posix:{sep:'/'}}
+Xte	genAiCacheWriteTokensAttr	const = 'gen_ai.usage.input_tokens.cache_write'
+Xtn	tenThousand	const number = 1e4
+Xui	setModuleConfig	assigns module-level $tA config holder
+Xw	anonymous	const = 'anonymous'
+Xyi	isoDurationPattern	ISO-8601 duration regex /^[-+]?P.../
+Xzt	doubleBackslashPattern	/\\\\/g
+Y1r	knownErrorMessagePrefixes	['AxiosError:','File does not exist.',...]
+Y1t	mcpServerFunctionOrigin	const = 'auto.function.mcp_server'
+Y3i	hintsTestingAttr	const = 'hints.testing'
+Y4i	buildCatchDefaultJsonSchema	zod catch -> json schema default value
+YAr	defaultRuntimeSessionConfig	{renderTarget:'ink',workspace:'local',...}
+YCi	version3_17_0	const = '3.17.0'
+YGe	tenThousandMs	const = 1e4
+YIr	computerUseActionDefaults	{pixelValidation,clipboardPasteMultiline,...} flags
+YPA	requestDirectoryToolName	const = 'request_directory'
+YPt	tildeRangeSource	const = '(?:~>?)' semver source fragment
+YSi	isAnthropicOrGatewayProvider	inferenceProvider gateway|anthropic check
+YVA	tenThousandMs	const = 1e4
+YVe	sentryMeasurementValueAttr	const = 'sentry.measurement_value'
+YVr	webSourceFileExtensions	['.js','.jsx','.ts',...] file extensions
+YWr	fifteenThousandMs	const = 15e3
+YXe	appFeaturesIpcDispatcher	dispatcher over $eipc..._AppFeatures_$_ channels
+YXr	fiveThousandMs	const = 5e3
+YYi	listTarEntries	streams a tar file, resolves on end via parser
+YYt	eighty	const number = 80
+globalConfig	globalConfig	mutable {} merged via Object.assign in cluster-2864 (name already semantic)
+Yen	dataExportScope	const = 'user:data_export'
+Yfe	versionZeroPointFour	const = '0.4'
+Yfi	bcp47LikeTagPattern	/^[A-Za-z0-9]{2,8}(?:-...)*$/ language-tag-like regex
+Ygr	settingsSourceNames	['userSettings','projectSettings',...]
+Yhr	fiveThousandMs	const = 5e3
+Yie	threeHundred	const number = 300
+Ym	fifteenThousandMs	const = 15e3
+Yqt	genAiEncodingFormatAttr	const = 'gen_ai.request.encoding_format'
+Yrt	throwTypeError	throws TypeError(A)
+rI	addPrivateMemberOnce	tsc private-member init helper (no duplicate add)
+Yst	chromeExtensionId	const = 'fcoeoabgfenejglbffodgkkbkcdhcgfn'
+Ytn	tenThousandMs	const = 1e4
+Ywe	claudeCaiUrl	const = 'https://claude.com/cai'
+Yye	twenty	const number = 20
+i3e	expressIntegrationName	const = 'Express'
+Yzt	makeExpressIntegration	sentry integration {name:'Express', setupOnce}
+Z$e	mcpPromptResultDescriptionAttr	const = 'mcp.prompt.result.description'
+Z$t	nine	const number = 9
+Z3t	logLevelNames	['trace','debug','info','warn','error','fatal']
+Z5r	microsoftLoginBaseUrl	const = 'https://login.microsoftonline.com'
+Z6A	mutableCurrentRef	{current:null} holder
+Z7r	sevenHundredTwenty	const number = 720
+Z8i	objectTypeName	const = 'object'
+Z9i	delayMs	resolves after A ms via setTimeout
+ZAA	memoryFileName	const = 'MEMORY.md'
+ZEA	anthropicApiBaseUrl	const = 'https://api.anthropic.com'
+ZGi	defaultNoProxyHosts	const = 'localhost,127.0.0.1,::1,.local'
+mZ	isObjectOrFunction	A !== null && typeof object
+ZGr	isPlainEmptyObject	plain object with zero keys
+nUr	isStreamLike	object with a pipe function
+kUr	deepCloneWithCycleGuard	clones value, guarding against cyclic refs
+vUr	isThenableCatchable	object/function with then+catch
+ZGt	fifty	const number = 50
+ZHe	mntClaudePathFragment	const = 'mnt/.claude'
+ZJr	oneHundred	const number = 100
+ZLA	semicolon	const = ';'
+ZNe	oneMebibyte	const = 1048576
+ZOr	oneHundred	const number = 100
+ZP	inferenceProviderLabels	{gateway:'Gateway',anthropic:'Anthropic API',...}
+ZPt	massWrap	shimmer: wraps many methods across modules
+ZSr	oneHundred	const number = 100
+ZUi	oneHundredTwentyThousandMs	const = 12e4
+ZUt	remotePluginsDirRelative	const = '.claude/remote/plugins'
+ZXi	objectDateTag	const = '[object Date]'
+ZXr	findInPageIpcDispatcher	dispatcher over $eipc..._FindInPage_$_ channels
+ZYe	agentTerminationMessages	{error_max_turns,error_during_execution} strings
+ZYt	semverPattern	full semver /^(0|[1-9]\d*)\....$/ regex
+Z_i	oneThousand	const number = 1e3
+Zk	vmCliRunnerLogTag	const = '[VMCLIRunner]'
+Zlr	settingsScopeToKeyMap	{user:'userSettings',project:'projectSettings',local:'localSettings'}
+Zlt	userProfileScope	const = 'user:profile'
+Zm	orgPluginIndexLogTag	const = '[custom-3p:org-plugin-index]'
+Zme	eightKibibytes	const = 8*1024
+Zot	thirty	const number = 30
+ZqA	googleStsHost	const = 'sts.googleapis.com'
+dFt	numericString2358734848	const = '2358734848'
+Zrn	validatePathConstant	calls path-validation on numericString2358734848
+ZvA	fifty	const number = 50
+Zyi	jwtLikePattern	/^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/
+Zyr	browserComputerToolPrefixes	['browser:','computer:']
+_$r	three	const number = 3
+_0r	threeThousandMs	const = 3e3
+_1t	mcpPromptNameAttr	const = 'mcp.prompt.name'
+_2i	oneHundredTwentyThousandMs	const = 12e4
+_6t	hexPairNotFfSource	'(?!ff)[\\da-f]{2}' regex source fragment
+_7t	sentryInstrumentationHonoPkg	const = '@sentry/instrumentation-hono'
+_8A	claudeHaiku45ModelId	const = 'claude-haiku-4-5-20251001'
+_8e	langgraphAiOrigin	const = 'auto.ai.langgraph'
+_8r	sixtyFour	const number = 64
+_8t	eight	const number = 8
+_Di	anthropicApiHost	const = 'a-api.anthropic.com'
+_IA	genAiFrequencyPenaltyAttr	const = 'gen_ai.request.frequency_penalty'
+_Jr	sixtyThousandMs	const = 6e4
+_Ke	twenty	const number = 20
+_Kr	fortyNinety	const number = 4090
+_Kt	pathSplitPattern	/^(\S+:\\|\/?)([\s\S]*?)(...)$/ path-parsing regex
+_Mi	base64UrlTrailingPattern	/[A-Za-z0-9._~+/=-]+$/
+_N	authFailedHtmlPage	HTML 'Authentication failed' error page string
+_Ni	noUppercasePattern	/^[^A-Z]*$/
+SUi	ssoAccountAccessScope	const = 'sso:account:access'
+TGA	semicolon	const = ';'
+Yin	terminal	const = 'terminal'
+dSi	inferenceProviderLabel	looks up provider display label from labels map
+foA	jsonUtf8ByteLength	utf8 byte length of JSON.stringify(A)
+iYA	appendFormDataValue	recursively appends value (string/blob/array/object) to FormData
+kmr	buildFormData	builds FormData from object, asserts fetch supports uploads
+noA	wrapMethod	shimmer: replaces member with wrapper, records __original/__unwrap/__wrapped
+ypt	isAsyncIterable	object with Symbol.asyncIterator function

@@ -1,0 +1,4586 @@
+[
+  {
+    "orig": "AiA",
+    "gold": "featureChangeListeners",
+    "proposed": "growthBookListenerSetA",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "Aq",
+    "gold": "accountIdWaiter",
+    "proposed": "accountIdResolutionPromise",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "Dn",
+    "gold": "safeRootBrand",
+    "proposed": "safeRootMethodSet",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "Eet",
+    "gold": "vmLogFilePath",
+    "proposed": "logFilename",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "Ett",
+    "gold": "loadMcpIncidentLog",
+    "proposed": "loadBuiltinMcpServerConfig",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "GSA",
+    "gold": "mcpIncidentLogPromise",
+    "proposed": "builtinMcpServerConfigPromise",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "JT",
+    "gold": "bootstrapConfigOverlay",
+    "proposed": "bootstrapTokenStore",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "J_i",
+    "gold": "disconnectEventSocket",
+    "proposed": "closeVmEventSocket",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "LSA",
+    "gold": "subnetCache",
+    "proposed": "bootstrapConfigCache",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "L_i",
+    "gold": "scrubCliStderr",
+    "proposed": "cliStderrTailScrubber",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "MW",
+    "gold": "allowUncSlot",
+    "proposed": "safeRootAllowUncField",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "M_i",
+    "gold": "pushSuppression",
+    "proposed": "incrementVmRequestDepth",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "Mme",
+    "gold": "accountIdentityInitialized",
+    "proposed": "accountIdBackfillStarted",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "NW",
+    "gold": "isScratchSlot",
+    "proposed": "safeRootScratchField",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "N_i",
+    "gold": "popSuppression",
+    "proposed": "decrementVmRequestDepth",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "Ome",
+    "gold": "blockedSubnets",
+    "proposed": "blockedIpRangeList",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "PMi",
+    "gold": "supportsFunctionConstructor",
+    "proposed": "canEvalFunction",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "Pa",
+    "gold": "rootPathSlot",
+    "proposed": "safeRootPathField",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "QC",
+    "gold": "resolveConfinedPath",
+    "proposed": "resolveSafeRootLeafPath",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "RW",
+    "gold": "fileBrandSlot",
+    "proposed": "safeFileMethodSet",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "SsA",
+    "gold": "staleSessionGeneration",
+    "proposed": "staleSessionFailureEpoch",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "VRi",
+    "gold": "oauthErrorCodes",
+    "proposed": "bootstrapOidcErrorCodes",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "Wm",
+    "gold": "assertNotSymlink",
+    "proposed": "rejectSafeRootSymlink",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "YMi",
+    "gold": "propertyKeyTypes",
+    "proposed": "propertyKeyTypeSet",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "YT",
+    "gold": "eventQueue",
+    "proposed": "pendingTelemetryEvents",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "ZD",
+    "gold": "mcpIncidentLog",
+    "proposed": "builtinMcpServerConfig",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "_F",
+    "gold": "openNofollowFlag",
+    "proposed": "oNoFollowFlag",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "_W",
+    "gold": "fileMaxBytesSlot",
+    "proposed": "safeFileExtraField",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "_test",
+    "gold": "testExportsBundle",
+    "proposed": "oauthTestHooks",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "ay",
+    "gold": "pendingRpcSocket",
+    "proposed": "vmRpcConnectingSocket",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "dO",
+    "gold": "disposedSlot",
+    "proposed": "safeRootDisposedField",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "dx",
+    "gold": "staleSessionFailures",
+    "proposed": "staleSessionFailureCache",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "eFA",
+    "gold": "featureValueCache",
+    "proposed": "growthBookFeatureCache",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "eiA",
+    "gold": "tokenCacheGeneration",
+    "proposed": "oauthTokenCacheEpoch",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "fX",
+    "gold": "scrubHost",
+    "proposed": "hostnameScrubber",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "j4A",
+    "gold": "defaultDeviceId",
+    "proposed": "mcpServerCommandSchema",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "jAt",
+    "gold": "growthbookDisabled",
+    "proposed": "oauthDisabledFlag",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "k4A",
+    "gold": "suppressionDepth",
+    "proposed": "pendingVmRequestDepth",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "mp",
+    "gold": "rootTierSlot",
+    "proposed": "safeRootTierField",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "n_i",
+    "gold": "disableGrowthBook",
+    "proposed": "disableOauth",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "pC",
+    "gold": "fileHandleSlot",
+    "proposed": "safeFileHandleField",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "qv",
+    "gold": "bootstrapInvalidation",
+    "proposed": "bootstrapEpochGuard",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "ski",
+    "gold": "zodCidrFormat",
+    "proposed": "ZodCidrv6",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "tRi",
+    "gold": "loopbackHosts",
+    "proposed": "loopbackHostnames",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "tq",
+    "gold": "scrubSaltCache",
+    "proposed": "cachedScrubOptionsBySalt",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "transports",
+    "gold": "winstonTransports",
+    "proposed": "logTransports",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "uO",
+    "gold": "fileTierSlot",
+    "proposed": "safeFileTierField",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "vme",
+    "gold": "vmStarted",
+    "proposed": "vmEventSubscriptionActive",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "wMi",
+    "gold": "retryableFsErrorCodes",
+    "proposed": "atomicRenameRetryErrors",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "ysA",
+    "gold": "freshChangeListeners",
+    "proposed": "growthBookListenerSetB",
+    "file": "oauth-org"
+  },
+  {
+    "orig": "extendedDuration",
+    "gold": "iso8601DurationPatternAlt",
+    "proposed": "extendedDurationPattern",
+    "file": "provider"
+  },
+  {
+    "orig": "kEr",
+    "gold": "transportSseTimeoutMs",
+    "proposed": "fiveThousandMs",
+    "file": "provider"
+  },
+  {
+    "orig": "kJe",
+    "gold": "maxImageDimension",
+    "proposed": "fourEighty",
+    "file": "provider"
+  },
+  {
+    "orig": "kPe",
+    "gold": "hashBlockSize",
+    "proposed": "sixteen",
+    "file": "provider"
+  },
+  {
+    "orig": "kZA",
+    "gold": "filePathArgKeys",
+    "proposed": "filePathFieldNames",
+    "file": "provider"
+  },
+  {
+    "orig": "kdA",
+    "gold": "emptyModuleExports",
+    "proposed": "emptyRecord",
+    "file": "provider"
+  },
+  {
+    "orig": "kft",
+    "gold": "registryCacheTtlMs",
+    "proposed": "fiveMinuteMs",
+    "file": "provider"
+  },
+  {
+    "orig": "kme",
+    "gold": "defaultPageSize",
+    "proposed": "threeHundred",
+    "file": "provider"
+  },
+  {
+    "orig": "kqA",
+    "gold": "customCredentialHelperDispatcher",
+    "proposed": "custom3pHelperRunDispatcher",
+    "file": "provider"
+  },
+  {
+    "orig": "krn",
+    "gold": "saltByteLength",
+    "proposed": "eight",
+    "file": "provider"
+  },
+  {
+    "orig": "kti",
+    "gold": "dispatchTimeoutMs",
+    "proposed": "fiveThousandMsB",
+    "file": "provider"
+  },
+  {
+    "orig": "l0r",
+    "gold": "hashKeyByteLength",
+    "proposed": "sixtyFour",
+    "file": "provider"
+  },
+  {
+    "orig": "l1r",
+    "gold": "requestTtlMs",
+    "proposed": "fiveMinuteMsB",
+    "file": "provider"
+  },
+  {
+    "orig": "l2i",
+    "gold": "staleAfterMs",
+    "proposed": "thirtyThousandMs",
+    "file": "provider"
+  },
+  {
+    "orig": "l5i",
+    "gold": "maxRetryAttempts",
+    "proposed": "five",
+    "file": "provider"
+  },
+  {
+    "orig": "l8e",
+    "gold": "genAiTopSamplingKey",
+    "proposed": "genAiRequestTopKLabel",
+    "file": "provider"
+  },
+  {
+    "orig": "lFt",
+    "gold": "maxLabelLength",
+    "proposed": "eightyEight",
+    "file": "provider"
+  },
+  {
+    "orig": "lHi",
+    "gold": "streamChunkBytes",
+    "proposed": "halfMebibyte",
+    "file": "provider"
+  },
+  {
+    "orig": "lIr",
+    "gold": "prismaMagicNumber",
+    "proposed": "fnv32OffsetBasis",
+    "file": "provider"
+  },
+  {
+    "orig": "lJr",
+    "gold": "connectTimeoutMs",
+    "proposed": "fortyFiveThousandMs",
+    "file": "provider"
+  },
+  {
+    "orig": "lOr",
+    "gold": "isUnsetIntegrationValue",
+    "proposed": "isFunctionOrNullOrFalse",
+    "file": "provider"
+  },
+  {
+    "orig": "lUi",
+    "gold": "pollIntervalLongMs",
+    "proposed": "twoMinuteMs",
+    "file": "provider"
+  },
+  {
+    "orig": "lW",
+    "gold": "maxBatchSize",
+    "proposed": "fiftyCount",
+    "file": "provider"
+  },
+  {
+    "orig": "lae",
+    "gold": "maxResultCount",
+    "proposed": "thirtyCount",
+    "file": "provider"
+  },
+  {
+    "orig": "lat",
+    "gold": "primitiveTypeToJsonSchemaName",
+    "proposed": "typeofToZodTypeName",
+    "file": "provider"
+  },
+  {
+    "orig": "lfr",
+    "gold": "defaultLimit",
+    "proposed": "fiftyCountB",
+    "file": "provider"
+  },
+  {
+    "orig": "lft",
+    "gold": "oneMinuteMs",
+    "proposed": "sixtyThousandMs",
+    "file": "provider"
+  },
+  {
+    "orig": "lnn",
+    "gold": "sessionIdleMs",
+    "proposed": "thirtyMinuteMs",
+    "file": "provider"
+  },
+  {
+    "orig": "lti",
+    "gold": "isoDateTimePattern",
+    "proposed": "isoTimestampPattern",
+    "file": "provider"
+  },
+  {
+    "orig": "lur",
+    "gold": "heartbeatIntervalMs",
+    "proposed": "sixtyThousandMsB",
+    "file": "provider"
+  },
+  {
+    "orig": "m1r",
+    "gold": "firstAttemptIndex",
+    "proposed": "one",
+    "file": "provider"
+  },
+  {
+    "orig": "m2A",
+    "gold": "maxUploadBytes",
+    "proposed": "thirtyMebibytes",
+    "file": "provider"
+  },
+  {
+    "orig": "m8t",
+    "gold": "digestByteLength",
+    "proposed": "oneTwentyEight",
+    "file": "provider"
+  },
+  {
+    "orig": "mFr",
+    "gold": "retryBackoffBase",
+    "proposed": "two",
+    "file": "provider"
+  },
+  {
+    "orig": "mHe",
+    "gold": "clearAllAuthTokens",
+    "proposed": "tokenCleanupTasks",
+    "file": "provider"
+  },
+  {
+    "orig": "mIi",
+    "gold": "dataRefKeys",
+    "proposed": "dataRefFieldNames",
+    "file": "provider"
+  },
+  {
+    "orig": "mJe",
+    "gold": "previewCharLimit",
+    "proposed": "twoHundred",
+    "file": "provider"
+  },
+  {
+    "orig": "mMA",
+    "gold": "defaultTimeoutMs",
+    "proposed": "tenThousand",
+    "file": "provider"
+  },
+  {
+    "orig": "mUe",
+    "gold": "maxRowsLimit",
+    "proposed": "oneMillion",
+    "file": "provider"
+  },
+  {
+    "orig": "mii",
+    "gold": "tarBlockBytes",
+    "proposed": "thirtyTwoKibibytes",
+    "file": "provider"
+  },
+  {
+    "orig": "mqr",
+    "gold": "errorPreviewLimit",
+    "proposed": "twoHundredB",
+    "file": "provider"
+  },
+  {
+    "orig": "n4A",
+    "gold": "mcpServerProfileKinds",
+    "proposed": "profileKindNames",
+    "file": "provider"
+  },
+  {
+    "orig": "n6r",
+    "gold": "pollTimeoutMs",
+    "proposed": "fiftyThousandMs",
+    "file": "provider"
+  },
+  {
+    "orig": "n7",
+    "gold": "tokenRefreshMs",
+    "proposed": "thirtyMinuteMsB",
+    "file": "provider"
+  },
+  {
+    "orig": "nDe",
+    "gold": "shortListLimit",
+    "proposed": "thirtyCountB",
+    "file": "provider"
+  },
+  {
+    "orig": "nEr",
+    "gold": "cacheExpiryMs",
+    "proposed": "fiveMinuteMsC",
+    "file": "provider"
+  },
+  {
+    "orig": "nOr",
+    "gold": "chunkByteLength",
+    "proposed": "chunkBufferBySize",
+    "file": "provider"
+  },
+  {
+    "orig": "nQr",
+    "gold": "defaultRetryCount",
+    "proposed": "threeB",
+    "file": "provider"
+  },
+  {
+    "orig": "nTt",
+    "gold": "tokenByteLength",
+    "proposed": "eightB",
+    "file": "provider"
+  },
+  {
+    "orig": "nZr",
+    "gold": "marketplaceErrorPatterns",
+    "proposed": "marketplaceErrorPatternCodes",
+    "file": "provider"
+  },
+  {
+    "orig": "ncA",
+    "gold": "maxParallelism",
+    "proposed": "four",
+    "file": "provider"
+  },
+  {
+    "orig": "nfA",
+    "gold": "anonymousFrameName",
+    "proposed": "anonymousLabel",
+    "file": "provider"
+  },
+  {
+    "orig": "nlr",
+    "gold": "uuidByteLength",
+    "proposed": "sixteenB",
+    "file": "provider"
+  },
+  {
+    "orig": "nme",
+    "gold": "bufferChunkBytes",
+    "proposed": "eightKibibytes",
+    "file": "provider"
+  },
+  {
+    "orig": "npr",
+    "gold": "throttleMs",
+    "proposed": "oneThousand",
+    "file": "provider"
+  },
+  {
+    "orig": "nxe",
+    "gold": "createProgressReadableStream",
+    "proposed": "progressTrackingStream",
+    "file": "provider"
+  },
+  {
+    "orig": "nxr",
+    "gold": "requestTimeoutMs",
+    "proposed": "thirtyThousandMsB",
+    "file": "provider"
+  },
+  {
+    "orig": "o4A",
+    "gold": "mcpServerProfileKindsAlt",
+    "proposed": "profileKindNamesReversed",
+    "file": "provider"
+  },
+  {
+    "orig": "oAr",
+    "gold": "deepPathKeyPattern",
+    "proposed": "propertyPathPattern",
+    "file": "provider"
+  },
+  {
+    "orig": "oDe",
+    "gold": "pageLimit",
+    "proposed": "thirtyCountC",
+    "file": "provider"
+  },
+  {
+    "orig": "oFi",
+    "gold": "connectTimeoutShortMs",
+    "proposed": "tenThousandB",
+    "file": "provider"
+  },
+  {
+    "orig": "oFr",
+    "gold": "isValidTokenChar",
+    "proposed": "isTokenChars",
+    "file": "provider"
+  },
+  {
+    "orig": "oQ",
+    "gold": "builtinBundleStatusCodes",
+    "proposed": "builtinBundleProbeOutcomes",
+    "file": "provider"
+  },
+  {
+    "orig": "oTt",
+    "gold": "hmacByteLength",
+    "proposed": "eightC",
+    "file": "provider"
+  },
+  {
+    "orig": "oUe",
+    "gold": "smallRetryLimit",
+    "proposed": "fiveB",
+    "file": "provider"
+  },
+  {
+    "orig": "oVt",
+    "gold": "anthropicTracedMethods",
+    "proposed": "anthropicSdkMethodNames",
+    "file": "provider"
+  },
+  {
+    "orig": "oar",
+    "gold": "unixTimeSchemaConverter",
+    "proposed": "zodDateToJsonSchema",
+    "file": "provider"
+  },
+  {
+    "orig": "onn",
+    "gold": "refreshWindowMs",
+    "proposed": "fiveMinuteMsD",
+    "file": "provider"
+  },
+  {
+    "orig": "ovA",
+    "gold": "mutableSingletonRef",
+    "proposed": "nullRef",
+    "file": "provider"
+  },
+  {
+    "orig": "p$",
+    "gold": "codeSessionPhases",
+    "proposed": "sessionPhaseNames",
+    "file": "provider"
+  },
+  {
+    "orig": "p1r",
+    "gold": "parallelChunkCount",
+    "proposed": "fourB",
+    "file": "provider"
+  },
+  {
+    "orig": "p4i",
+    "gold": "createSentryClientFactory",
+    "proposed": "buildEventPipeline",
+    "file": "provider"
+  },
+  {
+    "orig": "p6t",
+    "gold": "printableHeaderValuePattern",
+    "proposed": "printableAsciiPattern",
+    "file": "provider"
+  },
+  {
+    "orig": "p8t",
+    "gold": "exceptionEventType",
+    "proposed": "exceptionLabel",
+    "file": "provider"
+  },
+  {
+    "orig": "pEr",
+    "gold": "preservedEnvVars",
+    "proposed": "forwardedEnvVarNames",
+    "file": "provider"
+  },
+  {
+    "orig": "pGA",
+    "gold": "baggageHeaderKey",
+    "proposed": "baggageLabel",
+    "file": "provider"
+  },
+  {
+    "orig": "pGi",
+    "gold": "socketTimeoutMs",
+    "proposed": "fiveThousandMsC",
+    "file": "provider"
+  },
+  {
+    "orig": "pHe",
+    "gold": "defaultCspDirectives",
+    "proposed": "cspDirectiveDefaults",
+    "file": "provider"
+  },
+  {
+    "orig": "pIi",
+    "gold": "dataSchemaDescription",
+    "proposed": "dataRefMetaSchemaTitle",
+    "file": "provider"
+  },
+  {
+    "orig": "pKr",
+    "gold": "uploadTimeoutMs",
+    "proposed": "sixHundredThousandMs",
+    "file": "provider"
+  },
+  {
+    "orig": "pRe",
+    "gold": "tripleRetryLimit",
+    "proposed": "threeC",
+    "file": "provider"
+  },
+  {
+    "orig": "pVr",
+    "gold": "bufferHighWaterBytes",
+    "proposed": "sixtyFourKibibytes",
+    "file": "provider"
+  },
+  {
+    "orig": "pqr",
+    "gold": "minuteTimeoutMs",
+    "proposed": "sixtyThousandMsC",
+    "file": "provider"
+  },
+  {
+    "orig": "q1r",
+    "gold": "windowsDllNotFoundExitCode",
+    "proposed": "threeBillionConstantA",
+    "file": "provider"
+  },
+  {
+    "orig": "q6t",
+    "gold": "idCharLength",
+    "proposed": "twenty",
+    "file": "provider"
+  },
+  {
+    "orig": "q8A",
+    "gold": "signingPublicKey",
+    "proposed": "ed25519PublicKeyPem",
+    "file": "provider"
+  },
+  {
+    "orig": "qGA",
+    "gold": "processExitReasons",
+    "proposed": "processExitReasonNames",
+    "file": "provider"
+  },
+  {
+    "orig": "qJr",
+    "gold": "singleUnit",
+    "proposed": "oneB",
+    "file": "provider"
+  },
+  {
+    "orig": "qMA",
+    "gold": "defaultBackoffMs",
+    "proposed": "twoThousandMs",
+    "file": "provider"
+  },
+  {
+    "orig": "qOt",
+    "gold": "maxPayloadBytes",
+    "proposed": "eightThousandOneNinetyTwo",
+    "file": "provider"
+  },
+  {
+    "orig": "qRi",
+    "gold": "longRequestTimeoutMs",
+    "proposed": "twoMinuteMsB",
+    "file": "provider"
+  },
+  {
+    "orig": "qWr",
+    "gold": "hexShortLength",
+    "proposed": "sixB",
+    "file": "provider"
+  },
+  {
+    "orig": "qYi",
+    "gold": "decodeHtmlEntities",
+    "proposed": "replaceAllFromMap",
+    "file": "provider"
+  },
+  {
+    "orig": "qZr",
+    "gold": "storeRequestTimeoutMs",
+    "proposed": "twoMinuteMsC",
+    "file": "provider"
+  },
+  {
+    "orig": "qlA",
+    "gold": "emptyListConst",
+    "proposed": "emptyArrayB",
+    "file": "provider"
+  },
+  {
+    "orig": "qme",
+    "gold": "hundredLimit",
+    "proposed": "oneHundred",
+    "file": "provider"
+  },
+  {
+    "orig": "qxe",
+    "gold": "slugPattern",
+    "proposed": "kebabCasePattern",
+    "file": "provider"
+  },
+  {
+    "orig": "r0r",
+    "gold": "maxArchiveBytes",
+    "proposed": "fiveMillion",
+    "file": "provider"
+  },
+  {
+    "orig": "r2A",
+    "gold": "uploadsMountPath",
+    "proposed": "userDataUploadsPath",
+    "file": "provider"
+  },
+  {
+    "orig": "r2i",
+    "gold": "pollWaitMs",
+    "proposed": "fiveThousandMsD",
+    "file": "provider"
+  },
+  {
+    "orig": "r4",
+    "gold": "tripleCount",
+    "proposed": "threeD",
+    "file": "provider"
+  },
+  {
+    "orig": "r6r",
+    "gold": "mediumTimeoutMs",
+    "proposed": "fifteenThousandMs",
+    "file": "provider"
+  },
+  {
+    "orig": "r6t",
+    "gold": "prismaInstrumentationVersion",
+    "proposed": "versionTwoZeroOne",
+    "file": "provider"
+  },
+  {
+    "orig": "rCA",
+    "gold": "defaultKey",
+    "proposed": "defaultLabel",
+    "file": "provider"
+  },
+  {
+    "orig": "rFA",
+    "gold": "emptyHandlersList",
+    "proposed": "emptyArrayC",
+    "file": "provider"
+  },
+  {
+    "orig": "rL",
+    "gold": "pinnedResourceId",
+    "proposed": "threeBillionConstantB",
+    "file": "provider"
+  },
+  {
+    "orig": "rQt",
+    "gold": "surfaceKinds",
+    "proposed": "surfaceModeNames",
+    "file": "provider"
+  },
+  {
+    "orig": "rS",
+    "gold": "forcedFlagResult",
+    "proposed": "forcedFeatureFlagState",
+    "file": "provider"
+  },
+  {
+    "orig": "rXe",
+    "gold": "dateRegexSource",
+    "proposed": "dateValiditySubPattern",
+    "file": "provider"
+  },
+  {
+    "orig": "rcA",
+    "gold": "tenCount",
+    "proposed": "tenB",
+    "file": "provider"
+  },
+  {
+    "orig": "rhr",
+    "gold": "tripleRetry",
+    "proposed": "threeE",
+    "file": "provider"
+  },
+  {
+    "orig": "rlr",
+    "gold": "debounceShortMs",
+    "proposed": "eightHundred",
+    "file": "provider"
+  },
+  {
+    "orig": "rvA",
+    "gold": "maxBlobBytes",
+    "proposed": "twentyMebibytes",
+    "file": "provider"
+  },
+  {
+    "orig": "rxe",
+    "gold": "cloneEventHint",
+    "proposed": "cloneIfErrorEvent",
+    "file": "provider"
+  },
+  {
+    "orig": "rxr",
+    "gold": "secondMs",
+    "proposed": "oneThousandB",
+    "file": "provider"
+  },
+  {
+    "orig": "s$",
+    "gold": "coworkSurfaceKey",
+    "proposed": "coworkLabel",
+    "file": "provider"
+  },
+  {
+    "orig": "s0A",
+    "gold": "codeSurfaceKey",
+    "proposed": "codeLabel",
+    "file": "provider"
+  },
+  {
+    "orig": "s0i",
+    "gold": "oneHourSeconds",
+    "proposed": "thirtySixHundred",
+    "file": "provider"
+  },
+  {
+    "orig": "s7r",
+    "gold": "pollSecondMs",
+    "proposed": "oneThousandC",
+    "file": "provider"
+  },
+  {
+    "orig": "sT",
+    "gold": "emptyStateConst",
+    "proposed": "emptyRecordC",
+    "file": "provider"
+  },
+  {
+    "orig": "sTt",
+    "gold": "hashByteLength",
+    "proposed": "sixtyFourB",
+    "file": "provider"
+  },
+  {
+    "orig": "sVr",
+    "gold": "scheduleWindowMs",
+    "proposed": "fifteenMinuteMs",
+    "file": "provider"
+  },
+  {
+    "orig": "sde",
+    "gold": "makeLocaleListIndexLookup",
+    "proposed": "indexOfLowercaseInField",
+    "file": "provider"
+  },
+  {
+    "orig": "tHi",
+    "gold": "writeTarToFile",
+    "proposed": "createTarFileWriter",
+    "file": "provider"
+  },
+  {
+    "orig": "w4i",
+    "gold": "stringFormatToJsonSchemaFormat",
+    "proposed": "zodFormatToJsonFormatName",
+    "file": "provider"
+  },
+  {
+    "orig": "Ltn",
+    "gold": "hostnamesMatch",
+    "proposed": "isSameOrSubdomain",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "Ly",
+    "gold": "formatHwndHex",
+    "proposed": "formatHexOrNull",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "MPe",
+    "gold": "prepareUploads",
+    "proposed": "prepareUploadHardlinks",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "Myi",
+    "gold": "migrateOperonSidebarMode",
+    "proposed": "stripUnsupportedSidebarMode",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "NDr",
+    "gold": "getDesktopFeatureFlags",
+    "proposed": "getMcpAndExtensionFlags",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "NZ",
+    "gold": "awaitSessionPendingWrites",
+    "proposed": "awaitSessionPromisesWithTimeout",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "NqA",
+    "gold": "appPreferencesIpcInterface",
+    "proposed": "appPreferencesDispatcher",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "O2r",
+    "gold": "stagePendingUploads",
+    "proposed": "prepareUploadEntries",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "ObA",
+    "gold": "openQuickEntry",
+    "proposed": "submitQuickEntryText",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "PZ",
+    "gold": "disposeResources",
+    "proposed": "runDisposeStack",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "PqA",
+    "gold": "normalizePreferences",
+    "proposed": "mergePreferencesWithDefaults",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "Q1A",
+    "gold": "prototypeMenuStub",
+    "proposed": "nestOnlyPrototypesStub",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "SBA",
+    "gold": "loadVmFeatureFlags",
+    "proposed": "getFeatureSupportStatus",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "Zjr",
+    "gold": "searchWithRipgrep",
+    "proposed": "searchFileContentsRipgrep",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "Zz",
+    "gold": "buildSessionEnv",
+    "proposed": "buildClaudeCodeEnvVars",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "_Gi",
+    "gold": "office365McpEntrypointFile",
+    "proposed": "office365McpScriptName",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "btn",
+    "gold": "oidcDiscoveryTimeoutMs",
+    "proposed": "tenSecondMs",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "fp",
+    "gold": "runWhenAppReady",
+    "proposed": "runOrQueueFileHandler",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "gBr",
+    "gold": "writeSessionVmFile",
+    "proposed": "writeVMFileAtomicByName",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "hXA",
+    "gold": "resolveSessionGrantedFolders",
+    "proposed": "listSessionFolderGrants",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "jXr",
+    "gold": "handleOpenFileArgs",
+    "proposed": "processCliFileArguments",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "lKe",
+    "gold": "stealthUpdateIdleMs",
+    "proposed": "tenMinuteMs",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "mmt",
+    "gold": "rewritePluginConfigPaths",
+    "proposed": "stagePluginConfigDir",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "mzA",
+    "gold": "isQuickEntryActive",
+    "proposed": "isHardwareBuddyActive",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "oin",
+    "gold": "readMcpbBundle",
+    "proposed": "loadMcpbExtension",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "p6",
+    "gold": "writeConfigFile",
+    "proposed": "persistConfigExclusive",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "timeout",
+    "gold": "fileSearchTimeoutMs",
+    "proposed": "eightSecondMs",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "xZ",
+    "gold": "addDisposableResource",
+    "proposed": "addToDisposeStack",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "ylA",
+    "gold": "searchTimeoutMs",
+    "proposed": "eightSecondMs",
+    "file": "deep-link-and-scheduled-tasks"
+  },
+  {
+    "orig": "Bin",
+    "gold": "sha256DigestStream",
+    "proposed": "Sha256HashTransform",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "DU",
+    "gold": "pendingEnrollmentPromise",
+    "proposed": "trustedDeviceEnrollPromise",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "EFt",
+    "gold": "buddyOutputTokensTotal",
+    "proposed": "dailyOutputTokenTotal",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "EO",
+    "gold": "buddyReconnectAttempts",
+    "proposed": "buddyReconnectBackoffExponent",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "GZ",
+    "gold": "getRemotePluginDeploys",
+    "proposed": "getDeployStore",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "HJe",
+    "gold": "wiredWebContents",
+    "proposed": "wiredMainViewContents",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "JJe",
+    "gold": "cuLockActive",
+    "proposed": "computerUseEnabled",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "JbA",
+    "gold": "pendingRemoteDeploysPromise",
+    "proposed": "deployStoreLoadPromise",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "JlA",
+    "gold": "importAuthListeners",
+    "proposed": "claudeAiImportListeners",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "KFt",
+    "gold": "devToolsInstallerModule",
+    "proposed": "electronDevtoolsInstaller",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "KJe",
+    "gold": "remoteToolsDeviceClosePending",
+    "proposed": "unusedKJeFlag",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Lin",
+    "gold": "widgetResourceDefs",
+    "proposed": "visualizeWidgetResources",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "MKe",
+    "gold": "selectBluetoothDeviceHandler",
+    "proposed": "buddyBluetoothDeviceSelector",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Mtn",
+    "gold": "coworkAuthorizeUrl",
+    "proposed": "consoleOauthAuthorizeUrl",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "PGt",
+    "gold": "configShapeKeys",
+    "proposed": "enterpriseConfigSchemaKeys",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "PbA",
+    "gold": "appProtocolOriginUrl",
+    "proposed": "gatewayOriginUrl",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "QP",
+    "gold": "buddyTokensToday",
+    "proposed": "dailyTokenCounter",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "QUt",
+    "gold": "mainWindowCreated",
+    "proposed": "appWindowsCreated",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Qnn",
+    "gold": "trustedAuthorAssociations",
+    "proposed": "githubAuthorAssociationAllowlist",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "SUt",
+    "gold": "getCoworkOAuthConfig",
+    "proposed": "loadCoworkOauthConfig",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Srn",
+    "gold": "initBuddyBleBridge",
+    "proposed": "startBuddyBridge",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Stn",
+    "gold": "startHidden",
+    "proposed": "wasLaunchedAtLogin",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "Trn",
+    "gold": "loadBuddyTokensToday",
+    "proposed": "loadDailyTokenCounter",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "UbA",
+    "gold": "chainedQuickEntryOp",
+    "proposed": "pendingExtensionWork",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "V7A",
+    "gold": "sidePanelStateEnabled",
+    "proposed": "computerUseOrPipActive",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "WlA",
+    "gold": "pendingPairingPinCallback",
+    "proposed": "buddyPairingPinResolver",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "YnA",
+    "gold": "mainViewContents",
+    "proposed": "wiredMainViewHostWindow",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "_test",
+    "gold": "foundryEntraTestApi",
+    "proposed": "anthropicConsoleGrantTestExports",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "aKe",
+    "gold": "extensionUpdateCacheMap",
+    "proposed": "unusedAkeMap",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "bG",
+    "gold": "sshMcpServerManagerInstance",
+    "proposed": "unusedBgRef",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "bin",
+    "gold": "widgetToolDefs",
+    "proposed": "visualizeMcpToolDefs",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "brn",
+    "gold": "recordBuddySessionMessage",
+    "proposed": "recordSessionTokenUsage",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "cJA",
+    "gold": "quickEntryComposerStateByContents",
+    "proposed": "unusedCjaWeakMap",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "con",
+    "gold": "cluster2675Namespace",
+    "proposed": "electronDevtoolsInstallerNamespace",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "dnn",
+    "gold": "reviewRejectionStates",
+    "proposed": "githubReviewBlockingStates",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "drn",
+    "gold": "remoteUploadsMigrationDeps",
+    "proposed": "remotePluginUploadOps",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "dtA",
+    "gold": "dxtUpdateInProgress",
+    "proposed": "dxtUpdateCheckRunning",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "dtn",
+    "gold": "webAuthnRelyingPartyId",
+    "proposed": "webauthnRpId",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "eKe",
+    "gold": "trayUsageListenerAttached",
+    "proposed": "traySwiftUsageHandlersBound",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "eT",
+    "gold": "buddySessionMessagesMap",
+    "proposed": "unusedEtMap",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "eUt",
+    "gold": "canRestoreFocus",
+    "proposed": "quickEntryRestoresFocus",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "gon",
+    "gold": "cluster2675Default",
+    "proposed": "electronDevtoolsInstallerDefault",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "gtn",
+    "gold": "filterAppProtocolRequest",
+    "proposed": "checkExtensionFrameRequest",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "iUt",
+    "gold": "restoreFocusedAppHandle",
+    "proposed": "restorePersistedFocus",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "inFlight",
+    "gold": "pluginSyncInFlightByDir",
+    "proposed": "inFlight",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "jtn",
+    "gold": "pendingGrantErrorCodes",
+    "proposed": "oauthPendingPollStatuses",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "lV",
+    "gold": "pendingDeviceAuthPromise",
+    "proposed": "claudeAiImportTokenInFlight",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "nJA",
+    "gold": "identityGeneration",
+    "proposed": "trustedDeviceIdentityEpoch",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "nj",
+    "gold": "cachedRemoteDeploys",
+    "proposed": "deployStore",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "ntn",
+    "gold": "allowedRemoteStoreKeys",
+    "proposed": "remoteSyncedSettingKeys",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "oKe",
+    "gold": "importAuthPromiseGeneration",
+    "proposed": "claudeAiImportTokenInFlightGen",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "oj",
+    "gold": "buddySessionMessages",
+    "proposed": "sessionMessageBuffers",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "pv",
+    "gold": "buddyPairingInFlight",
+    "proposed": "buddyScanOrPairInFlight",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "rrn",
+    "gold": "syncPluginDirsTestApi",
+    "proposed": "pluginDirSyncTestOps",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "tUt",
+    "gold": "persistFocusedAppHandle",
+    "proposed": "persistFocusedWindow",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "uFt",
+    "gold": "rolloverBuddyTokensDay",
+    "proposed": "rollDailyTokenCounterDate",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "wJA",
+    "gold": "buddyStatusTimeouts",
+    "proposed": "buddyStatusTimeoutCount",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "xbA",
+    "gold": "pendingImportPromise",
+    "proposed": "claudeAiImportRunPromise",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "zJe",
+    "gold": "closedSendUiState",
+    "proposed": "composerInitialState",
+    "file": "main-view-window-wiring"
+  },
+  {
+    "orig": "$$r",
+    "gold": "workflowApprovalErrorCode",
+    "proposed": "jsonRpcServerNotInitializedCode",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$1r",
+    "gold": "fileNotFoundErrorPattern",
+    "proposed": "missingFileOrDirErrorPattern",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$2r",
+    "gold": "dotenvFilePrefixes",
+    "proposed": "dotEnvPrefixList",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$4A",
+    "gold": "lowercaseSlugPattern",
+    "proposed": "lowerAlnumDashSegmentPattern",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$4r",
+    "gold": "oneSecondMs",
+    "proposed": "tenMinuteMs",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$5r",
+    "gold": "missingRefreshTokenMessage",
+    "proposed": "noRefreshTokenWarning",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$9e",
+    "gold": "mergeSessionState",
+    "proposed": "extendJsonSchemaDefs",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$Di",
+    "gold": "clockTimePattern",
+    "proposed": "hourMinuteSecondPattern",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$Jr",
+    "gold": "sessionTimeoutMs",
+    "proposed": "twentySixThousand",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$V",
+    "gold": "emptyContextRef",
+    "proposed": "emptyObjectV",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$_e",
+    "gold": "hashSeedLength",
+    "proposed": "thirtyTwo",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$aA",
+    "gold": "oauthBetaHeaderValue",
+    "proposed": "oauth20250420Version",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$iA",
+    "gold": "smallRetryCount",
+    "proposed": "five",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$in",
+    "gold": "shortTimeoutMs",
+    "proposed": "fifteenSecondMs",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$ji",
+    "gold": "objectBooleanTypes",
+    "proposed": "objectBooleanTypeList",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$lt",
+    "gold": "debounceMs",
+    "proposed": "fiveHundred",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$m",
+    "gold": "pathStartsWithSegment",
+    "proposed": "pathHasSegmentPrefix",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$me",
+    "gold": "listPageSize",
+    "proposed": "fifty",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$mr",
+    "gold": "kilobyteBytes",
+    "proposed": "oneKilobyte",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$qt",
+    "gold": "invokeAgentSpanName",
+    "proposed": "genAiInvokeAgentAttr",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "A0i",
+    "gold": "fixedNamespaceUuid",
+    "proposed": "staticUuidA47e",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "A0r",
+    "gold": "dayInMillis",
+    "proposed": "oneDayMs",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "A3A",
+    "gold": "getRuntimeMetadata",
+    "proposed": "getStainlessRuntimeEnv",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "A4r",
+    "gold": "tenMinutesMillis",
+    "proposed": "fourThousand",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "A7r",
+    "gold": "redisTimeoutMs",
+    "proposed": "fiveSecondMs",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "AG",
+    "gold": "dockerNameAdjectives",
+    "proposed": "dockerStyleAdjectiveList",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "AGA",
+    "gold": "slugCharClass",
+    "proposed": "braceCharClassChars",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "AGt",
+    "gold": "summaryTokenBudget",
+    "proposed": "eightThousand",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "AJA",
+    "gold": "defaultBackoffMs",
+    "proposed": "twoThousand",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "AKr",
+    "gold": "pollIntervalMs",
+    "proposed": "fourThousandAKr",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "ARi",
+    "gold": "twoSecondMs",
+    "proposed": "twoThousandARi",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "AYe",
+    "gold": "tenSecondMs",
+    "proposed": "tenThousand",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "AgA",
+    "gold": "previewCharCap",
+    "proposed": "twoHundred",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Agr",
+    "gold": "RegisteredTaskTools",
+    "proposed": "McpServerTasksExperimental",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Ahr",
+    "gold": "byteChunkSize",
+    "proposed": "twoFiftySix",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Ain",
+    "gold": "oidcScopes",
+    "proposed": "oauthScopeList",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Aje",
+    "gold": "uuidByteCount",
+    "proposed": "sixteen",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Ami",
+    "gold": "numericFormatPattern",
+    "proposed": "numberFormatTokenPattern",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Ave",
+    "gold": "settingsSourceLabels",
+    "proposed": "settingsScopeNames",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Axr",
+    "gold": "tripleRetryCount",
+    "proposed": "three",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "B1i",
+    "gold": "upperOnlyPattern",
+    "proposed": "allNonLowerPatternB1i",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "B2i",
+    "gold": "chunkBufferBytes",
+    "proposed": "sixtyFourKilobytes",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "B4t",
+    "gold": "modelProviderKey",
+    "proposed": "aiModelProviderAttr",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "B8t",
+    "gold": "mcpProtocolVersion",
+    "proposed": "version261",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "BAA",
+    "gold": "emptyShape",
+    "proposed": "emptyObjectBAA",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "BEr",
+    "gold": "saltLength",
+    "proposed": "thirtyTwoBEr",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "BFA",
+    "gold": "maxAttempts",
+    "proposed": "tenBFA",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "BJe",
+    "gold": "retryDelayMs",
+    "proposed": "fiveSecondMsBJe",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "BKe",
+    "gold": "listCap",
+    "proposed": "thirty",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "BKr",
+    "gold": "syncTimeoutMs",
+    "proposed": "twentySecondMs",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "BRi",
+    "gold": "privateIpRanges",
+    "proposed": "reservedIpv4Ranges",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "B_i",
+    "gold": "fixedDeviceUuid",
+    "proposed": "staticUuid89355",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "BfA",
+    "gold": "inputTokensKey",
+    "proposed": "genAiInputTokensAttr",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Bfe",
+    "gold": "semverZeroOne",
+    "proposed": "versionZeroPointOne",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Bgt",
+    "gold": "inheritStdio",
+    "proposed": "inheritLabel",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "BqA",
+    "gold": "runShutdownHook",
+    "proposed": "disposeAtExit",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "BrA",
+    "gold": "emptyBufferList",
+    "proposed": "emptyArrayBrA",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Bre",
+    "gold": "hashSeedBytes",
+    "proposed": "thirtyTwoBre",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Btn",
+    "gold": "helperScriptMessageId",
+    "proposed": "staticTokenQ6L2",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Bxt",
+    "gold": "runtimeNameKey",
+    "proposed": "processRuntimeNameAttr",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Bzr",
+    "gold": "sixtySecondsMillis",
+    "proposed": "oneMinuteMsBzr",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "C8e",
+    "gold": "twentySecondsMillis",
+    "proposed": "twentyThousandC8e",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "CIr",
+    "gold": "fnvPrime",
+    "proposed": "cpuTypeX86_64Magic",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "CTA",
+    "gold": "weekMs",
+    "proposed": "sevenDayMs",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "CUr",
+    "gold": "defineMergedProperties",
+    "proposed": "defineMethodsOnTarget",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "VE",
+    "gold": "minimatchString",
+    "proposed": "minimatchMatch",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Xjt",
+    "gold": "defaultContextLines",
+    "proposed": "seven",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "Z3e",
+    "gold": "redisGetCommands",
+    "proposed": "redisCacheReadCommands",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "ZJt",
+    "gold": "defaultLinkedErrorsLimit",
+    "proposed": "five",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "c$t",
+    "gold": "maxBaggageEntries",
+    "proposed": "oneEightyBaggageItemLimit",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "dYi",
+    "gold": "encodeNegativeInteger",
+    "proposed": "encodeUnsignedBigEndian",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "fBA",
+    "gold": "managedSettingsFieldDefinitions",
+    "proposed": "desktopFeatureGates",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "hVe",
+    "gold": "NoopLogRecord",
+    "proposed": "NoopLogger",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "l$t",
+    "gold": "maxBaggageEntryLength",
+    "proposed": "fourKilobyteBaggageValueLimit",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "lUA",
+    "gold": "classifyRouteCategory",
+    "proposed": "classifyUrlSection",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "locales",
+    "gold": "localeRegistry",
+    "proposed": "localesMap",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "uppercase",
+    "gold": "uppercaseStringPattern",
+    "proposed": "allNonLowerPattern",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "y_e",
+    "gold": "escapeReservedPathChars",
+    "proposed": "encodeWindowsReservedChars",
+    "file": "settings-extension-dispatchers"
+  },
+  {
+    "orig": "$9r",
+    "gold": "xmlNodeModule",
+    "proposed": "xmlbuilderVariant11Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "$He",
+    "gold": "diskErrorCodes",
+    "proposed": "errnoRetrySet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "$XA",
+    "gold": "AuthWindowKind",
+    "proposed": "authQueryParamEnum",
+    "file": "image-handling"
+  },
+  {
+    "orig": "A5r",
+    "gold": "xmlDocumentCbModuleB",
+    "proposed": "xmlbuilderVariant5bExport",
+    "file": "image-handling"
+  },
+  {
+    "orig": "AZr",
+    "gold": "getAugmentedPath",
+    "proposed": "resolveGitBashPathEnv",
+    "file": "image-handling"
+  },
+  {
+    "orig": "AtA",
+    "gold": "cachedAugmentedPath",
+    "proposed": "cachedGitBashPathEnv",
+    "file": "image-handling"
+  },
+  {
+    "orig": "BWr",
+    "gold": "officeAppTypes",
+    "proposed": "officeFileTypeSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Bs",
+    "gold": "mainWindowUpdateNotifier",
+    "proposed": "notificationManager",
+    "file": "image-handling"
+  },
+  {
+    "orig": "CbA",
+    "gold": "thumbnailQueue",
+    "proposed": "concurrencyLimiter8",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Cvt",
+    "gold": "setFocusedRemoteCwd",
+    "proposed": "setUseSshFileSource",
+    "file": "image-handling"
+  },
+  {
+    "orig": "D5r",
+    "gold": "configExportMutex",
+    "proposed": "asyncMutex",
+    "file": "image-handling"
+  },
+  {
+    "orig": "D6r",
+    "gold": "coworkLogTestExports",
+    "proposed": "localFileTestExports",
+    "file": "image-handling"
+  },
+  {
+    "orig": "D9r",
+    "gold": "xmlbuilderModule",
+    "proposed": "xmlbuilderVariant2Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "DHe",
+    "gold": "remoteSessionStateMap",
+    "proposed": "weakMap1",
+    "file": "image-handling"
+  },
+  {
+    "orig": "ELt",
+    "gold": "encodingExistsCheck",
+    "proposed": "iconvExtendedNodeEncodings",
+    "file": "image-handling"
+  },
+  {
+    "orig": "EbA",
+    "gold": "accountMarketplaceMap",
+    "proposed": "map1",
+    "file": "image-handling"
+  },
+  {
+    "orig": "F9r",
+    "gold": "xmlDtdNotationModuleB",
+    "proposed": "xmlbuilderVariant4bExport",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Fvt",
+    "gold": "buddyRemoteRegistry",
+    "proposed": "buddyRemoteSessionManager",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Fzr",
+    "gold": "previewableExtensions",
+    "proposed": "previewableFileExtensionSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "G9r",
+    "gold": "xmlRawModule",
+    "proposed": "xmlbuilderVariant2bExport",
+    "file": "image-handling"
+  },
+  {
+    "orig": "H9r",
+    "gold": "xmlDummyModule",
+    "proposed": "xmlbuilderVariant9Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "I6r",
+    "gold": "validShortcutTokens",
+    "proposed": "acceleratorKeyTokenSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Ik",
+    "gold": "globalShortcutRegistry",
+    "proposed": "map2",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Ivt",
+    "gold": "fileMentionCache",
+    "proposed": "filePreviewLruCache",
+    "file": "image-handling"
+  },
+  {
+    "orig": "J9r",
+    "gold": "xmlbuilderXmldomNodelistModule",
+    "proposed": "xmlbuilderXmldomNodeListExport",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Jy",
+    "gold": "projectFileEntries",
+    "proposed": "cachedProjectFileList",
+    "file": "image-handling"
+  },
+  {
+    "orig": "K2A",
+    "gold": "clearFilePreviewStorage",
+    "proposed": "disposeFilePreviewSession",
+    "file": "image-handling"
+  },
+  {
+    "orig": "KXr",
+    "gold": "handlePendingFileOpens",
+    "proposed": "handlePendingOpensOnAppReady",
+    "file": "image-handling"
+  },
+  {
+    "orig": "L9r",
+    "gold": "xmlDtdAttListModule",
+    "proposed": "xmlbuilderVariant3Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Lvt",
+    "gold": "RemoteSessionState",
+    "proposed": "connectionStateEnum",
+    "file": "image-handling"
+  },
+  {
+    "orig": "M9r",
+    "gold": "xmlDomNamedNodeMapModule",
+    "proposed": "xmlbuilderVariant8Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "MWr",
+    "gold": "pasteContentKindValues",
+    "proposed": "gifTextKindSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "N$",
+    "gold": "planUsageFetchQueued",
+    "proposed": "planUsageRefreshPending",
+    "file": "image-handling"
+  },
+  {
+    "orig": "NHe",
+    "gold": "bridgeConstantsModule",
+    "proposed": "plusSignWidthMetric",
+    "file": "image-handling"
+  },
+  {
+    "orig": "NT",
+    "gold": "extensionRescanTimer",
+    "proposed": "configReloadDebounceTimer",
+    "file": "image-handling"
+  },
+  {
+    "orig": "NXr",
+    "gold": "detectedProjectsQueue",
+    "proposed": "concurrencyLimiter50",
+    "file": "image-handling"
+  },
+  {
+    "orig": "NbA",
+    "gold": "eventLoopStallCount",
+    "proposed": "totalEventLoopStalls",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Nbt",
+    "gold": "officeDocExtensions",
+    "proposed": "officeDocExtensionSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "O9r",
+    "gold": "xmlDocTypeModule",
+    "proposed": "xmlbuilderVariant13Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "OnA",
+    "gold": "pendingFileOpens",
+    "proposed": "pendingAppReadyHandlers",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Q7A",
+    "gold": "registerWindowDispatchers",
+    "proposed": "registerWebContentsDispatchers",
+    "file": "image-handling"
+  },
+  {
+    "orig": "R$",
+    "gold": "pendingRestartCleanup",
+    "proposed": "cancelDeferredRestartListener",
+    "file": "image-handling"
+  },
+  {
+    "orig": "R3r",
+    "gold": "watchChromeExtensions",
+    "proposed": "watchChromeExtensionDirs",
+    "file": "image-handling"
+  },
+  {
+    "orig": "R9r",
+    "gold": "xmlAttributeModule",
+    "proposed": "xmlbuilderVariant6Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "RHe",
+    "gold": "remoteSessionRegistryMap",
+    "proposed": "weakMap2",
+    "file": "image-handling"
+  },
+  {
+    "orig": "RZr",
+    "gold": "accountUploadsApi",
+    "proposed": "accountMarketplaceUploadOps",
+    "file": "image-handling"
+  },
+  {
+    "orig": "RlA",
+    "gold": "isAppQuitting",
+    "proposed": "allowQuitOverride",
+    "file": "image-handling"
+  },
+  {
+    "orig": "S6r",
+    "gold": "logsAndResetModule",
+    "proposed": "coworkDiagnosticsModuleExports",
+    "file": "image-handling"
+  },
+  {
+    "orig": "SHe",
+    "gold": "remoteSessionDispatcherMap",
+    "proposed": "weakMap3",
+    "file": "image-handling"
+  },
+  {
+    "orig": "SJe",
+    "gold": "mainViewLoadStateMap",
+    "proposed": "weakMap4",
+    "file": "image-handling"
+  },
+  {
+    "orig": "T4e",
+    "gold": "fsConstantsForReadonly",
+    "proposed": "fsConstantsRdonlyHolder",
+    "file": "image-handling"
+  },
+  {
+    "orig": "T9r",
+    "gold": "xmlCdataModule",
+    "proposed": "xmlbuilderVariant10Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "TG",
+    "gold": "detectedProjectsInFlight",
+    "proposed": "detectedProjectsInflightPromise",
+    "file": "image-handling"
+  },
+  {
+    "orig": "TbA",
+    "gold": "batchedOpenFiles",
+    "proposed": "pendingOpenFileBatch",
+    "file": "image-handling"
+  },
+  {
+    "orig": "U2A",
+    "gold": "echoLogNames",
+    "proposed": "echoLogFilenameSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "U9r",
+    "gold": "xmlDocumentCbModule",
+    "proposed": "xmlbuilderVariant5Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "W9r",
+    "gold": "xmlWriterStateModule",
+    "proposed": "xmlbuilderVariant18Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "X8",
+    "gold": "filePreviewParentWebContents",
+    "proposed": "filePreviewChildViewSetter",
+    "file": "image-handling"
+  },
+  {
+    "orig": "X9r",
+    "gold": "xmlAttributeModuleB",
+    "proposed": "xmlbuilderVariant6bExport",
+    "file": "image-handling"
+  },
+  {
+    "orig": "XrA",
+    "gold": "PasteContentKind",
+    "proposed": "captureKindEnum",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Y7r",
+    "gold": "sendTeachStep",
+    "proposed": "enqueueCuTeachStep",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Y9r",
+    "gold": "xmlProcessingInstructionModule",
+    "proposed": "xmlbuilderVariant7Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Z9r",
+    "gold": "xmlDtdAttListModuleB",
+    "proposed": "xmlbuilderVariant3bExport",
+    "file": "image-handling"
+  },
+  {
+    "orig": "ZS",
+    "gold": "filePreviewBounds",
+    "proposed": "filePreviewSizeHint",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Zbt",
+    "gold": "lastUpdateFailed",
+    "proposed": "updateInstallDidFail",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Zh",
+    "gold": "chromeReauthDialogController",
+    "proposed": "updaterEventEmitter",
+    "file": "image-handling"
+  },
+  {
+    "orig": "_3r",
+    "gold": "scheduleExtensionRescan",
+    "proposed": "scheduleConfigReload",
+    "file": "image-handling"
+  },
+  {
+    "orig": "_He",
+    "gold": "pasteContentWeakMap",
+    "proposed": "weakMap5",
+    "file": "image-handling"
+  },
+  {
+    "orig": "_Je",
+    "gold": "mainViewRetryStateMap",
+    "proposed": "weakMap6",
+    "file": "image-handling"
+  },
+  {
+    "orig": "_test",
+    "gold": "logsExportTestExports",
+    "proposed": "localSessionManagerTestExports",
+    "file": "image-handling"
+  },
+  {
+    "orig": "_vt",
+    "gold": "authedRequestWindowSet",
+    "proposed": "weakSet1",
+    "file": "image-handling"
+  },
+  {
+    "orig": "aV",
+    "gold": "sidePanelWindow",
+    "proposed": "unusedBinding1",
+    "file": "image-handling"
+  },
+  {
+    "orig": "abA",
+    "gold": "operationSlotWaiterMap",
+    "proposed": "map3",
+    "file": "image-handling"
+  },
+  {
+    "orig": "b9r",
+    "gold": "xmlDeclarationModule",
+    "proposed": "xmlbuilderVariant17Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "bS",
+    "gold": "localFileApi",
+    "proposed": "localFileModuleExports",
+    "file": "image-handling"
+  },
+  {
+    "orig": "bWr",
+    "gold": "BuddyRemoteRegistry",
+    "proposed": "BuddyRemoteSessionManager",
+    "file": "image-handling"
+  },
+  {
+    "orig": "bZ",
+    "gold": "ignoredDirNames",
+    "proposed": "skipDirectoryNameSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "cbA",
+    "gold": "localFileThumbnailMap",
+    "proposed": "map4",
+    "file": "image-handling"
+  },
+  {
+    "orig": "cp",
+    "gold": "QuickEntryFeature",
+    "proposed": "quickActionKindEnum",
+    "file": "image-handling"
+  },
+  {
+    "orig": "dbt",
+    "gold": "restartGuardedWindowSet",
+    "proposed": "weakSet2",
+    "file": "image-handling"
+  },
+  {
+    "orig": "eJA",
+    "gold": "glowShowSeq",
+    "proposed": "cuGlowShowGeneration",
+    "file": "image-handling"
+  },
+  {
+    "orig": "enA",
+    "gold": "pendingOperationCount",
+    "proposed": "hostCliSemaphoreCount",
+    "file": "image-handling"
+  },
+  {
+    "orig": "f2e",
+    "gold": "scheduledTaskWeakMap",
+    "proposed": "weakMap7",
+    "file": "image-handling"
+  },
+  {
+    "orig": "fHe",
+    "gold": "pendingAuthWindows",
+    "proposed": "stringSet1",
+    "file": "image-handling"
+  },
+  {
+    "orig": "fJe",
+    "gold": "configHandlersModule",
+    "proposed": "configHandlerModuleExports",
+    "file": "image-handling"
+  },
+  {
+    "orig": "fW",
+    "gold": "openFileBatchMap",
+    "proposed": "map5",
+    "file": "image-handling"
+  },
+  {
+    "orig": "h2e",
+    "gold": "updateCheckTickMs",
+    "proposed": "planUsageHourTickMs",
+    "file": "image-handling"
+  },
+  {
+    "orig": "h9r",
+    "gold": "xmlDtdNotationModule",
+    "proposed": "xmlbuilderVariant4Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "izr",
+    "gold": "releaseOperationSlot",
+    "proposed": "releaseHostCliSemaphore",
+    "file": "image-handling"
+  },
+  {
+    "orig": "j9r",
+    "gold": "xmlStringifierModule",
+    "proposed": "xmlbuilderVariant16Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "kG",
+    "gold": "consoleGrantAbortController",
+    "proposed": "signInAbortController",
+    "file": "image-handling"
+  },
+  {
+    "orig": "kbt",
+    "gold": "settledFilePreviewLoadSeq",
+    "proposed": "filePreviewLoadedGeneration",
+    "file": "image-handling"
+  },
+  {
+    "orig": "lHe",
+    "gold": "windowMentionOptions",
+    "proposed": "cachedWindowMentions",
+    "file": "image-handling"
+  },
+  {
+    "orig": "lbA",
+    "gold": "localFilePreviewMap",
+    "proposed": "map6",
+    "file": "image-handling"
+  },
+  {
+    "orig": "m2e",
+    "gold": "authListenerWindowSet",
+    "proposed": "weakSet3",
+    "file": "image-handling"
+  },
+  {
+    "orig": "m9r",
+    "gold": "xmlDomStringListModule",
+    "proposed": "xmlbuilderVariant12Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "mGt",
+    "gold": "teachDisplay",
+    "proposed": "cuTeachOverlayDisplayId",
+    "file": "image-handling"
+  },
+  {
+    "orig": "mf",
+    "gold": "jsonOkResponse",
+    "proposed": "headersStatusOkResponse",
+    "file": "image-handling"
+  },
+  {
+    "orig": "mlA",
+    "gold": "focusedLocalCwd",
+    "proposed": "focusedCwdFileSource",
+    "file": "image-handling"
+  },
+  {
+    "orig": "ntA",
+    "gold": "versionPeekInFlight",
+    "proposed": "updateNewerVersionCheckInFlight",
+    "file": "image-handling"
+  },
+  {
+    "orig": "otA",
+    "gold": "versionPeekSettled",
+    "proposed": "updateStagedVersionConfirmed",
+    "file": "image-handling"
+  },
+  {
+    "orig": "pGt",
+    "gold": "glowDisplay",
+    "proposed": "cuGlowOverlayBounds",
+    "file": "image-handling"
+  },
+  {
+    "orig": "pbA",
+    "gold": "authListenerWindows",
+    "proposed": "dispatcherWebContentsSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "q9r",
+    "gold": "xmlbuilderNodetypeModule",
+    "proposed": "xmlbuilderNodeTypeAltExport",
+    "file": "image-handling"
+  },
+  {
+    "orig": "qHe",
+    "gold": "maxLogZipBytes",
+    "proposed": "hostCliQueueCapacity",
+    "file": "image-handling"
+  },
+  {
+    "orig": "r9r",
+    "gold": "updateRetryTickMs",
+    "proposed": "planUsageTenMinuteTickMs",
+    "file": "image-handling"
+  },
+  {
+    "orig": "rZr",
+    "gold": "networkErrorNames",
+    "proposed": "abortFetchErrorNameSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "s5r",
+    "gold": "iconvLiteEncodings",
+    "proposed": "iconvExtendedNodeFactory",
+    "file": "image-handling"
+  },
+  {
+    "orig": "s6r",
+    "gold": "tabPositionOffset",
+    "proposed": "acceleratorBaseMetric",
+    "file": "image-handling"
+  },
+  {
+    "orig": "sGt",
+    "gold": "openFileHandlerWeakSet",
+    "proposed": "weakSet4",
+    "file": "image-handling"
+  },
+  {
+    "orig": "sXr",
+    "gold": "enterpriseConfigExporters",
+    "proposed": "policyExportFormatMap",
+    "file": "image-handling"
+  },
+  {
+    "orig": "set",
+    "gold": "fatalFilesystemErrorCodes",
+    "proposed": "errnoRetrySet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "sp",
+    "gold": "cuLockHolderSetter",
+    "proposed": "unusedSetter1",
+    "file": "image-handling"
+  },
+  {
+    "orig": "t5r",
+    "gold": "xmlStreamWriterModule",
+    "proposed": "xmlbuilderVariant14Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "tJA",
+    "gold": "teachShowSeq",
+    "proposed": "cuTeachShowGeneration",
+    "file": "image-handling"
+  },
+  {
+    "orig": "tzr",
+    "gold": "acquireOperationSlot",
+    "proposed": "acquireHostCliSemaphore",
+    "file": "image-handling"
+  },
+  {
+    "orig": "u2e",
+    "gold": "scheduledHourSchema",
+    "proposed": "hourInRangeSchema",
+    "file": "image-handling"
+  },
+  {
+    "orig": "uP",
+    "gold": "focusedRemoteCwd",
+    "proposed": "useSshFileSource",
+    "file": "image-handling"
+  },
+  {
+    "orig": "uW",
+    "gold": "indexedViaSsh",
+    "proposed": "indexedFileSourceIsSsh",
+    "file": "image-handling"
+  },
+  {
+    "orig": "v4e",
+    "gold": "fsConstantsForNoFollow",
+    "proposed": "fsConstantsNofollowHolder",
+    "file": "image-handling"
+  },
+  {
+    "orig": "v9r",
+    "gold": "xmlCommentModule",
+    "proposed": "xmlbuilderVariant15Export",
+    "file": "image-handling"
+  },
+  {
+    "orig": "vG",
+    "gold": "suppressedRendererKills",
+    "proposed": "mainViewIntentionalKillCount",
+    "file": "image-handling"
+  },
+  {
+    "orig": "wGt",
+    "gold": "setGlowDisplay",
+    "proposed": "setCuGlowOverlayBounds",
+    "file": "image-handling"
+  },
+  {
+    "orig": "wU",
+    "gold": "globalShortcutRegistered",
+    "proposed": "unusedBool1",
+    "file": "image-handling"
+  },
+  {
+    "orig": "wWr",
+    "gold": "remoteSessionStateValues",
+    "proposed": "connectionStateValueSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "x3r",
+    "gold": "claudeHosts",
+    "proposed": "allowedNavigationHostSet",
+    "file": "image-handling"
+  },
+  {
+    "orig": "x9r",
+    "gold": "xmlRawModuleB",
+    "proposed": "xmlbuilderVariant2cExport",
+    "file": "image-handling"
+  },
+  {
+    "orig": "y2e",
+    "gold": "interactiveAuthListenerInstalled",
+    "proposed": "authListenersInstalled",
+    "file": "image-handling"
+  },
+  {
+    "orig": "yJe",
+    "gold": "lastResumeTime",
+    "proposed": "lastResumeFromSleepMs",
+    "file": "image-handling"
+  },
+  {
+    "orig": "yZr",
+    "gold": "ccdMarketplaceSyncManagerCli",
+    "proposed": "orgMarketplacePluginSyncManager",
+    "file": "image-handling"
+  },
+  {
+    "orig": "z6r",
+    "gold": "setCuLockHolder",
+    "proposed": "setUnusedSetter1",
+    "file": "image-handling"
+  },
+  {
+    "orig": "zS",
+    "gold": "pendingFileOpenMap",
+    "proposed": "map7",
+    "file": "image-handling"
+  },
+  {
+    "orig": "Qnt",
+    "gold": "pluralRuleIndex",
+    "proposed": "pluralCategoryFromOrdinal",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Qre",
+    "gold": "equalsSeparator",
+    "proposed": "equalsSign",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Qxt",
+    "gold": "tarChecksumOffset",
+    "proposed": "six",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Qy",
+    "gold": "assignIfDefined",
+    "proposed": "assignIfNotNull",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Qyr",
+    "gold": "defaultPollIntervalMs",
+    "proposed": "twoThousand",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "R$r",
+    "gold": "thirtySecondTimeoutMs",
+    "proposed": "thirtyThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "R2A",
+    "gold": "maxThumbnailPixels",
+    "proposed": "fifteenHundred",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "R2i",
+    "gold": "maxFileReadTokens",
+    "proposed": "port53280",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "R4A",
+    "gold": "localhostBaseUrl",
+    "proposed": "localhostPort8000Url",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "R6t",
+    "gold": "nonZeroTraceIdPattern",
+    "proposed": "hex32NotAllZeroSource",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "R7t",
+    "gold": "defaultVersion",
+    "proposed": "versionZeroZeroOne",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "R8A",
+    "gold": "maxJsonOutputChars",
+    "proposed": "thirtyOneThousandNineNineNineNine",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "RDi",
+    "gold": "googleDomain",
+    "proposed": "googleDotComHost",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "RIA",
+    "gold": "genAiTopProbabilityKey",
+    "proposed": "genAiRequestTopPAttr",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "RSA",
+    "gold": "pluginNamespaceUuid",
+    "proposed": "uuidConstantEecb",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "RXr",
+    "gold": "projectRootMarkers",
+    "proposed": "projectRootMarkerFiles",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "RYi",
+    "gold": "tarFieldMaxValues",
+    "proposed": "maxIntByByteWidth",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "R_r",
+    "gold": "oauthTokenFileDescriptorEnv",
+    "proposed": "claudeCodeOauthTokenFdEnv",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Rbt",
+    "gold": "tarBlockSize",
+    "proposed": "fiveHundredTwelve",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Rd",
+    "gold": "readPrivateMember",
+    "proposed": "classPrivateFieldGet",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Rdt",
+    "gold": "tenSecondTimeoutMs",
+    "proposed": "tenThousand",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Rwt",
+    "gold": "fifteenMinuteMs",
+    "proposed": "nineHundredSeconds",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "SHi",
+    "gold": "oneKilobyte",
+    "proposed": "oneThousandTwentyFour",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "SKr",
+    "gold": "deviceCodeId",
+    "proposed": "numericString583857784",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "SVe",
+    "gold": "hostnameCharClass",
+    "proposed": "alphanumDashCharClass",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Sir",
+    "gold": "classifyTypeName",
+    "proposed": "typeOfValueLabel2",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Sme",
+    "gold": "thirtyDaySeconds",
+    "proposed": "sevenHundredTwentyHoursSeconds",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Stt",
+    "gold": "identifierRegex",
+    "proposed": "alnumUnderscoreDashAnchoredPattern",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Sur",
+    "gold": "effortLevels",
+    "proposed": "effortLevelNames",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Szr",
+    "gold": "fiftyMegabyteLimit",
+    "proposed": "fiftyMebibytes",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "T0t",
+    "gold": "mapOwnPropertyDescriptors",
+    "proposed": "redefinePropsViaCallback",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "TCi",
+    "gold": "fourDigitPattern",
+    "proposed": "fourDigitsSource",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "THi",
+    "gold": "writeTarAtOffset",
+    "proposed": "pipeTarToFileStream",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "TPe",
+    "gold": "tarBlockSizeShift",
+    "proposed": "four",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "TWi",
+    "gold": "tradingAppKeywords",
+    "proposed": "tradingAndCryptoAppNames",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "TaA",
+    "gold": "makeNodeIntegrationFactory",
+    "proposed": "makeZodToJsonSchemaTransformer",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Tg",
+    "gold": "defaultRetryConfig",
+    "proposed": "retryDefaults",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Tp",
+    "gold": "oauthStatusFactory",
+    "proposed": "consentStatusFactories",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Txt",
+    "gold": "printableAsciiTokenRegex",
+    "proposed": "printableHeaderValuePattern",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "U4r",
+    "gold": "twoPercentFraction",
+    "proposed": "pointZeroTwo",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "USi",
+    "gold": "findInPageInterfaceUuid",
+    "proposed": "uuidConstant07c0",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Ua",
+    "gold": "fastifyHookAttributes",
+    "proposed": "fastifyHookAttributeKeys",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "UcA",
+    "gold": "otelVersion",
+    "proposed": "version1_15_2",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Uet",
+    "gold": "consoleOauthProviderId",
+    "proposed": "customConsoleOAuthProviderId",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Ujr",
+    "gold": "fiveSecondTimeoutMs",
+    "proposed": "fiveThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Uy",
+    "gold": "tenSecondDurationMs",
+    "proposed": "tenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "V0i",
+    "gold": "fiveMinuteMs",
+    "proposed": "threeHundredThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "V8A",
+    "gold": "fiveMinuteMsAlt",
+    "proposed": "threeHundredThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "VJr",
+    "gold": "tenSecondMsValue",
+    "proposed": "tenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "VXt",
+    "gold": "unwrapModuleMethods",
+    "proposed": "massUnwrap",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "VYi",
+    "gold": "sixteenMegabyteSize",
+    "proposed": "sixteenMebibytes",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "VrA",
+    "gold": "twoHourMs",
+    "proposed": "sevenThousandTwoHundredSeconds",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "W0r",
+    "gold": "normalizePathSegment",
+    "proposed": "normalizeNfkcLowercase",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "W1",
+    "gold": "defaultGatewayConfig",
+    "proposed": "bootstrapInferenceConfig",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "W3r",
+    "gold": "networkErrorCodeRegex",
+    "proposed": "dnsConnectErrorPattern",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "W8A",
+    "gold": "browserExtensionManifestFile",
+    "proposed": "browserExtensionNativeHostManifestName",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "WPe",
+    "gold": "fifteenSecondMsValue",
+    "proposed": "fifteenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "WXe",
+    "gold": "uuidLooseRegex",
+    "proposed": "hexDashThirtySixPattern",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "W_i",
+    "gold": "sixtySecondMsValue",
+    "proposed": "sixtyThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Wht",
+    "gold": "tenSecondMsConst",
+    "proposed": "tenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Wxe",
+    "gold": "tenSecondMsDelay",
+    "proposed": "tenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "X1r",
+    "gold": "thirtySecondMsConst",
+    "proposed": "thirtyThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "X4i",
+    "gold": "initZodError",
+    "proposed": "defineZodErrorMethods",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "X5r",
+    "gold": "uuidFormatRegex",
+    "proposed": "uuidLowerHexPattern",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "X6",
+    "gold": "mergeObjects",
+    "proposed": "mergeOwnProps",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "XJA",
+    "gold": "productionEnvironment",
+    "proposed": "productionEnv",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "XJr",
+    "gold": "tenSecondMsLimit",
+    "proposed": "tenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "XOr",
+    "gold": "tenValueConst",
+    "proposed": "ten",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "XYe",
+    "gold": "sessionSummaryToolDescription",
+    "proposed": "sessionExecutiveSummaryPrompt",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "XZt",
+    "gold": "sessionSummaryVersion",
+    "proposed": "version0_8_0",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "XcA",
+    "gold": "pluginOauthStorageTag",
+    "proposed": "pluginOAuthStorageLogTag",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Xtn",
+    "gold": "tenSecondMsTimeout",
+    "proposed": "tenThousand",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "YCi",
+    "gold": "zodVersion",
+    "proposed": "version3_17_0",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "YGe",
+    "gold": "tenSecondMsDuration",
+    "proposed": "tenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "YIr",
+    "gold": "computerUseDefaultFlags",
+    "proposed": "computerUseActionDefaults",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "YPA",
+    "gold": "requestDirectoryAction",
+    "proposed": "requestDirectoryToolName",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "YSi",
+    "gold": "isAnthropicInferenceProvider",
+    "proposed": "isAnthropicOrGatewayProvider",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "YVA",
+    "gold": "tenSecondMsInterval",
+    "proposed": "tenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "YWr",
+    "gold": "fifteenSecondMsTimeout",
+    "proposed": "fifteenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "YXr",
+    "gold": "fiveSecondMsValue",
+    "proposed": "fiveThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Yfe",
+    "gold": "otelSchemaVersion",
+    "proposed": "versionZeroPointFour",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Yhr",
+    "gold": "fiveSecondMsConst",
+    "proposed": "fiveThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Ym",
+    "gold": "fifteenSecondMsConst",
+    "proposed": "fifteenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Ytn",
+    "gold": "tenSecondMsConstant",
+    "proposed": "tenThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "ZAA",
+    "gold": "memoryMarkdownFilename",
+    "proposed": "memoryFileName",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "ZGi",
+    "gold": "noProxyDefaults",
+    "proposed": "defaultNoProxyHosts",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "ZNe",
+    "gold": "oneMegabyteBytes",
+    "proposed": "oneMebibyte",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "ZPt",
+    "gold": "wrapModuleMethods",
+    "proposed": "massWrap",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "ZUi",
+    "gold": "twoMinuteMs",
+    "proposed": "oneHundredTwentyThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Zlr",
+    "gold": "settingsScopeToSource",
+    "proposed": "settingsScopeToKeyMap",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Zme",
+    "gold": "eightKilobyte",
+    "proposed": "eightKibibytes",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "ZvA",
+    "gold": "fiftyConstantValue",
+    "proposed": "fifty",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "Zyr",
+    "gold": "previewSchemePrefixes",
+    "proposed": "browserComputerToolPrefixes",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "_2i",
+    "gold": "twoMinuteMsValue",
+    "proposed": "oneHundredTwentyThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "_7t",
+    "gold": "honoInstrumentationPackage",
+    "proposed": "sentryInstrumentationHonoPkg",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "_Jr",
+    "gold": "sixtySecondMsTimeout",
+    "proposed": "sixtyThousandMs",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "_Ke",
+    "gold": "twentyConstantValue",
+    "proposed": "twenty",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "_Kr",
+    "gold": "maxTokenChars",
+    "proposed": "fortyNinety",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "_Mi",
+    "gold": "tokenTailRegex",
+    "proposed": "base64UrlTrailingPattern",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "_Yi",
+    "gold": "parseOctalTarNumber",
+    "proposed": "parseOctalField",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "_rr",
+    "gold": "classifyType",
+    "proposed": "typeOfValueLabel",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "a0",
+    "gold": "stainlessPackageVersion",
+    "proposed": "version0_94_0",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "c1A",
+    "gold": "unwrapFunction",
+    "proposed": "unwrapMethod",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "d$A",
+    "gold": "flattenFileTree",
+    "proposed": "flattenTrieToPaths",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "dFt",
+    "gold": "screenshotPathId",
+    "proposed": "numericString2358734848",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "hri",
+    "gold": "subscriptionTiers",
+    "proposed": "planTierNames",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "j9e",
+    "gold": "getDateFormatPattern",
+    "proposed": "formatDateDefault",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "kUr",
+    "gold": "safeSerialize",
+    "proposed": "deepCloneWithCycleGuard",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "mS",
+    "gold": "readTarNumber",
+    "proposed": "readTarNumericField",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "mZ",
+    "gold": "isObject",
+    "proposed": "isObjectOrFunction",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "noA",
+    "gold": "wrapFunction",
+    "proposed": "wrapMethod",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "qKt",
+    "gold": "defaultZodErrorLimit",
+    "proposed": "ten",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "v3t",
+    "gold": "defaultIgnoredRejections",
+    "proposed": "ignoredAiErrorNames",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "yS",
+    "gold": "writeTarNumberField",
+    "proposed": "writeIntFieldOrFallback",
+    "file": "local-plugins"
+  },
+  {
+    "orig": "$Er",
+    "gold": "setLamSupportStatus",
+    "proposed": "resetYukonSilverFeatureSupport",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "$fr",
+    "gold": "accessibilityRoles",
+    "proposed": "clickActionRoleSet",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "$ur",
+    "gold": "parseJsonWithComments",
+    "proposed": "jsonParseOptions",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "A$",
+    "gold": "mimeTypesDbTypeToExtsField",
+    "proposed": "queueIntervalCapField",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "ABr",
+    "gold": "framebufferInputTools",
+    "proposed": "framebufferInputToolDefs",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "BT",
+    "gold": "shellEnvResult",
+    "proposed": "loginShellEnvCache",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "CBr",
+    "gold": "cronstrueModule",
+    "proposed": "cronstrueInstance",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "CPA",
+    "gold": "priorityQueueInitIntervalIfNeeded",
+    "proposed": "queueStartIntervalTimer",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "DQt",
+    "gold": "priorityQueueIntervalAllowsAnother",
+    "proposed": "queueCanProcessInterval",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Dhr",
+    "gold": "readonlyPreviewActions",
+    "proposed": "previewToolsNoChangeGuard",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Dy",
+    "gold": "previewElementCache",
+    "proposed": "accessibilityNodeMapDy",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Efr",
+    "gold": "darkPixelBuffer",
+    "proposed": "cursorPixelBytes",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "G3",
+    "gold": "jsoncParseOptions",
+    "proposed": "jsonParseConfigNamespace",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Gdt",
+    "gold": "scheduleKeepalive",
+    "proposed": "startKeepaliveTimer",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "HI",
+    "gold": "scheduledTasksDb",
+    "proposed": "localSkillsPlugin",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Hdt",
+    "gold": "postConnectInstallSdk",
+    "proposed": "postVMConnectSetup",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Hz",
+    "gold": "scheduledTaskToolPrefix",
+    "proposed": "mcpToolPrefix",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "I0",
+    "gold": "accountDetailsAlias",
+    "proposed": "I0Alias",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "KLe",
+    "gold": "modelStringSchema",
+    "proposed": "stringSchemaKLe",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Kdt",
+    "gold": "scheduledTaskMap",
+    "proposed": "mapKdt",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "MNA",
+    "gold": "previewRegistrySet",
+    "proposed": "setMNA",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "MQt",
+    "gold": "priorityQueueIsIntervalPaused",
+    "proposed": "queueIntervalDelayCheck",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Mdt",
+    "gold": "addKeepAwakeClaim",
+    "proposed": "acquireKeepAwake",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "NQt",
+    "gold": "priorityQueueRejectOnAbort",
+    "proposed": "queueAbortRejection",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Nr",
+    "gold": "swiftBinding",
+    "proposed": "claudeSwiftAddon",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Ofr",
+    "gold": "haloTools",
+    "proposed": "haloToolDefs",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Pd",
+    "gold": "indentSpaceStrings",
+    "proposed": "indentPrefixCache",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Qfr",
+    "gold": "win32ExecutorApi",
+    "proposed": "win32ComputerUseModule",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Qht",
+    "gold": "clientPlatform",
+    "proposed": "ClientSurfaceType",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "RQt",
+    "gold": "priorityQueueOnResumeInterval",
+    "proposed": "queueResetIntervalState",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Rfr",
+    "gold": "cookieModule",
+    "proposed": "cookieFactoryResult",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Rht",
+    "gold": "appendPathFloor",
+    "proposed": "prependMissingPathDirs",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "S8",
+    "gold": "standardHomeFolders",
+    "proposed": "userFolderPaths",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "SQr",
+    "gold": "setMainPreviewWindow",
+    "proposed": "setLocalSkillsPlugin",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "SQt",
+    "gold": "priorityQueueConcurrencyAllowsAnother",
+    "proposed": "queueHasCapacity",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "TEr",
+    "gold": "onSchedulerTick",
+    "proposed": "onDarkWakeTick",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "TO",
+    "gold": "priorityQueueTimeoutIdField",
+    "proposed": "queueDelayTimerField",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "TQr",
+    "gold": "vmPathTranslationApi",
+    "proposed": "hostLoopMountModule",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Tf",
+    "gold": "pluginRegistry",
+    "proposed": "localPluginMarketplaceManager",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Uhr",
+    "gold": "bracketDepthLimit",
+    "proposed": "terminalParityColumnWidth",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "VLe",
+    "gold": "homebrewPathWarned",
+    "proposed": "homebrewPathFlooredOnce",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Vdr",
+    "gold": "formDataModule",
+    "proposed": "formDataFactoryResult",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Vfr",
+    "gold": "computerUseActions",
+    "proposed": "mouseTransformActions",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "ViA",
+    "gold": "removeKeepAwakeClaim",
+    "proposed": "releaseKeepAwake",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Vve",
+    "gold": "indentNewlineStrings",
+    "proposed": "whitespaceIndentCache",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Wq",
+    "gold": "recordFeatureSupport",
+    "proposed": "recordYukonSilverSupport",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "XN",
+    "gold": "orgPluginsInflight",
+    "proposed": "orgPluginsInFlightFetch",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "XU",
+    "gold": "powerSaveBlockerId",
+    "proposed": "keepAwakeBlockerId",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Xfr",
+    "gold": "policyOriginCategories",
+    "proposed": "accessibilityCategorySet",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Xhr",
+    "gold": "buildAgentEnv",
+    "proposed": "buildHostSpawnEnv",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Xur",
+    "gold": "framebufferReadTools",
+    "proposed": "framebufferReadToolDefs",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Y3",
+    "gold": "previewStateMap",
+    "proposed": "previewMapY3",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Y6A",
+    "gold": "lamSupportStatus",
+    "proposed": "yukonSilverSupportStatus",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "ZC",
+    "gold": "elementSelectedCallback",
+    "proposed": "launchPreviewManagerZC",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "ZCr",
+    "gold": "runVmStartupSequence",
+    "proposed": "startVMInternal",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Zg",
+    "gold": "previewDestroyedHandler",
+    "proposed": "launchPreviewManagerZg",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "_8",
+    "gold": "pendingPluginInstallIds",
+    "proposed": "setEmpty8",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "_BA",
+    "gold": "heartbeatVmRef",
+    "proposed": "heartbeatConnection",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "_NA",
+    "gold": "previewRegistryMap",
+    "proposed": "mapNA",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "_ht",
+    "gold": "shellEnvApi",
+    "proposed": "loginShellEnvModule",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "_k",
+    "gold": "mimeTypesDbDefaultTypeField",
+    "proposed": "queueWeakField_k",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "aQr",
+    "gold": "pluginEnablementTestApi",
+    "proposed": "pluginGatingTestExports",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "bBr",
+    "gold": "schedulerApi",
+    "proposed": "eventEmitter3Interop",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "bgA",
+    "gold": "lamFeatureSupport",
+    "proposed": "yukonSilverSupportResult",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "cLe",
+    "gold": "skillsCacheScope",
+    "proposed": "cLeWorkspacePath",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "eD",
+    "gold": "deniedByUserOrigins",
+    "proposed": "deniedPreviewOrigins",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "eF",
+    "gold": "originPromptBudget",
+    "proposed": "previewPromptBudgetByServer",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "efr",
+    "gold": "windowsSystemProcesses",
+    "proposed": "windowsSystemProcessNames",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "ehr",
+    "gold": "clearPreviewElementCache",
+    "proposed": "clearAccessibilityCaches",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "gLe",
+    "gold": "scheduledTasksMap",
+    "proposed": "mapGLe",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "gU",
+    "gold": "mimeTypesDbExtToTypeField",
+    "proposed": "weakFieldGU",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "grA",
+    "gold": "launchPreviewCallback",
+    "proposed": "launchPreviewManagerGrA",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "hBr",
+    "gold": "pacificTimeFormat",
+    "proposed": "losAngelesTimeFormatter",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "hQr",
+    "gold": "mainWindowActionsAlias",
+    "proposed": "hQrAlias",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "ho",
+    "gold": "previewTitleCache",
+    "proposed": "previewMapHo",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "i4",
+    "gold": "aumidCacheInflight",
+    "proposed": "aumidCacheLoadPromise",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "ih",
+    "gold": "pluginInstaller",
+    "proposed": "localSkillDiscovery",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "irA",
+    "gold": "swiftReadyResolve",
+    "proposed": "swiftAddonReadyResolver",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "iur",
+    "gold": "scheduledTaskSet",
+    "proposed": "setIur",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "iw",
+    "gold": "cachedTerminalEnv",
+    "proposed": "previewExtraEnvCache",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "jfr",
+    "gold": "ignoredAriaRoles",
+    "proposed": "presentationRoleSet",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "kBr",
+    "gold": "scheduledTasksServerApi",
+    "proposed": "scheduledTasksMcpModule",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "nQt",
+    "gold": "scheduledTaskClient",
+    "proposed": "asyncMutexNQt",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "nrA",
+    "gold": "originPromptInflight",
+    "proposed": "pendingPreviewOriginPrompts",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "nv",
+    "gold": "launchPreviewExtraCallback",
+    "proposed": "launchPreviewManagerNv",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "oPA",
+    "gold": "keepaliveGeneration",
+    "proposed": "keepaliveStopCount",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "orA",
+    "gold": "originPromptBusy",
+    "proposed": "previewOriginPromptInProgress",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "phr",
+    "gold": "previewManagerApi",
+    "proposed": "previewControlModule",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "qQt",
+    "gold": "pendingTaskStatuses",
+    "proposed": "taskInProgressStatuses",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "qhr",
+    "gold": "resolveShellEnv",
+    "proposed": "extractLoginShellEnv",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "qz",
+    "gold": "mimeTypesDb",
+    "proposed": "defaultOkResponse",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "r$",
+    "gold": "previewSelectionCache",
+    "proposed": "accessibilityNodeMapR$",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "r_",
+    "gold": "deniedOriginSet",
+    "proposed": "allowedPreviewOrigins",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "rft",
+    "gold": "mainPreviewWindow",
+    "proposed": "localSkillsPluginRef",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "set",
+    "gold": "meaningfulAccessibilityRoles",
+    "proposed": "clickActionRoleSet",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "tP",
+    "gold": "subframeWarmupConfig",
+    "proposed": "domAccessibilityHelper",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "tpr",
+    "gold": "resetCachedTerminalEnv",
+    "proposed": "clearPreviewExtraEnvCache",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "tur",
+    "gold": "wrapperScriptTemplate",
+    "proposed": "vmRunShebangScript",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "tw",
+    "gold": "chromeExtensionAlias",
+    "proposed": "orgProvisionedKind",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "vBr",
+    "gold": "schedulerSingleton",
+    "proposed": "eventEmitter3FactoryResult",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "vLe",
+    "gold": "swiftWeakMap",
+    "proposed": "previewWeakMapVLe",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "vfr",
+    "gold": "loadSwiftBinding",
+    "proposed": "loadClaudeSwiftAddon",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "wfr",
+    "gold": "getComputerUseServer",
+    "proposed": "buildComputerUseToolset",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "xkA",
+    "gold": "pluginSyncQueue",
+    "proposed": "pluginConcurrencyQueueXkA",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "yNA",
+    "gold": "lastSdkInstalledInstance",
+    "proposed": "lastConnectedVmInstanceId",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "yp",
+    "gold": "priorityQueueTimeoutField",
+    "proposed": "weakFieldYp",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "zgA",
+    "gold": "remotePluginsApi",
+    "proposed": "remotePluginApiModule",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "zq",
+    "gold": "successResponse",
+    "proposed": "defaultOkResponseZq",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "zx",
+    "gold": "RelaunchMode",
+    "proposed": "VmRestartMode",
+    "file": "wake-scheduler"
+  },
+  {
+    "orig": "Mg",
+    "gold": "runDisposables",
+    "proposed": "disposeUsingStack",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Min",
+    "gold": "elicitationFormPrompt",
+    "proposed": "elicitationFormSkillDoc",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Mir",
+    "gold": "esperantoErrorMap",
+    "proposed": "describeEsperantoType",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Mtt",
+    "gold": "typeofToOriginName",
+    "proposed": "bigintObjectTypeofNames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Mvt",
+    "gold": "isUnsupportedFsMethod",
+    "proposed": "hasInDedupeSet",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Mzt",
+    "gold": "copyFsMethods",
+    "proposed": "copyFileMethodNames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "N4t",
+    "gold": "openAiOperations",
+    "proposed": "openaiInstrumentedMethods",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "NBA",
+    "gold": "mcpToolNamePattern",
+    "proposed": "lowerAlnumDashUnderscore64Pattern",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "NBt",
+    "gold": "emitProcessWarning",
+    "proposed": "emitWarningOrConsoleError",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "NEr",
+    "gold": "thirtySecondMs",
+    "proposed": "thirtyThousandThreshold",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "NHi",
+    "gold": "readFileToStream",
+    "proposed": "readFileToParserPromise",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "NNe",
+    "gold": "modifierKeys",
+    "proposed": "modifierKeyNames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Ndt",
+    "gold": "hresultErrorPattern",
+    "proposed": "windowsErrorCode80070569Pattern",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Nee",
+    "gold": "loggerApiVersion",
+    "proposed": "numberOne",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Net",
+    "gold": "getGlobalContext",
+    "proposed": "getDefaultStackParser",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Nft",
+    "gold": "devServerConfigHint",
+    "proposed": "debugRuntimeConfigHint",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Nin",
+    "gold": "buildDiagramGuidePrompt",
+    "proposed": "diagramTypesSkillDoc",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Nme",
+    "gold": "toolNamePattern",
+    "proposed": "lowerSnakeShortPattern",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Npr",
+    "gold": "sendSessionMessagePrompt",
+    "proposed": "sendMessageToolDoc",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Nzt",
+    "gold": "linkFsMethods",
+    "proposed": "linkMethodNames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "O4i",
+    "gold": "inlineDefaultInnerType",
+    "proposed": "resolveZodInnerTypeRef",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "OL",
+    "gold": "zipExtractLimits",
+    "proposed": "uploadSizeLimits",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "OOr",
+    "gold": "thirtySecondMsB",
+    "proposed": "thirtyThousandMsArg",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "O_r",
+    "gold": "memoryAccessGuidelines",
+    "proposed": "memoryAccessGuidanceLines",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Oat",
+    "gold": "protocolDate",
+    "proposed": "dateString20251125",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Opr",
+    "gold": "markChapterPrompt",
+    "proposed": "markChapterToolDoc",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Oqt",
+    "gold": "severityNumberToLevel",
+    "proposed": "otelSeverityToSentryLevel",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Oxt",
+    "gold": "nonZeroTraceIdPattern",
+    "proposed": "nonZeroHex32Pattern",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "P4i",
+    "gold": "inlinePrefaultDefaultInnerType",
+    "proposed": "resolveZodPrefaultRef",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "POr",
+    "gold": "cliRuntimeName",
+    "proposed": "cliString",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "PTi",
+    "gold": "initZodError",
+    "proposed": "defineZodErrorProperties",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "PUi",
+    "gold": "sixtyFourKibibytes",
+    "proposed": "sixtyFourKibibyteBytes",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "PWr",
+    "gold": "twoMebibytes",
+    "proposed": "twoMebibyteBytes",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "PWt",
+    "gold": "eightThousandOneHundredNinetyTwo",
+    "proposed": "eightyOneNinetyTwo",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Pet",
+    "gold": "resetCachedModule",
+    "proposed": "resetLocalVariablesState",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Pie",
+    "gold": "oneThousandMsB",
+    "proposed": "oneThousandSpanLimit",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "PjA",
+    "gold": "interopRequireWildcard",
+    "proposed": "interopCjsNamespace",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Pke",
+    "gold": "anthropicOauthUrls",
+    "proposed": "anthropicOAuthEndpoints",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Q2i",
+    "gold": "eightKibibytes",
+    "proposed": "eightKibibyteBytes",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Q2r",
+    "gold": "shellSafeArgPattern",
+    "proposed": "safeAttributeCharsPattern",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Q2t",
+    "gold": "scopeDataKeys",
+    "proposed": "sentryScopeFieldNames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "QAA",
+    "gold": "eightKibibytesB",
+    "proposed": "eightKibibyteBytesDup",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "QEi",
+    "gold": "objectBooleanTypes",
+    "proposed": "objectBooleanTypeNames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "QGt",
+    "gold": "fourThousandCount",
+    "proposed": "fourThousandMsFadeDuration",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "QHt",
+    "gold": "openAiModelPrefixPattern",
+    "proposed": "leadingSentryProjectPrefixPattern",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "QQr",
+    "gold": "fiveMinuteMs",
+    "proposed": "threeHundredThousandMs",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "QXr",
+    "gold": "fifteenSecondMs",
+    "proposed": "fifteenThousandMsTimeout",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "QXt",
+    "gold": "semverComparatorOffsets",
+    "proposed": "semverComparatorResultMap",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Qbt",
+    "gold": "isKnownSpanOp",
+    "proposed": "hasInDedupeSet2",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Qie",
+    "gold": "maxTraceStateEntries",
+    "proposed": "thirtyTwo",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Qii",
+    "gold": "parseStackString",
+    "proposed": "parseStackTraceFrames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "QsA",
+    "gold": "isNonEmptyValue",
+    "proposed": "isNonEmptyStringOrPresent",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Rg",
+    "gold": "pushDisposable",
+    "proposed": "addToUsingStack",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Rir",
+    "gold": "esperantoTypeName",
+    "proposed": "describeEsperantoTypeDup",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Rzt",
+    "gold": "renameFsMethods",
+    "proposed": "renameMethodNames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "TSA",
+    "gold": "redactBedrockArnInValue",
+    "proposed": "maskBedrockArnIfPresent",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "Tzt",
+    "gold": "symlinkFsMethods",
+    "proposed": "symlinkMethodNames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "e_t",
+    "gold": "getRuntimeName",
+    "proposed": "getCliString",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "eot",
+    "gold": "onesComplementByte",
+    "proposed": "bitwiseNotByte",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "fie",
+    "gold": "traceStateListDelimiter",
+    "proposed": "commaSeparator",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "hie",
+    "gold": "traceStateKeyValueDelimiter",
+    "proposed": "equalsSeparator",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "kzt",
+    "gold": "mkdtempFsMethods",
+    "proposed": "mkdtempMethodNames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "lZt",
+    "gold": "maxBracePatternBytes",
+    "proposed": "sixtyFourKibibyteBytesGlob",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "uii",
+    "gold": "fiftyCount",
+    "proposed": "fiftyFrameLimit",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "vzt",
+    "gold": "singlePathFsMethods",
+    "proposed": "singlePathArgMethodNames",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "w3e",
+    "gold": "expandBraces",
+    "proposed": "expandBracePattern",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "xZt",
+    "gold": "makeCaseInsensitiveSuffixMatcherB",
+    "proposed": "makeLowercaseDotlessSuffixMatcher",
+    "file": "sentry-node-integrations"
+  },
+  {
+    "orig": "y$t",
+    "gold": "maxTraceStateLength",
+    "proposed": "fiveHundredTwelve",
+    "file": "sentry-node-integrations"
+  }
+]

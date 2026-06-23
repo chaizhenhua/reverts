@@ -1,0 +1,176 @@
+fEi	jsonSchemaDraft07Definition	JSON Schema draft-07 meta-schema property map ($id/$schema/$ref/definitions/properties...)
+fGA	braceCharClassPattern	string '[_0-9a-z-*/]' used as a glob brace char-class fragment
+fHi	normalizeCaseFold	NFD-normalizes + lowercases + uppercases A with a bounded GL/uMA cache (case-fold helper)
+fHt	gitRemoteUrlPattern	RegExp matching scheme://user:pass@host:port/path (git remote URL)
+fJr	maxRetryAttempts	const = 3 (small retry-count constant)
+fKr	reconnectBackoffBaseMs	1000ms base; ccr-sse-transport uses fKr*2^attempts capped at hKr for reconnect backoff
+fMi	windowsLongPathPrefixPattern	RegExp /^[\\/]{2}[?.][\\/]/ matching Windows \\?\ \\.\ device-path prefix
+fS	oneOrTwoDigitPattern	string '\d\d?' (date-format one-or-two-digit fragment)
+fUr	toArrayCopy	returns A unchanged if array-like (rH), else shallow-copies into a new Array
+fXi	maxMapEntries	cluster-2863 caps a Map insert at fXi-1 (=200) before eviction
+fYi	decodeBase256	decodes tar base-256 numeric field (0x80/0xff prefix) to a safe integer
+fZr	coworkMountClaudeDir	path './mnt/.claude'
+fcr	plutilConvertJsonArgs	plutil argv ['-convert','json','-o','-','--']
+ffe	dxtManifestVersionDefault	'0.4' used as dxt_version/manifest_version literal in dxt-manifest-schema
+fgi	fileSystemIpcDispatcher	IPC dispatcher object registering FileSystem interface handlers (writeFileDownload, browseFolder, listDirectory...)
+fgr	readChunkSize	const = 8192 (8KB I/O chunk size)
+flA	claudeMediaProtocol	custom protocol scheme string 'claude-media'
+fme	modelsMenuLabel	i18n message {defaultMessage:'Models', id}
+fqA	dxtSchemaVersion	version string '0.4'
+fv	desktopAppBundleId	'com.anthropic.claudefordesktop' macOS bundle identifier
+g$t	base64PadChar	'=' base64 padding character
+g0r	defaultRedactionLength	cluster-2862 fallback length for value redaction (a0r[e] ?? g0r)
+g5i	oidcFederationDate	'oidc-federation-2026-04-01' OIDC federation identifier
+g5r	downloadPageUrl	'https://claude.com/download'
+g6r	modifierKeyTokens	accelerator modifier map (CommandOrControl/Cmd/Ctrl/Alt/Shift -> char+order)
+g7i	dataViewTag	'[object DataView]' Object.prototype.toString tag
+g7r	defaultTimeoutMs	const = 5000 (5s timeout)
+g8r	slugTokenPattern	RegExp /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/ (identifier/slug validation)
+gCr	ntStatusCodePattern	RegExp /0x8037[0-9a-f]{4}/i matching NT status / crash codes
+gDe	googleOauthTokenUrl	'https://oauth2.googleapis.com/token'
+gEr	crashBugTypePatterns	array mapping crash log patterns to bugType (undefined_instruction/null_dereference/kernel_oops)
+gF	worktreeKeepFilename	'.worktree-keep' marker filename
+gFi	tokenExpiryBufferMs	cluster-2861 treats gcp token valid if expiresAt - gFi > now (=120000ms skew buffer)
+gGt	isDesignPopoutWindow	predicate on BrowserWindow; used to find the design-popout window
+gQi	ipv4AddressPattern	RegExp validating a dotted-quad IPv4 address
+gUi	accessTokenExpiryBufferMs	cluster-2862 treats access token valid if accessTokenExpiresAt - gUi > now (=120000ms)
+gV	showAndFocusMainWindow	shows + focuses Ny main window if not destroyed
+gX	hourCycleByRegion	region/locale -> preferred hour-cycle list (H/h/hB/hb)
+gYi	identity	(A) => A identity function
+gZr	coworkMountClaudeDirAbsolute	path './mnt/.claude'
+g_i	sessionScopeTtlSeconds	365*24*60*60; cluster-2863 returns g_i as TTL for non claude_code session scope
+g_r	displayNameToolDescription	tool description for setting the assistant display name
+gae	minidumpMagic	'MDMP' minidump file magic signature
+gde	monthIndexFromOneBased	(A) => +A - 1 (1-based month to 0-based)
+gdt	maxRecentItems	const = 50
+gft	tieredAppsAccessDoc	computer-use tiered-apps access documentation string
+ggi	desktopNotificationsIpcDispatcher	IPC dispatcher registering DesktopNotifications handlers (getAuthorizationStatus/showNotification...)
+ggr	appLibraryPaths	builds macOS Library paths (data/config/cache/log/temp) for an app name
+ggt	dispatchBrowserToolCall	routes a Chrome-extension MCP tool call (switch/list/select browser, host tools) with error handling
+giA	emptyObject	const {} empty object literal
+gie	geminiStreamingMethods	['models.generateContent', 'sendMessageStream'...] Gemini SDK method names
+rfc5322Email	rfc5322EmailPattern	RFC 5322 email-address validation RegExp
+gj	BoundedCommandRun	class tracking a command run with timeout, byte-capped output buffer, exit/error promise
+gjr	bootSweepController	{resetBootSweep, chainActiveSweep} controlling boot sweep promise chain (CP/ovt)
+gk	maxUploadBytes	500*1024*1024 (500MB size limit)
+gri	ipv6AddressPattern	RegExp validating an IPv6 address (incl. zone id and IPv4-mapped)
+gsA	isPromise	(A) => A instanceof Promise
+gtr	safeFilenamePattern	RegExp /^[a-zA-Z0-9._-]+$/ (safe filename/segment)
+gur	requestTimeoutMs	cluster-2854 AbortSignal.timeout(gur) request timeout (=15000ms)
+gxr	streamTextDecodeOptions	{stream:true} passed to TextDecoder.decode in sse-transport
+gxt	telemetrySdkVersion	'2.2.0' used as ATTR_TELEMETRY_SDK_VERSION in cluster-2875
+h$t	printableAsciiLinePattern	RegExp /^[ -~]{0,255}[!-~]$/ (printable-ASCII single line)
+h1r	uuidVersionByte	const = 6 (UUID v6 discriminator; used in zod-checks-net)
+h1t	mcpSessionIdAttr	'mcp.session.id' telemetry attribute key
+h4t	completionTokensAttr	'ai.usage.completionTokens' telemetry attribute key
+hCr	maxDiskBytesByPlatform	per-platform/arch disk-space cap (darwin/win32 arm64/x64 = 15GB)
+hFr	streamRequestBody	async generator yielding a request body (stream/arrayBuffer/iterator/value)
+hIi	ajvDataRefSchemaUri	AJV data.json $ref schema URL
+hJe	thumbnailMaxBytes	50*1024*1024 (50MB)
+hJr	uploadMaxBytes	100*1024*1024 (100MB)
+hJt	maxBackoffMs	3600000ms (1h) backoff cap; zod-checks-net Math.min(n*2, hJt)
+hKi	confirmBrowserExtensionPrompt	prompt to open a confirmation screen in each connected Chrome extension
+hKr	reconnectBackoffMaxMs	30000ms; ccr-sse-transport caps reconnect backoff at hKr
+hOr	emptyUsageTotals	zeroed token-usage accumulator (input/output/cache tokens, server_tool_use...)
+hRi	pluginShimScheme	'plugin-shim:' URI scheme
+hS	generalRestrictionsLabel	i18n message {defaultMessage:'General restrictions', id}
+hTA	requestTimeoutLongMs	45000ms (45s) timeout
+hVr	pullRequestTemplatePaths	candidate PR-template file paths
+hX	ansiLogColors	ANSI color escape codes per log level (error/warn/info/debug/reset)
+hYA	coworkConfigTestPrompts	cwk_cfg test_replace/test_footer prompt-injection config
+hYi	decodeBase256Signed	decodes a signed tar base-256 numeric field (two's-complement via tot/eot)
+tot	twosComplementByte	(A) => (255 ^ A) + 1 & 255 (byte two's-complement)
+hZA	coworkArtifactMetaKey	'cowork-artifact-meta' key string
+hZr	coworkMountClaudeRelDir	relative path 'mnt/.claude'
+hcr	defaultTimeoutShortMs	const = 5000 (5s); imported as `timeout` in cluster-2863
+hdi	localePlaceholderPattern	RegExp /\$\{locale\}/i matching a ${locale} template placeholder
+hdt	otelEnvVarNames	OpenTelemetry / CLAUDE_CODE telemetry env-var name list
+het	maxBatchEntries	cluster-2864 flushes when length >= het (=50)
+hgi	openDocumentsIpcDispatcher	IPC dispatcher registering OpenDocuments handlers (getOpenDocuments/readOpenDocumentAsBase64)
+hkt	envSettingsKey	'env' key string
+hmr	jsonRequestBodyEncoder	builds {bodyHeaders, body} JSON-encoding a request body
+hmt	fetchPageToolDescription	web-page fetch tool description
+hpr	requestDirectoryToolDescription	directory-access request tool description
+htn	desktopAppPlatform	'desktop_app' platform identifier
+hx	constantCasePattern	RegExp /^[A-Z][A-Z0-9_]*$/ (CONSTANT_CASE / env-name validation)
+i$r	componentVersion	version string '1.17.0'
+i0r	microsecondsPerSecond	const = 1000000 (1e6)
+i1A	notSlashCharClass	string '[^/]' glob single-segment char-class
+i1t	defaultPageSize	const = 100
+i2A	attachmentMaxBytes	20*1024*1024 (20MB)
+i2r	chromeExtensionPollIntervalMs	5*60000 (300000ms); chrome-extension-bridge setTimeout interval
+i6r	haikuModelId	'claude-haiku-4-5-20251001' model id
+i7i	objectTag	'[object Object]' toString tag
+i8t	objectTagAlt	'[object Object]' toString tag
+i9t	telemetrySdkLanguageVersion	'0.1.0' version (super(... i9t ...) in cluster-2875)
+iDi	ipv4CidrPattern	RegExp validating an IPv4 CIDR range (a.b.c.d/n)
+iFi	googleOauthAuthUrl	Google OAuth2 v2 authorization endpoint URL
+iG	defaultPreviewLimit	const = 200
+iGe	markChapterToolName	'mark_chapter' tool name
+core	coreModuleExports	const {} placeholder module-exports object (exported as iIt)
+iJt	pollIntervalMs	cluster-2862 setTimeout(... iJt) poll interval (=5000ms)
+iKi	chromeExtensionId	'dngcpimnedloihjnnfngkgjoidhnaolf' Chrome extension id
+iOr	composeAbortSignal	merges abort signals + optional timeout into a combined AbortSignal
+tPr	typeOfValue	returns a refined typeof (NaN/array/null/constructor name) for error messages
+iPr	zodErrorMessageFormatter	builds zod issue -> human-readable error-message function (invalid_type/too_big/format...)
+iPt	maxConcurrency	const = 20
+iQi	uuidPattern	RegExp validating a canonical UUID
+iRi	internalTldSuffixes	['.internal','.local','.lan'] internal hostname suffixes
+iRr	requestTimeoutMediumMs	const = 30000 (30s)
+iVr	authRecheckIntervalMs	gh-rest-client re-auths on 401 if now - fetchedAt > iVr (=60000ms)
+iWi	maxRetryCount	const = 5
+iWt	logLevelToSeverity	winston-style level -> severity name map (silly->trace, emerg->fatal...)
+iXi	anthropicAssistantTurnPrefix	'\n\nAssistant:' prompt turn delimiter
+iZt	escapedDotPattern	RegExp /\\./g matching escaped dots
+i_t	remoteClaudeDir	'/home/claude/.claude/remote' path
+ibe	makeAbortException	creates a DOMException (or LBr fallback) for abort
+rbe	abortReasonError	resolves an AbortSignal.reason into an Error
+iie	promptAttr	'ai.prompt' telemetry attribute key
+iii	defaultPort	const = 30
+Class	EmptyClass	empty class with index signature (exported as iir)
+ije	scopeContextKey	'_scopeContext' property key
+ime	globalBaggageKey	'__gb__' global key
+iri	jwtPattern	RegExp /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/ (JWT three-part)
+irt	abortTimeoutMs	cluster-2862 AbortSignal.timeout(irt) (=10000ms)
+itt	builtinMcpDesiredKey	'builtinMcpDesired' setting key
+ivA	localMcpBridgeLog	logs '[localMcpBridge] ...' via D.info
+ivt	tokenNamePattern	RegExp /^[a-zA-Z0-9_-]+$/ (token/name validation)
+ize	isoDatePattern	ISO date regex fragment (leap-year aware YYYY-MM-DD)
+j0i	cacheTtlDayMs	1440*60*1000 (24h in ms) cache TTL
+j1	trimToUndefined	(A) => trimmed string or undefined if empty
+j2r	dotenvExampleFilenames	['.env.example','.env.sample','.env.template','.env.dist']
+j3r	bedrockModelErrorPattern	RegExp /ValidationException|model.*not found|ModelNotReady/i
+j4r	diskTranscriptCacheSize	clA(j4r) disk-transcript LRU cache size (=8)
+j8A	browserExtensionBundleId	'com.anthropic.claude_browser_extension'
+jAn	redactedPlaceholder	'<redacted>' string
+jD	twoDigitPattern	string '\d\d' (date two-digit fragment)
+jFr	makeSettleablePromise	wraps an executor into a promise with onSettle callback support
+jJr	requestTimeoutMs15s	const = 15000 (15s)
+jQr	maxKeyLength	config-settings-and-json-utils rejects keys longer than jQr (=40)
+jUi	tokenExpiryBufferMs2m	120000ms; zod-checks-net treats valid if t - jUi > now
+jV	emptyObjectVar	const {} mutable object placeholder
+jXi	argumentsTag	'[object Arguments]' toString tag
+wd	mergeOptions	(A, e) => Object.assign({}, A, e) options-merge helper
+jZt	makeMinimatchWithDefaults	wraps minimatch with default options (Minimatch/AST/filter/makeRe...)
+jaA	logLevelPriorities	{off:0, error:200, warn:300, info:400, debug:500} level->priority
+tke	coerceLogLevel	validates a log-level string against jaA, warns if unknown
+jgt	computerUseActionSchema	JSON schema for computer-use action (key/click/scroll/screenshot... + coordinate/text)
+jin	allowedEnvVarPatterns	regex list of env-var names allowed through (MCP_/DEBUG/LOG_LEVEL/NODE_ENV...)
+jjA	hookEventNames	hook event name list (PreToolUse/PostToolUse/SessionStart/Stop...)
+jji	jsonSchemaDraft07DefinitionAlt	JSON Schema draft-07 meta-schema property map (duplicate of fEi)
+jjt	linuxDistroReleaseFiles	release-file -> distro list (fedora-release/lsb-release...)
+jlA	showWidgetResourceUri	'ui://imagine/show-widget.html' resource URI
+jlt	maxBufferBytes	1048576 (1MB); transcript-mirror-batcher default byte cap
+jme	maxEntries	cluster-2854 rejects when length > jme (=10)
+jpe	numberFormatPattern	RegExp /^\.(?:(0+)(\*)?|(#+)|(0+)(#+))$/g number-format spec
+jrA	pathSeparatorDouble	'::' separator string
+jsA	gcpCredentialsFilename	'.gcp-credentials.json'
+jwi	dateFormatTokenPattern	RegExp matching date-format field tokens (yMd/Hms etc.) outside quotes
+jxt	undefinedTag	'[object Undefined]' toString tag
+jyi	ulidPattern	RegExp /^[0-9A-HJKMNP-TV-Z]{26}$/i (Crockford base32 ULID)
+k0t	isDefinedNonSymbol	(A) => !sP(A) && A !== mT (defined / non-sentinel predicate)
+name	prismaIntegrationName	'Prisma' Sentry integration name (exported as fWe)
+pWe	prismaSentryIntegration	Sentry integration factory adding prisma span attributes (exported as pWe; imported as prismaIntegration)
+pYi	decodeBase256Unsigned	decodes an unsigned tar base-256 numeric field
+isCode	hasCodePoint	(A) => KCA.has(A) membership predicate (exported as fiA)
+v_e	caseFoldCacheLimit	const = 10000; fHi evicts when GL cache exceeds v_e

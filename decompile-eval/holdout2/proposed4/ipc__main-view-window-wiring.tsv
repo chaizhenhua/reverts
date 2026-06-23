@@ -1,0 +1,209 @@
+$en	startClaudeAiImport	function: kicks off claude.ai import device-auth grant, ky AwaitingApproval/SignedIn states
+$nA	pendingOpenUrl	macOS open-url handler stores deep-link url here when Ee not ready
+$tn	entraDeviceCodeResponseSchema	zod schema with device_code/user_code/verification_uri microsoft.com
+AAe	claudeAiImportTokensByKey	Map keyed by token-store key holding claude.ai import tokens
+AQ	persistedFocusedWindowHandle	tUt persists currently focused app window handle + timestamp
+AT	pairedBuddyDevice	QJA.get('paired'); paired hardware buddy device record
+BJA	coworkOauthConfigPromise	cached promise resolving COWORK_3P_OAUTH_CONFIGS production
+Bin	Sha256TransformStream	Transform subclass updating sha256 hash, getDigest hex
+BtA	dxtUpdateCheckInterval	setInterval handle for periodic extension update checks
+CKe	externalIdpCredentialModule	freeze module: refreshExternalIdpCred, runExternalIdpPkceGrant
+Cin	showDeviceCodeWindow	export alias of showDeviceCodeWindow
+CtA	userThemeMode	wr.get('userThemeMode'); system/light/dark applied to nativeTheme
+DU	trustedDeviceEnrollInFlight	in-flight enrollTrustedDevice promise, dedupes concurrent enroll
+DW	buddyBleInstalled	set true when buddy BLE bridge starts; pairDevice gates "not installed"
+Dnn	orgScopedDxtUpdateDialogModule	freeze module: showOrgScopedDxtUpdateDialog
+Drn	reportState	export alias of reportState (buddy connection state)
+Dtn	appReadyPromise	D9e(sA.app,'ready'); resolves when app ready event fires
+EAe	echoMcpServerModule	freeze module placeholder for Echo MCP server registration
+EFt	totalOutputTokensToday	accumulates message usage.output_tokens for buddy
+EO	pairRetryAttempts	exponential backoff exponent for pair retries (2000*2**EO)
+Ein	dxtUpdateModule	freeze module: applyPendingUpdates, startDxtUpdateChecks
+EtA	quickWindowReadyPromise	D9e(Ro,'ready-to-show') promise for quick entry window
+FbA	quickWindowReady	set true when quick entry window ready-to-show fires
+GE	popoutWindowModule	awaited module exposing getWindowManager for popout windows
+GZ	getPluginRegistry	memoizes srn() result, returns plugin registry instance
+HJe	wiredWebContents	WeakSet tracking webContents already wired in TGt
+Hen	claudeAiImportAuthModule	freeze module: cancel/getValid claude.ai import token
+Hin	ansiCsiPattern	RegExp matching CSI escape sequences (ESC [ ... letter)
+HlA	lastImportedAt	export alias of lastImportedAt timestamp
+Hrn	deviceStatus	export alias of deviceStatus (buddy device status)
+IFt	buddyTokensStore	_h store named 'buddy-tokens' for daily token totals
+JJe	computerUseToolsEnabled	tQ 3572572142 sets from c.on; gates V7A
+JbA	pluginRegistryInitPromise	in-flight srn() promise inside GZ
+Jin	ansiOscPattern	RegExp matching OSC escape sequences
+JlA	claudeAiImportListeners	Set of {onAuthUserCode,onAuthStateChange} subscribers
+Jrn	pauseBuddyBridge	sets XlA true to pause buddy bridge sends
+KFt	electronDevtoolsInstaller	aon() electron-devtools-installer instance
+KJe	unusedBooleanFlag	let =false declared, never read elsewhere in file
+KlA	extensionLookupModule	freeze module: getExtension(s)/Version(s)/UrlWithDirectoryBase
+KnA	popupApplicationMenu	closure popping application menu over main window
+Krn	resumeBuddyBridge	sets XlA false to resume buddy bridge sends
+Ld	aboutWindow	BrowserWindow 'About Claude' created in vGt
+Lin	visualizeMcpResources	MCP resource list for visualize widget
+MKe	buddySelectBluetoothDeviceHandler	select-bluetooth-device listener for buddy pairing
+Mrn	scanDevices	export alias of scanDevices (buddy device scan)
+Mtn	consoleOauthAuthorizeUrl	`https://${z7e}/oauth/authorize` console grant URL
+NGt	getTrustedDeviceToken	export alias of getTrustedDeviceToken
+NKe	setBuddyPairingPromptCallback	stores pJA passkey-prompt callback
+Ny	mainViewBrowserWindow	main window ref captured in TGt (Ny=A)
+PGt	enterpriseDeploymentConfigKeys	Object.keys(cR.shape) deployment config field names
+PJe	initialBlocklistCheckDone	guards triggerInitialBlocklistCheck single-run
+PbA	claudeOriginUrl	URL(Ki()) parsed claude origin for frame validation
+Pin	imagineServerDefModule	freeze module: getImagineServerDef
+QAn	startBlocklistUpdateChecks	export alias of startBlocklistUpdateChecks
+QFt	hardwareBuddyMenuModule	freeze module: getBuddyMenuItem, initBuddy
+QJA	buddyStateStore	_h store 'buddy-state' persisting paired device
+QP	dailyTokenUsage	{date,tokens} today's buddy token usage counter
+QQ	buddyDeviceScanState	{found,cb,abandon} active buddy scan picker state
+QUt	mainWindowCreated	set true after main window first created
+Qnn	prReviewAuthorAssociations	Set OWNER/MEMBER/COLLABORATOR author associations
+RGt	triggerInitialBlocklistCheck	export alias of triggerInitialBlocklistCheck
+RQ	buddyPairRetryTimer	setTimeout handle for buddy pair retry backoff
+RQA	scheduleBuddyPairRetry	schedules next buddy pair retry with backoff
+Ren	showSwiftTrayUsagePopup	swift tray usage popUp with version/quit items
+Ro	quickEntryWindow	transparent frameless Quick Entry BrowserWindow
+Rrn	setBuddyConnectionStateCallback	stores XnA connection-state callback
+SU	authExpiryToastEpoch	credential epoch currently shown in expiry toast
+SUt	getCoworkOauthConfig	returns cached cowork oauth config promise (BJA)
+Srn	startBuddyBleBridge	starts buddy BLE bridge, wires select-bluetooth-device
+Stn	skipStartupHidden	whether launch was NOT an at-login/--startup launch
+T$	clusterDeployStoreModule	freeze module: get/set/remove deploy + setPinned
+TGt	wireMainViewWindow	wires main view webContents IPC dispatchers/listeners
+Trn	loadDailyTokenUsage	loads today's token total from buddyTokensStore
+Ty	startupTimings	Map of startup milestone -> ms timestamps
+UbA	pendingTimingPromise	Promise.resolve() chain placeholder
+V7A	computerUseUiActive	JJe || SAn computer-use UI active flag
+VbA	buddyInstallInProgress	guards buddy device install, throws if already running
+Vrn	startBuddySessionBridge	starts buddy bridge over session managers, returns stop fn
+Wen	cancelClaudeAiImport	cancels import auth, ky SignedOut
+WlA	buddyPairingPinResponder	pending bluetooth pairing pin response callback
+Wrn	wireBuddyWindow	sets TWr buddy-window IPC implementation
+X7A	claudeAiImportSsoTokenStore	new tY('custom3pClaudeAiImportSso','[claude-ai-import:sso] token')
+XGt	quickEntryWindowWidth	export alias of width (556+ZGt quick window width)
+XUt	strippedTopLevelDirs	export alias of STRIPPED_TOP_LEVEL_DIRS set
+XlA	buddyBridgePaused	when true buddy bridge skips sends; toggled by Jrn/Krn
+XnA	buddyConnectionStateCallback	callback invoked on buddy connection state change
+YUt	deviceCodeWindowModule	freeze module: close/showDeviceCodeWindow
+YbA	stealthLaunchDelayMs	uJA.delaySec*1000 stealth launch delay
+YlA	claudeAiImportVerifyUrl	stored verify URL during awaiting-approval
+YnA	wiredMainViewEvent	webContents stored in TGt for navigation handlers
+Yrn	onBuddyBleConnectionChange	handles connected/disconnected, sends time on connect
+Zin	sshMcpServerManagerModule	freeze module: SshMcpServerManager
+ZlA	resolveBuddyScan	resolves active buddy scan with selected device id
+ZnA	buddyBleRxCallback	stores ZnA receive (rx) callback for buddy BLE
+Ztn	entraDeviceCodeTestExports	export alias of _test (clampInt/clampExpiresAt/readJsonBounded)
+_Ut	anthropicConsoleGrantModule	freeze module: doAnthropicConsoleGrant, getMintedAnthropicApiKey
+_rn	setBuddyBleRxCallback	stores ZnA rx callback
+aKe	unusedMap	new Map() declared, not referenced elsewhere in file
+aUt	getValidClaudeAiImportToken	export alias of getValidClaudeAiImportToken
+ain	cachedUpdatesModule	freeze module: cache/get/remove cached updates
+b4e	sentryClientForOptions	$i() sentry client to read/disable options
+bG	unusedNullRef	let =null declared, never reassigned
+bUt	entraTokenErrorSchema	zod schema error/error_description fields
+bin	visualizeMcpToolDefs	show_widget + read_me MCP tool definitions array
+brn	recordBuddySessionMessage	buffers session message, accumulates output tokens
+cH	blocklistUpdateModule	freeze module: blocklist update checks + canInstall
+cJA	unusedWeakMap	new WeakMap() declared, not referenced elsewhere in file
+cKe	startupPerfReported	guards ctn startup-perf reporting single-run
+c_	claudeAiImportAuthState	{status} current claude.ai import auth state
+cin	startDxtUpdateChecks	export alias of startDxtUpdateChecks
+cnn	autoArchiveEngineModule	freeze module: AutoArchiveEngine
+con	electronDevtoolsInstallerNamespace	gOt namespace wrapping default export
+ctn	reportStartupPerf	logs desktop_app_startup_perf with timing milestones
+deviceStatus	deviceStatus	queries buddy device status over BLE
+dJA	inFlight	export alias of inFlight WeakMap
+dnn	prReviewBlockingStates	Set CHANGES_REQUESTED/COMMENTED review states
+drn	remotePluginSyncTestExports	test bag: store/path/plugin helpers for plugin sync
+dtA	dxtUpdateCheckRunning	guards concurrent extension update check
+dtn	webauthnRpIdSuffix	`${Btn}.com.anthropic.claude.webauthn` rp id
+eKe	swiftTrayUsageListenerBound	guards binding trayUsageAction listener once
+eT	unusedMapForSessions	new Map() declared, not referenced elsewhere in file
+eUt	canRestoreFocus	!hasShadow; whether focus restore on mac is allowed
+fJA	buddyBleBridgePromise	memoized startBuddyBleBridge promise (Srn)
+fKe	entraFoundryModule	freeze module: entra device code/token foundry grant
+frn	remoteUploadsMigrationModule	freeze module: maybeRunRemoteUploadsMigration
+gFt	forgetDevice	export alias of forgetDevice (buddy)
+gUt	cancelClaudeAiImportAuth	export alias of cancelClaudeAiImportAuth
+g_	allowDevTools	LZ().allowDevTools flag
+gon	electronDevtoolsInstallerDefault	fc(KFt) interop default of devtools installer
+gtn	validateClaudeProtocolFrame	onBeforeRequest handler validating frame origin
+hJA	buddyBleDispatcher	Uvt.for(A).setImplementation buddy BLE dispatcher
+hKe	vertexWorkforceModule	freeze module: refresh/run vertex workforce grant
+hrn	showAuthExpiryToast	export alias of showAuthExpiryToast
+iAn	initCuSidePanel	registers cuLockChanged listener for computer-use side panel
+iUt	restorePersistedFocus	restores focus to persisted window handle
+itn	wireClaudeAiImportWindow	sets KXe claude.ai import IPC implementation
+jUt	warmBundleModule	freeze module: maybeWarmDownloadForUpdate, promoteWarmBundle
+j_	buddyBleConnected	A===Lvt.Connected; buddy BLE connection state
+jd	deviceCodeWindow	BrowserWindow for device-code verify
+jnA	pendingHandoffPayload	stored handoff continue-activity payload until Ee ready
+jtn	entraDeviceAuthPendingErrors	Set authorization_pending/slow_down poll errors
+kGt	trustedDeviceModule	freeze module: get/clear/enroll trusted device token
+kKe	submitPin	export alias of submitPin (buddy pairing)
+ky	setClaudeAiImportAuthState	updates c_ and notifies import listeners
+lF	claudeAiImportAuthGeneration	monotonically increasing import auth generation
+lV	claudeAiImportTokenPromise	in-flight device-auth token promise
+lastImportedAt	lastImportedAt	timestamp of last claude.ai import completion
+lin	applyPendingUpdates	export alias of applyPendingUpdates
+mAn	enrollTrustedDevice	export alias of enrollTrustedDevice
+mKe	pendingUpdatesApplied	guards applyPendingUpdates single-run
+mnn	autoFixEngineModule	freeze module: AutoFixEngine
+mrn	authExpiryToastModule	freeze module: isBrowserFlowAuthKind, showAuthExpiryToast
+nAe	stealthLaunchEnabled	uJA.enabled --stealth background launch flag
+nFt	setPairedBuddyDevice	persists/clears paired buddy device in store
+nJA	deviceIdentityGeneration	bumped on clear; invalidates in-flight enrollment
+nUt	quickEntryModule	freeze module: activateQuickEntryWindow + navigate
+nj	pluginRegistry	resolved plugin registry instance (cached in GZ)
+nnn	reactDevToolsModule	freeze module: loadReactDevTools
+nrn	pluginSyncModule	freeze module: syncPluginDirsToRemote
+ntn	remoteSyncedSettingKeys	Set of setting keys synced to remote sessions
+oAe	updateTrayContextMenu	rebuilds tray context menu (vT)
+oFt	ensureBuddyBleBridge	returns memoized buddy BLE bridge promise
+oJA	remoteToolsDeviceOpen	account-change closes remote tools device when true
+oKe	claudeAiImportTokenPromiseGeneration	generation tagged on in-flight token promise
+oj	buddySessionMessageBuffers	Map sessionId -> buffered messages for buddy
+pJA	buddyPairingPromptCallback	callback to show buddy pairing passkey prompt
+pairDevice	pairDevice	invokes renderer buddy BLE pair flow
+pv	buddyBlePairInFlight	guards concurrent buddy pair/scan operations
+qbA	buddyBridgeStarted	guards startBuddySessionBridge single start
+qin	terminalServerDefModule	freeze module: getTerminalServerDef
+rE	trayIcon	sA.Tray instance for menu bar tray
+rUt	activateQuickEntryWindow	export alias of activateQuickEntryWindow
+rin	vertexWorkforceTestExports	test bag: effectiveIdpScopes, stsExchange
+rj	cachedTrustedDeviceToken	cached trusted device token value
+rp	buddyWindow	'Hardware Buddy & Maker Devices' BrowserWindow
+rrn	pluginSyncTestExports	test bag: collectPluginEntries/contentHash/sftpMkdirp
+sAe	updateTray	creates/destroys/refreshes menu bar tray icon
+sFt	pairDevice	export alias of pairDevice
+sj	buddyPermissionHandler	handles buddy permission cmd, responds to tool permission
+tAn	restoreWindowFromSidePanel	restores window bounds after computer-use side panel
+tUt	persistFocusedWindow	persists currently focused app window handle
+uFt	rollDailyTokenUsageDate	resets daily token usage when date changes
+uJA	stealthLaunchConfig	ltn() stealth launch enabled/delaySec config
+uin	closeDeviceCodeWindow	export alias of closeDeviceCodeWindow
+unn	worktreePoolModule	freeze module: WorktreePool + worktree helpers
+urn	remoteMarketplaceMigrationModule	freeze module: maybeRunRemoteMarketplaceMigration
+vGt	showAboutWindow	creates/shows About Claude window
+vT	trayContextMenu	tray context Menu instance (IJA())
+vUt	entraTokenResponseSchema	zod schema access_token/refresh_token/expires_in
+vtn	consoleGrantTestExports	test bag: authorizeUrlFor, mintApiKey, reset
+wAn	clearTrustedDeviceToken	export alias of clearTrustedDeviceToken
+wJA	buddyStatusTimeoutCount	consecutive buddy status timeout counter
+wKe	checkExtensionUpdates	checks installed DXT extensions for updates
+width	quickEntryWindowWidth	556+ZGt quick entry window width
+xJe	blocklistUpdateInterval	setInterval handle for blocklist update checks
+xbA	claudeAiImportRunPromise	in-flight runImport promise (zen)
+xtn	externalIdpTestExports	test bag: effectiveScopes
+zJe	defaultSendUiState	{stage:Closed,canSend:false,showSendUi:false}
+zUt	buildSvgWidgetSetupDoc	builds visualize SVG setup instructions string by width
+zen	runClaudeAiImport	downloads + spawns claude.ai conversation importer
+zrn	showBuddyWindow	creates/focuses hardware buddy window
+height	quickEntryWindowHeight	420+ZGt quick entry window height, exported as AUt beside width
+_test	entraFoundryTestExports	test bag: clampInt/clampExpiresAt/readJsonBounded for entra foundry
+forgetDevice	forgetDevice	already-semantic: unpairs and forgets buddy device
+inFlight	inFlight	already-semantic: WeakMap tracking in-flight plugin sync ops
+reportState	reportState	already-semantic: reports buddy connection state, schedules retry
+scanDevices	scanDevices	already-semantic: scans for buddy BLE devices
+submitPin	submitPin	already-semantic: submits buddy pairing pin or cancels
+STRIPPED_TOP_LEVEL_DIRS	STRIPPED_TOP_LEVEL_DIRS	already-semantic: Set of dirs stripped from plugin sync (hooks,.mcpb-cache)

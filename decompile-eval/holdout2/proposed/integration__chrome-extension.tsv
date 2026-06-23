@@ -1,0 +1,233 @@
+I$A	gzipHeaderLength	returns 10 + filename length+1; sizes gzip header buffer (with c$A/ns gzip writers)
+I$t	deflateBlockSize	const 8192; deflate/gzip block constant in this file's gzip codec
+I0A	readUint64LE	reads two uc() 32-bit halves * 2^32; little-endian 64-bit reader
+I2i	bufferSize64Kb	64*1024; buffer-size constant in gzip/deflate codec region
+I3	stripWwwPrefix	A.replace(/^www\./,''); removes leading www. from host
+I4t	genAiResponseObjectAttr	'ai.response.object'; mapped to 'gen_ai.response.object' in zod-checks-net span attr remap
+I6e	sentryMessagePortKey	'__sentry_message_port_message__'; presence-tested marker key (zod-checks-email)
+I7i	int8ArrayTag	'[object Int8Array]'; lodash typed-array tag used in ajv-formats-7 tag map
+I8e	genAiAgentNameAttr	'gen_ai.agent.name'; span.setAttribute for create_agent/invoke_agent (zod-checks-int)
+I9	expressSpanNames	{MIDDLEWARE:'middleware',REQUEST_HANDLER:'request_handler'} span name kinds
+IFr	defaultPortByScheme	{ftp:21,http:80,https:443,ws:80,wss:443,...}; default ports per URL scheme
+IG	maxWindowDimension	32767; clamp upper bound for window width/height in setBounds/buildConstructorOptions
+IIr	machoFatMagic	3405691582 (0xCAFEBABE); Mach-O fat-binary magic compared to readUInt32BE in cluster-2864 macho check
+ILe	memoryConsolidationPrompt	'# Memory Consolidation...' reflective-pass prompt template string
+IMi	windowsUncPrefixPattern	/^[\\/]{2}[?.][\\/]/; matches \\?\ \\.\ Windows UNC/device prefixes
+IQi	ipv6Pattern	full IPv6 address validation regex
+IRe	coworkPluginsPathPrefix	'mnt/.claude/cowork_plugins/'; path prefix stripped/rejoined in zod-checks-e164
+IRr	pathOutsideAllowedDirsError	'Path is outside allowed working directories'; deny reason compared in zod-xid HostLoop
+IU	trimTrailingJsonTokens	recursively drops dangling trailing tokens from partial JSON token list
+IUi	dispatchGrantTimeoutMs	1e4; AbortSignal.timeout(IUi) for dispatch grant request (zod-checks-int)
+IV	colorPalettePrompt	'## Color palette...' diagram color-ramp guidance prompt string
+IVr	minHistoryLength	20; threshold on array length in zod-checks-guid history append
+IWe	semverPattern	named-group semver (major/minor/patch/prerelease/build) regex
+IY	crc32Streamer	returns {p,d} CRC-32 accumulator using int table; gzip checksum
+IYA	threeHundredSecondsMs	3e5 (5 min in ms); duration constant
+I_i	desktopCallbackUrl	'http://localhost:4000/desktop/callback'; OAuth desktop callback URL
+Iae	minidumpRecentWindowMs	1e3; 'modified in the last ${Iae} milliseconds' minidump-age check (streaming-renderer)
+Igi	chromeExtensionDispatcher	IPC dispatcher with get/for(setImplementation) for 'ChromeExtension' interface (isInstalled/installExtension/restartChrome)
+Imr	delayMs	new Promise(setTimeout, A); promise-based delay helper
+Inn	maxIdleWorktreesToReap	3; .slice(0,Inn) of oldest worktrees in worktree-pool reaping
+Irt	tokenExpirySkewMs	12e4 (2 min); subtracted from expiresAt as refresh skew (cluster-2860/zod-schema-methods)
+Itt	mcpIncidentsFileName	'builtin-mcp-incidents.json'; path.join(userData, Itt) (oauth-org, vm-spawn)
+Iu	padZero	left-pads numeric string with '0' to width; date-format helper
+LCi	dateFormatTokens	map of D/DD/MMM/YYYY/hh/ZZ... date-format token formatters
+Iy	docsBaseUrl	'https://code.claude.com/docs/en'; base for docLink URLs (mcp-sdk-completable)
+J$	inferenceCredentialKind	A.inferenceCredentialKind ?? LD(A); resolves credential kind
+J$r	remoteSetupErrorMessages	list of 'failed to deploy/decompress claude cli...' remote-setup error strings
+J0t	isLoopbackIpv4	checks 127.x.x.x dotted-quad in valid 0-255 range
+J2r	threeMinutesMs	18e4 (3 min in ms); duration constant
+J3e	mysqlIntegrationName	'Mysql'; integration name, MySQLInstrumentation (cluster-2875)
+J3r	apiPathPrefixes	['/api/','/edge-api/','/v1/','/v2/','/mcp-registry/','/sandbox/']; matched startsWith (zod-checks-net)
+J4i	zodReadonlyToJsonSchema	sets t.readOnly=true and refs innerType; zod readonly→json-schema converter
+J4r	githubPullRequestUrlPattern	/https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/g
+J5r	hostPortPattern	/^[\d.]+(:\d+)?$/; numeric host with optional :port
+J6A	heartbeatIntervalMs	3e4; setTimeout interval, '[Heartbeat] Starting (interval=${J6A}ms...' (wake-scheduler)
+J7e	microsoft365Options	['microsoft365']; enum options list (enterprise-deployment-config)
+J7r	teachNextIpcChannel	'cu-teach:next'; ipcMain.handle channel (image-handling teach)
+J8t	sentrySampleRandAttr	'sentry.sample_rand'; baggage attr key (zod-xid)
+JBA	claudePreviewToolName	'Claude Preview'; launch-tool flag / serverName (local-session-manager)
+JBr	executableFileExtensions	['.bat','.exe','.msi','.sh','.dmg',...]; risky executable extensions list
+JDi	emailAddressPattern	/[\w.+-]{1,64}@.../g; email extraction regex
+JFr	httpSchemePattern	/https?:/
+JH	genAiPromptToolsAttr	'ai.prompt.tools'; mapped to 'gen_ai.request.available_tools' span attr (zod-checks-net)
+JHA	httpStatusCodes	map of status names→codes (Ok:200, NotFound:404, ...)
+JHi	dxtMaxTotalSizeMb	2048; * 1024*1024 default DXT max total bytes (config-settings)
+JHt	envelopeItemDataCategory	maps sentry envelope item types→data categories
+JIA	fastifyIntegrationName	'Fastify'; integration name, ${JIA}.v3/.v5 (cluster-2875/fastify)
+JIr	dispatchCuGrantTtlMs	1800*1e3 (30 min); $r(KY,'dispatchCuGrantTtlMs',JIr,...) ttl (zod-checks-string)
+JOt	maxBaggageEntries	180; .slice(0,JOt) baggage entries cap (W3C baggage injector)
+JPA	searchSessionTranscriptsTool	'search_session_transcripts'; tool name string
+JQr	helperProcessNamePatterns	[/Helper/,/Agent/,/Service/,/Updater/,/^\./]; process-name match patterns
+JUr	randomString	generates random string of length A from alphabet via randomFillSync
+JVe	sentryIsolationScopeKey	'_sentryIsolationScope'; weak-ref scope property key (sentry-tracing-context)
+JXe	custom3pSetupDispatcher	IPC dispatcher for 'Custom3pSetup' interface (exportConfig/probeMcpServer/createConfig/...)
+JXi	maxSafeInteger	9007199254740991; Number.MAX_SAFE_INTEGER default bound (cluster-2864 length check)
+JZi	regexEscapePattern	/[\\^$.*+?()[\]{}|]/g; chars to escape in regex
+JZt	notSlashCharClass	'[^/]'; glob char class, base for KZt (cluster-2875)
+JaA	accessTierRank	{read:0,click:1,full:2}; tier ordering for min/compare (zod-checks-email)
+Jdt	currentRef	{current:null}; mutable current-value holder
+Jee	pathTrieNode	trie node class with hooks[] and children Map (used by sYt)
+Jet	wildcardToken	'*'; wildcard op marker in path/comparator matching (cluster-2863/zod-checks-int)
+Jgr	featureModuleKeys	['autoMode','deepLink','voice','assistant','briefView']; filtered by buildGate (config-settings)
+Jit	tenSecondsMs	1e4; duration constant
+Jji	jsonSchemaDraft07Url	'http://json-schema.org/draft-07/schema#'
+Jkt	filesApiBetaHeader	'files-api-2025-04-14'; anthropic-beta header value (zod-checks-base64)
+Joe	prismaInstrumentationGlobal	'PRISMA_INSTRUMENTATION'; global key set/deleted (cluster-2876)
+JsA	zodTypeToJsonSchemaType	{ZodString:'string',ZodNumber:'number',...}; zod→json-schema primitive map
+Jtn	tenThousand	1e4; numeric constant
+Jwi	stringifyArguments	JSON.stringify(arguments)
+Jxe	jwtRefreshRetryDelayMs	6e4 (60s); 'retrying in ${Jxe/1e3}s' JWT refresh retry (chrome-extension-bridge)
+Jyr	authErrorMessages	['authentication_error','oauth token has expired',...]; matched via includes (zod-checks-email)
+JzA	ccdSessionServerName	'ccd_session'; MCP serverName (anthropic-sdk-headers/zod-checks-date)
+K$A	normalizeFlagAliases	rewrites keys via oYi alias map; sets chmod default
+K$r	platformUnsupportedErrors	['claude cli not available for platform',...]; error strings
+K1r	ntstatusStackBufferOverrunExit	3221226505 (0xC0000409); cli_fastfail exitCode compared in cluster-2861
+K3r	assetExtensionPattern	/\.(m?[jt]sx?|css|map)$/; asset/source file extension regex
+K3t	nodeSystemErrorIntegrationName	'NodeSystemError'; sentry integration name (V3t)
+K5r	bracketOrColonPattern	/^\[|:.*:/; matches leading bracket or wrapping colons
+K6A	heartbeatTimeoutMs	15e3; 'Heartbeat ping timed out' setTimeout (wake-scheduler)
+K7r	teachExitIpcChannel	'cu-teach:exit'; ipcMain.handle channel (image-handling teach)
+K8t	sentrySampleRateAttr	'sentry.sample_rate'; baggage attr key (zod-xid)
+KAr	noop	() => {}; empty function
+KBA	mcpRegistryServerName	'mcp-registry'; MCP serverName (anthropic-sdk-headers)
+KBr	nonAsciiWhitespacePattern	/[  - ...]/; non-ASCII whitespace; 'Filename contains non-ASCII whitespace' (zod-checks-net)
+KC	orgProvisionedSentinel	'org-provisioned'; plugin version sentinel comparison (org-plugins)
+KEA	custom3pScheme	'app'; protocol scheme, CUSTOM_3P_SCHEME / `${KEA}://localhost` (tar-2/form-fill/enterprise-config)
+KHe	maxFileSizeBytes	20*1024*1024 (20MB); size cap, o.size > KHe returns null (zod-checks-net)
+KOt	maxBaggageEntryLength	4096; per-entry length filter in baggage injector
+KPA	archiveSessionTool	'archive_session'; tool name string
+KPt	caretGroupPattern	'(?:\\^)'; caret regex fragment, base for qPt (cluster-2875)
+KQA	baggageHeaderName	'baggage'; W3C baggage carrier key in inject/extract/fields
+KWr	maxAccumulatedBytes	256*1024 (256KB); u < KWr accumulation cap (cluster-2860)
+KXe	claudeAiImportDispatcher	IPC dispatcher for 'ClaudeAiImport' interface (isAvailable/getAuthState/startAuth/runImport)
+KXi	nonNegativeIntegerPattern	/^(?:0|[1-9]\d*)$/; array-index validation regex (cluster-2864)
+KY	flagNamespaceId	'1291166712'; first arg to $r(KY,key,default,...) flag-namespace id (zod-checks-string)
+KZi	hostConstructorTagPattern	/^\[object .+?Constructor\]$/; lodash isNative tag regex (zod-to-json-schema-3)
+Kar	ajvSchemaValidatorFactory	wraps Ajv compile/getSchema into {valid,data,errorMessage} validator
+KbA	marketplaceMigrationDoneKey	'remote_marketplace_migration_done_v1'; migration sentinel store key (zod-checks-guid)
+Kct	assertFileGlobalDefined	throws if global File undefined (file uploads require Node 20)
+Kd	localSessionIdPrefix	'local_'; session-id prefix added/stripped (local-session-manager)
+KgA	framebufferServerName	'Framebuffer'; MCP serverName (zod-checks-date/session-manager)
+Kit	maxTimestampSamples	8; ring-buffer cap, .length > Kit && .shift() (cluster-2863/2864)
+Kji	jsonSchemaDraft07Url2	'http://json-schema.org/draft-07/schema#' (duplicate of Jji)
+Kkt	oauthBetaHeader	'oauth-2025-04-20'; anthropic-beta header value (zod-checks-base64)
+Kli	codeRoutePaths	['/code/onboarding','/code/enroll',...]; /code/* route path list
+Kme	maxOauthProviders	10; 'oauth may declare at most ${Kme} providers' (cluster-2861)
+Kmr	humanPromptString	'\n\nHuman:'; Xl.HUMAN_PROMPT prompt prefix (mcp-sdk-completable-2)
+Ko	mapIfString	(fn)=>(e)=> typeof e=='string'?fn(e):e; applies fn only to strings
+Kqt	genAiPipelineNameAttr	'gen_ai.pipeline.name'; span.setAttribute (zod-checks-int)
+KsA	mcpNodeHostProcessName	'Claude Desktop MCP Node Host'; Utility process .name matched (main-window-actions)
+Ktn	one	1; min interval clamp, VlA(interval,Ktn,...) (zod-checks-int)
+KxA	claudeCodePolicyRegistryKey	'HKLM\\SOFTWARE\\Policies\\ClaudeCode'; Windows registry policy path (zod-checks-date)
+Kyr	authFailureMessagePattern	/401|unauthorized|authentication|revoked/i
+L1t	mcpLoggingLevelAttr	'mcp.logging.level'; span attr key (zod-checks-guid)
+b4A	userDataDirName	basename of app userData path
+L4A	userDataLocationKind	returns 'local'|'roaming' by comparing userData to LOCALAPPDATA/APPDATA
+L4i	zodUnionToJsonSchema	maps zod union options to oneOf/anyOf
+L4r	lruEvictionMargin	2; t - L4r eviction margin in cli-governor
+L7r	circleArrowIconPath	SVG path 'M236,128a108,108,0,...'; loading/spinner circle-arrow glyph
+L8	auditChainGenesisHash	'audit-chain-genesis'; default/genesis HMAC chain value (audit-log-hmac-signer)
+L8r	sideChatSystemPrompt	'You are running in a side chat...' read-only fork system prompt string
+L8t	sdkTraceVersion	'2.6.1'; getMeter('@opentelemetry/sdk-trace', L8t) version arg
+LAi	tediousIntegration	returns {name:'Tedious',...} sentry integration for mssql spans
+LDi	googleIamCredentialsHost	'iamcredentials.googleapis.com' (claude-native-binding)
+vHi	appendToTarArchive	opens file, scans 512-byte tar blocks, appends entries (tar fs.append)
+LHi	addEntriesToTarPack	resolves @-prefixed file lists into tar pack, then end()
+LIt	iso8601DatePattern	leap-year-aware YYYY-MM-DD date regex fragment
+LKe	chunkBatchSize	5; loop step n.slice(o,o+LKe) batching (auto-fix-engine)
+LKt	userManagementMethods	['createUser','deleteUser','listUsers',...]; method name list (zod-checks-email)
+LPt	comparatorOperatorGroup	'((?:<|>)?=?)'; semver comparator op regex fragment (cluster-2875)
+LRe	bridgeConnectTimeoutMs	3e4; 'Bridge connect stuck after ${LRe}ms' timeout (chrome-extension-bridge-client)
+LRi	managedEnvVarPrefixes	['CLAUDE_','ANTHROPIC_','OTEL_','LD_']; env-var prefixes startsWith match (cluster-2854)
+LUr	hasIteratorSymbol	A!=null && qu(A[DdA]); checks iterator-symbol presence
+LVr	trustedCwdCacheTtlMs	5e3; F0(LVr) memo TTL for trustedCwd (git-status-service)
+LWi	keyAliasMap	{esc:'escape',del:'delete',' ':'space','\t':'tab'}; key-name aliases
+bYi	parsePaxHeader	splits PAX header text, reduces via LYi into record (tar)
+LYi	parsePaxHeaderLine	parses one 'len key=value' PAX line, typing dates/numbers (tar)
+LZi	proxyObjectTag	'[object Proxy]'; toStringTag comparison (zod-checks-base64)
+L_r	feedbackTargetKinds	['user','feedback','project','reference']; 'type: {{...}}' enum (mcp-sdk-disposable)
+Ldi	bcp47LocalePattern	/^[A-Za-z0-9]{2,8}(?:-...)*$/; 'valid BCP 47 locale identifier' (dxt-manifest-schema)
+Lei	unleashIntegration	returns {name:'Unleash'}; warns browser-only sentry integration
+Lgr	nonPrintableAsciiPattern	/[^ -~]/; non-printable ASCII test (zod-checks-base64)
+Lgt	minScreenshotBytes	1024; 'screenshot implausibly small (${} bytes)' threshold (zod-checks-string)
+LiA	systemPromptBoundaryToken	'__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'; cache-boundary marker split/replaced (path-validation/cluster-2863)
+Ljr	windowOptionsRefreshMs	500; 'o - windowOptionsFetchedAt > Ljr' refresh interval (image-handling)
+Lme	maxVmStartRetries	5; retry loop bound, 'VM service not running' (zod-checks-base64)
+Lmi	warnIfDev	console.warn when NODE_ENV !== 'production'
+Loe	loggerApiVersion	1; EXt(Loe,...) global-registration api version (opentelemetry api-logs-global)
+Lot	defaultMaxTurns	100; ?? Lot fallback for scheduledTaskMaxTurns/maxTurns (cluster-2861)
+Lpr	getWidgetContextInputSchema	json-schema {tool_name} for get-widget-context tool (zod-checks-date)
+LtA	tracestateHeaderName	'tracestate'; W3C tracestate carrier key (trace-context-propagator)
+M$r	fiveSecondsMs	5e3; duration constant
+M1t	mcpToolResultContentCountAttr	'mcp.tool.result.content_count'; span attr (cluster-2860)
+M4i	zodEnumToJsonSchema	sets t.type number/string and t.enum from zod entries
+M6r	fiveMinutesMs	5*6e4 (5 min); 'expiresAt: Date.now()+M6r' (zod-checks-e164)
+M6t	spanIdPattern	'(?![0]{16})[\\da-f]{16}'; 16-hex span-id regex fragment (cluster-2875)
+M8t	otelSpanParentOriginAttr	'otel.span.parent.origin'; span attr key (span-counter-metrics)
+MAn	configureOutboundCcrClient	(re)initializes outbound-only CCR client on flag toggle, OAuth wiring
+MB	assignNumberIfValid	A[e]=Number(t) when not NaN
+MDi	gstaticWildcardHost	'*.gstatic.com'; allowed host (enterprise-deployment-config)
+MEr	oneDayMs	864e5 (24h in ms); duration constant
+MFA	controlCharPattern	/[\r\n\0]/; 'token contains control characters' test (cluster-2860)
+MFr	callbackifyAsyncFn	wraps async fn into node-style (err,...) callback form
+MGt	trustedDeviceFeatureFlagId	'2023768496'; lt(MGt) gate for getTrustedDeviceToken/enrollTrustedDevice (main-view-window-wiring)
+MHi	streamFileToTarParser	pipes file ReadStream into tar parser with maxReadSize
+MIA	genAiAvailableToolsAttr	'gen_ai.request.available_tools'; JSON.stringify(tools) span attr (multiple vendors)
+MIr	fiftyMs	50; Ch(MIr) delay arg (zod-checks-guid)
+MNe	toolManifestServiceKey	'tool.manifest'; protocolServices key parsed JSON (zod-checks-date)
+fDe	serializeWorkerDeps	serializes function deps into worker-bootstrap source string
+UX	workerBootstrapCache	[]; cache array for compiled worker bootstrap (rnt)
+MOi	collectTransferableBuffers	collects ArrayBuffers from typed-array map for postMessage transfer
+rnt	spawnInlineWorker	builds worker source from deps and spawns via _Oi
+MPA	mcpProbeTimeoutMs	5e3; AbortSignal.timeout(MPA)/setTimeout for MCP probe (zod-checks-string)
+MSA	apiKeyOauthScope	'org:create_api_key user:profile'; OAuth scope string
+MSr	defaultWindowHeight	600; A.defaultHeight ?? MSr in buildConstructorOptions
+RSr	defaultWindowWidth	800; A.defaultWidth ?? RSr in buildConstructorOptions
+MVt	roleNameMap	{human:'user',ai:'assistant',system:'system',...}; message role normalization
+MXr	commonProjectDirNames	['code','projects','src','dev','repos','workspace','github','git']; candidate dir names (zod-xid)
+MXt	comparatorOperatorGroup2	'((?:<|>)?=?)'; semver comparator op regex fragment (cluster-2876)
+MYi	writeOctalField	writes octal-encoded numeric tar header field
+NYi	encodeOctalField	octal-string-encodes A padded to width e (tar header)
+kYi	padOctalString	left-pads octal string with '0' and trailing NUL/space (tar)
+MZi	undefinedTag	'[object Undefined]'; lodash getTag undefined branch (zod-format-error)
+M_e	tarFsEntry	class holding path/absolute/entry/stat/readdir for tar walk
+M_r	maxLineLength	500; n.slice(0,M_r) per-line truncation (zod-format-error)
+MdA	transitionalConfig	{silentJSONParsing,forcedJSONParsing,clarifyTimeoutError,...}; axios transitional flags
+dPt	proxyLogger	otel Logger proxy delegating emit to provider's delegate logger
+Mee	proxyLoggerProvider	otel LoggerProvider proxy returning proxy loggers
+S8e	langGraphIntegrationName	'LangGraph'; integration name (cluster-2876)
+Mei	langGraphIntegration	returns {name:'LangGraph',setupOnce} sentry integration
+Mft	launchJsonExample	'{ "version":"0.0.1","configurations":[...]}'; .claude/launch.json example (anthropic-sdk-headers)
+OWe	tediousIntegrationName	'Tedious'; integration name, TediousInstrumentation (cluster-2876)
+Pmr	closeUnbalancedJsonTokens	appends missing }/] to balance partial-JSON token list
+TFr	isLoopbackIpv6	checks ::1 and ::ffff: mapped loopback IPv6 forms
+Tpt	parsePartialJson	JSON.parse of repaired partial-JSON token stream (tokenize→balance→stringify)
+Twt	electronWindowManager	manages BrowserWindow registration/IPC for WindowManager interface
+V3t	nodeSystemErrorIntegration	sentry integration scrubbing node system error path/dest
+V_i	vmClient	VM service client (configure/createVM/spawn/kill/readFile/...) over IPC
+WOe	isLoopbackAddress	true if A is loopback v4/v6 or in kFr set
+WOt	w3cBaggagePropagator	inject/extract/fields for W3C 'baggage' header
+Ymr	stringifyJsonTokens	concatenates JSON token values back into a string
+_Sr	windowManagerDispatcher	IPC dispatcher for 'WindowManager' interface (RegisterWindow/UpdateWindow/WindowAction/...)
+aSr	windowPropSetters	map of window-prop name→setter (title/opacity/resizable/alwaysOnTop/...)
+aei	vercelAiIntegration	returns {name:'VercelAI',setupOnce,afterAllSetup} sentry integration
+c$A	writeGzipHeader	writes 10-byte gzip header (magic 0x1f8b08, mtime, filename)
+c9t	fastifyIntegration	returns {name:'Fastify',setupOnce,getShouldHandleError} sentry integration
+eoA	commaSeparator	','; join/split delimiter (cluster-2860/2863)
+f$A	writeZipEndOfCentralDir	writes ZIP end-of-central-directory record fields
+kwt	managedBrowserWindow	wraps Electron BrowserWindow with event forwarding + prop application
+l5t	mysqlIntegration	returns {name:'Mysql',setupOnce} sentry integration
+lUe	minWindowDimension	1; lower clamp bound for window width/height in setBounds
+name	vercelAiIntegrationName	'VercelAI'; integration name constant (exported as I1A)
+nnt	gzipCodecExports	returns [c$A,I$A,ns,IY,int]; gzip writer/length/crc export tuple
+ns	writeUint32LE	writes value into buffer little-endian, byte by byte
+oYi	resolveFlagAlias	AYi.get(A) || A; resolves option alias to canonical key
+ooA	pathSeparator	'/'; trie/path split-join separator
+sYt	hookPathTrie	trie inserting/searching hooks keyed by module-name path segments
+uc	readUint32LE	reads 32-bit little-endian unsigned int from buffer
+vRe	stripWwwAndPort	I3(A).replace(/:\d+$/,''); removes www. and trailing :port
+xmr	tokenizeJson	tokenizes JSON string into brace/paren/string/number/name tokens
+ySA	resolveInferenceProvider	jUA(inferenceProvider, credentialKind); resolves provider
+_emoji	emojiOnlyPattern	'^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$'; emoji-only regex source (exported as Iir)
+regexes	regexCache	{}; cache object for compiled regexes (exported as L3A)

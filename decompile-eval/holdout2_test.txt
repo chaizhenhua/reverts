@@ -1,0 +1,2 @@
+modules/island/ipc/main-view-window-wiring.ts
+modules/island/integration/chrome-extension.ts

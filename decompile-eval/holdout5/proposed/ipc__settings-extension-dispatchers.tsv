@@ -1,0 +1,212 @@
+$$A	splitPathRoot	loops while HYi(A) || root, peels leading '/' or t.root off path, returns [root, rest]
+$$r	jsonRpcServerNotInitializedCode	const = -32002, JSON-RPC reserved server error code constant
+$0	extensionsDispatcher	getDispatcher/for/setImplementation idiom over '$_claude.settings_$_Extensions_$_' IPC channels
+$1	coworkThirdPartyDocsUrl	const = 'https://claude.com/docs/cowork/3p'
+$1r	missingFileOrDirErrorPattern	/no such file|not a directory|cannot find the (?:file|path) specified/i
+$2r	dotEnvPrefixList	['.env.']
+$3r	awsCredentialsErrorPattern	/UnrecognizedClient|InvalidSignature|ExpiredToken|...|InvalidClientTokenId/i
+$4A	lowerAlnumDashSegmentPattern	/^[a-z0-9]+(-[a-z0-9]+)*$/
+$4r	tenMinuteMs	600*1e3; used as default timeout fallback in zod-format-error
+$5r	noRefreshTokenWarning	const string warning about identity provider not issuing a refresh token
+$5t	redisIntegration	returns { name: 'Redis', setupOnce(){...} } Sentry-style integration factory
+$6	netFetch	(A,e) => sA.net.fetch(A,e)
+$9e	extendJsonSchemaDefs	A => ZoA = y_(ZoA, A), folds into shared zod-to-json-schema defs accumulator
+$9i	uriSchemePattern	/^[a-z][a-z0-9+.-]*:/i
+$AA	indexHtmlFileName	const = 'index.html'
+$CA	windowsReservedPathChars	['|','<','>','?',':']
+$Cr	tlsMitmErrorMessages	['Cannot read TLS response from mitm\'d server', ...]
+$Di	hourMinuteSecondPattern	/^\d{1,2}:\d{2}:\d{2}$/
+$JA	sentryExclusiveTimeAttr	const = 'sentry.exclusive_time'
+$Jr	twentySixThousand	const = 26e3, magnitude only (no usage in file)
+$Qr	allowedDisplayNamePattern	/^[\p{L}\p{N}_ .&'()+-]+$/u
+$Ri	connectedTabHtml	const HTML doctype page saying 'Connected. You can close this tab.'
+$Sr	mcpToolNamePattern	/^mcp__(.+?)__(.+)$/ matching mcp__server__tool
+$U	settingsLabel	const = 'Settings'
+$V	emptyObjectV	{}
+$Xe	claudeDesktopConfigFileName	const = 'claude_desktop_config.json'
+$Zt	makeMinimatchTester	(A,e) => (t) => VE(t, A, e), curried minimatch matcher
+$_e	thirtyTwo	const = 32, magnitude only
+$_r	wwwUrlPattern	/www\.[^\s<>"'`]+/g
+$aA	oauth20250420Version	const = 'oauth-2025-04-20'
+$dt	stageTempFilePattern	/^\.stage-[a-z0-9]...(\.tmp\.\d+)?$/
+$iA	five	const = 5, magnitude only
+$in	fifteenSecondMs	const = 15e3, magnitude only
+$ji	objectBooleanTypeList	['object','boolean']
+$jt	osPlatformDisplayNames	{ aix:'IBM AIX', freebsd:'FreeBSD', win32:'Windows', ... }
+$k	screenshotCoordinatesInstruction	const string instructing not to scale framebuffer_screenshot coordinates
+$lt	fiveHundred	const = 500, magnitude only
+$m	pathHasSegmentPrefix	(A,e) => A === e || A.startsWith(`${e}/`)
+$me	fifty	const = 50, magnitude only
+$mr	oneKilobyte	const = 1024
+$oA	quickEntryDispatcher	getDispatcher/for idiom over '$_claude.web_$_QuickEntry_$_' IPC channels
+$qt	genAiInvokeAgentAttr	const = 'gen_ai.invoke_agent'
+$rA	githubHost	const = 'github.com'
+$re	joinEmpty	(A) => A.join('')
+$we	zodSafeParseResult	wraps validation status into { success, data } or lazy { success:false, error }
+$xt	objectNullTag	const = '[object Null]'
+$y	anthropicApiHost	const = 'api.anthropic.com'
+$yi	lowerAlnumPattern	/^[0-9a-z]+$/
+A0i	staticUuidA47e	const uuid literal 'a47e2c1f-5b4a-4c7e-9d8f-3e6a1b2c4d5e'
+A0r	oneDayMs	1440*60*1e3; compared as freshness window in mcp-sdk-disposable
+A1i	emojiSequencePattern	'^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$'
+A3A	getStainlessRuntimeEnv	() => zNe ?? (zNe = e5i()), memoized runtime-env detection
+A4r	fourThousand	const = 4e3, magnitude only
+A7i	objectFunctionTag	const = '[object Function]'
+A7r	fiveSecondMs	5e3; used as setTimeout delay in zod-checks-email
+A8e	clientPortAttr	const = 'client.port'
+A9t	nodeVersionRange	const = '>=4.0.0 <6' semver range string
+ADi	emailAddressPattern	email-validation regex /^(?!\.)...@...[A-Z]{2,}$/i
+AG	dockerStyleAdjectiveList	['admiring','adoring',...,'zen'] adjective wordlist
+AGA	braceCharClassChars	'[_0-9a-z-*/]' character-class string
+AGt	eightThousand	const = 8e3, magnitude only
+AHe	executiveSummaryPrompt	const string prompt for one-shot executive summary of conversation
+AJA	twoThousand	const = 2e3, magnitude only
+AKr	fourThousandAKr	const = 4e3, magnitude only
+AKt	linkedErrorsIntegration	returns { name:'LinkedErrors', preprocessEvent(){...} } Sentry integration factory
+AQi	cuidPattern	/^c[^\s-]{8,}$/i cuid validation regex
+ARe	ten	const = 10, magnitude only
+ARi	twoThousandARi	const = 2e3, magnitude only
+AWe	instrumentRedisCacheSpan	sets redis cache.* attributes on span ('auto.db.otel.redis')
+AYA	coerceToError	(A) => returns A if Error else builds Error from object/string
+AYe	tenThousand	const = 1e4, magnitude only
+AYt	InstrumentationBase	class with instrumentationName/Version, _wrap/_unwrap/_massWrap, OTel instrumentation base
+AZA	skillsLabel	const = 'skills'
+AZt	escapedOpenBracePattern	/\\{/g
+Aa	readEnvVar	(A) => reads process.env[A] or Deno env, trimmed
+Aar	normalizeJsonSchemaOptions	(A) => merges A (or {name:A}) over hTe defaults
+Aei	amqplibHooks	{ consumeEndHook, publishHook } setting 'auto.amqplib.otel.*'
+AgA	twoHundred	const = 200, magnitude only
+Agr	McpServerTasksExperimental	class wrapping _mcpServer, registerToolTask with taskSupport
+Ahr	twoFiftySix	const = 256; used as a Set size cap in zod-checks-string
+Ain	oauthScopeList	['openid','profile','email','offline_access']
+Aje	sixteen	const = 16, magnitude only
+Aji	jsonPointerDataSchema	{ $data: { type:'string', anyOf:[relative-json-pointer, json-pointer] } }
+flags	computerUseGrantFlags	{ clipboardRead:false, clipboardWrite:false, systemKeyCombos:false }
+tool_name	workflowToolName	const = 'Workflow'
+WvA	reviewFirstWorkflowMessage	const = 'Review the first dynamic workflow before auto-approving.'
+Z8r	workflowPolicyUnresolvedMessage	const string about workflow approval policy not resolvable
+PeA	orgRequiresWorkflowApprovalMessage	const = 'Your organization requires approval for each dynamic workflow.'
+matcher	fileEditToolsMatcher	const = 'Edit|Write|MultiEdit|NotebookEdit'
+njr	userRejectedToolPrefix	const string prefix for tool-use rejection with user message
+EF	ToolPermissionBroker	class managing pendingPermissions Map, handleToolPermission, PreToolUse hooks
+EZt	escapeRegexLiteral	(A) => A.replace(/[-[\]{}()*+?.,\\^$|#\s]/g,'\\$&')
+Fct	resolveActiveAnthropicProfile	async reads active_config / ANTHROPIC_PROFILE, defaults 'default'
+I3t	contextLinesIntegration	returns { name:'ContextLines', processEvent(){...} } Sentry integration factory
+IHt	cacheItemSizeAttr	const = 'cache.item_size'
+IZt	posixCharClassMap	{ '[:alnum:]':[...], '[:digit:]':[...], ... } POSIX class → unicode-prop map
+KIA	redisIntegrationName	const = 'Redis'
+KoA	mainWindowTitleBarDispatcher	getDispatcher/for idiom over '$_claude.internal.ui_$_MainWindowTitleBar_$_' channels
+LJA	unwrapPatchedMethod	(A,e) => calls A[e].__unwrap(), shimmer-style unwrap helper
+O5e	tryUrlPathname	(A) => new URL(A).pathname or undefined on throw
+Q5i	loadAnthropicProfileConfig	async reads <dir>/configs/<profile>.json or builds from ANTHROPIC_* env
+QGA	commaSeparator	const = ','
+VE	minimatchMatch	(A,e,t) => new HIA(e,t).match(A) with '#' comment guard, minimatch entry
+Vq	emptyCompletionResult	{ completion: { values:[], hasMore:false } }
+XJt	linkedErrorsName	const = 'LinkedErrors'
+XPt	massUnwrapMethods	(A,e) => unwrap each method on each module, shimmer massUnwrap
+Xjt	seven	const = 7, magnitude only (default frameContextLines)
+Z3e	redisCacheReadCommands	['get','mget']
+ZJt	five	const = 5, magnitude only (default LinkedErrors limit)
+c$t	oneEightyBaggageItemLimit	const = 180; baggage item count limit in B$t.inject
+cHt	cacheHitAttr	const = 'cache.hit'
+cx	isValidParseStatus	(A) => A.status === 'valid'
+dKt	dedupeIntegration	returns { name:'Dedupe', processEvent(){...} } Sentry integration factory
+dYi	encodeUnsignedBigEndian	(A,e) => writes A into byte buffer e big-endian with 0x80 leading byte
+ear	buildJsonSchemaRefContext	(A) => seeds currentPath/seen Map from normalized options for zod-to-json-schema
+egr	McpServerCore	class with _registeredTools/Resources/Prompts, setToolRequestHandlers, tool/prompt/resource
+f5i	resolveAnthropicCredentialsPath	async returns <dir>/credentials/<profile>.json
+fBA	desktopFeatureGates	{ autoMode, deepLink, voice, assistant, briefView } buildGate/shape descriptors
+fOA	lchownSyncIgnoreMissing	(A,e,t) => zA.lchownSync swallowing ENOENT
+ffA	baggageHeaderName	const = 'baggage'
+h5i	isNodeOrDenoRuntime	() => X-Stainless-Runtime is 'node' or 'deno'
+hTe	jsonSchemaDefaultOptions	{ $refStrategy:'root', target:'jsonSchema7', ... } zod-to-json-schema defaults
+hVe	NoopLogger	class { emit(){} } no-op logger
+i9	sentryErrorLocalVarsKey	const = '__SENTRY_ERROR_LOCAL_VARIABLES__'
+j9i	hasUriScheme	(A) => $9i.test(A)
+l$t	fourKilobyteBaggageValueLimit	const = 4096; baggage value byte limit in B$t.inject
+lHt	cacheKeyAttr	const = 'cache.key'
+lUA	classifyUrlSection	(A) => maps URL pathname to 'code'/'cowork'/'chat'/'other'
+name	contextLinesName	const = 'ContextLines'
+r2	escapeBracketExprChar	(A) => A.replace(/[[\]\\-]/g,'\\$&')
+r3A	resolveAnthropicConfigDir	async returns ANTHROPIC_CONFIG_DIR or platform config dir for 'anthropic'
+tgr	emptyObjectJsonSchema	{ type:'object', properties:{} }
+u3t	localVariablesAsyncIntegration	returns { name:'LocalVariablesAsync', setup, processEvent } Sentry integration factory
+y_e	encodeWindowsReservedChars	(A) => replaces each $CA char via JYi map
+zJt	causeKey	const = 'cause'
+locales	localesMap	{} locale registry object
+uppercase	allNonLowerPattern	/^[^a-z]*$/ tests string has no lowercase
+getParsedType	getParsedType	(A) => returns zod parsed-type string ('string'/'number'/'array'/'null'/...)
+uuid	uuidPatternFor	(A) => RegExp for version-A UUID or general UUID pattern
+Ami	numberFormatTokenPattern	/(\*)(0+)|(#+)(0+)|(0+)/g number-format token regex
+An	gitSyncErrorCodes	{ DNS_FAILURE, PROXY_BLOCKED, AUTH_FAILED, REPO_NOT_FOUND, ... } error-code enum
+Apt	pluginsLabel	const = 'plugins'
+Atr	userInferenceScope	const = 'user:inference'
+Att	thirtySecondMs	30000; used as AbortSignal.timeout(...) delay across modules
+Ave	settingsScopeNames	{ userSettings:'user', projectSettings:'project', ..., policySettings:'managed' }
+Axr	three	const = 3, magnitude only
+B$t	BaggagePropagator	class with inject/extract/fields over 'baggage' header
+B1i	allNonLowerPatternB1i	/^[^a-z]*$/ no-lowercase test
+B2i	sixtyFourKilobytes	const = 64*1024
+B4t	aiModelProviderAttr	const = 'ai.model.provider'
+B7i	objectUint8ClampedArrayTag	const = '[object Uint8ClampedArray]'
+B8e	aiToolCallNameAttr	const = 'ai.toolCall.name'
+B8t	version261	const = '2.6.1'
+B9i	lodashHashUndefinedToken	const = '__lodash_hash_undefined__'
+BAA	emptyObjectBAA	{}
+BEi	coreSchemaMetaSchemaTitle	const = 'Core schema meta-schema'
+BEr	thirtyTwoBEr	const = 32, magnitude only
+BFA	tenBFA	const = 10, magnitude only
+BGe	fiftyMegabytes	const = 50*1024*1024; compared as byte-size threshold in cluster-2861
+BJe	fiveSecondMsBJe	5e3; used as AbortSignal.timeout in config-settings
+BJr	deviceStageFilesName	const = 'device_stage_files'
+BKe	thirty	const = 30, magnitude only
+BKr	twentySecondMs	20000; used as setTimeout delay in ccr-worker-client
+BKt	dedupeName	const = 'Dedupe'
+BLt	claudePolicyRegistryKey	const = 'SOFTWARE\\Policies\\Claude' Windows registry path
+BPt	NoopLoggerProvider	class { getLogger() { return new hVe(); } }
+BQr	skillsFetcherLogTag	const = '[SkillsFetcher]'
+BRi	reservedIpv4Ranges	[['10.0.0.0',8,'Private-Use (RFC 1918)'], ...] reserved CIDR table
+BUi	deviceCodeGrantType	const = 'urn:ietf:params:oauth:grant-type:device_code'
+BV	langchainAiSpanOrigin	const = 'auto.ai.langchain'
+BVt	googleGenaiName	const = 'google_genai'
+BX	helperScriptIntlMessage	{ defaultMessage:'Helper script', id:'DnXPcFgmqb' }
+BYi	encodeSafeIntegerBytes	(A,e) => big-endian encode of a safe-integer with sign branch
+B_i	staticUuid89355	const uuid literal '89355bc3-cbfd-4382-905b-976645cad410'
+BfA	genAiInputTokensAttr	const = 'gen_ai.usage.input_tokens'
+Bfe	versionZeroPointOne	const = '0.1'
+Bgi	coworkMemoryDispatcher	getDispatcher/for idiom over '$_claude.web_$_CoworkMemory_$_' channels
+Bgt	inheritLabel	const = 'inherit'
+Bnn	oneMinuteMs	60*1e3; used as setInterval sweep period in auto-fix-engine
+Bot	chownRecursiveSync	(A,e,t) => recursively chown dir entries via CHi/fOA
+Bpt	tryJsonParse	(A) => JSON.parse(A) or undefined on throw
+BqA	disposeAtExit	() => $tA?.() optional-call disposer
+BrA	emptyArrayBrA	[]
+Bre	thirtyTwoBre	const = 32, magnitude only
+Btn	staticTokenQ6L2	const = 'Q6L2SF6YDW'
+Btt	fifteen	const = 15; used as total-failure count cap in budget messages
+BxA	logLevelOrdinals	{ verbose:0, debug:1, info:2, warn:3, error:4 }
+Bxt	processRuntimeNameAttr	const = 'process.runtime.name'
+Bzr	oneMinuteMsBzr	60000; used as default ttlMs in intent-warmer
+C3t	localVariablesWorkerBase64	const base64 of @sentry/node-core LocalVariables worker script
+C4t	aiResponseToolCallsAttr	const = 'ai.response.toolCalls'
+C6e	Mutex	class with runExclusive/_acquire/_release, semaphore mutex
+C6r	updateTitleBarVia	(A,e) => dispatchUpdateTitleBar on the title-bar dispatcher for window A
+C7i	objectInt32ArrayTag	const = '[object Int32Array]'
+C8e	twentyThousandC8e	const = 2e4; passed as size arg in net/cluster checks
+CAr	backslashEscapePattern	/\\(\\)?/g
+CDr	fifteenMinuteMs	900*1e3; used as default idleTimeoutMs in warm-lifecycle-manager
+CEi	jsonSchemaDraft07Uri	const = 'http://json-schema.org/draft-07/schema#'
+CIr	cpuTypeX86_64Magic	16777223 (0x1000007); Mach-O CPU type, paired with arm64 variant uIr
+CKi	thirtySecondMsCKi	30000; used as setTimeout in chrome-extension-bridge-client
+CLe	manifestJsonFileName	const = 'manifest.json'
+CMi	windowsReservedDeviceNamePattern	/^(con|prn|aux|nul|com[0-9...]|lpt[0-9...])(\.|$)/i
+CQi	base64UrlPattern	/^([0-9a-zA-Z-_]{4})*...?$/ base64url validation regex
+CRe	driveFsPerAccountRegistryKey	const = 'Software\\Google\\DriveFS\\PerAccount'
+CTA	sevenDayMs	10080*60*1e3 (one week); used as time-window in mcp-sdk-completable
+CUi	threeHundred	const = 300; used as a seconds value (*1e3) in zod-checks-int
+CUr	defineMethodsOnTarget	(A,e,t,{allOwnKeys}) => defines e's props on A, optionally binding fns to t
+CWe	alnumDashCharClass	const = '[a-zA-Z0-9-]'
+CWi	immersiveControlPanelPrefixList	['windows.immersivecontrolpanel_']
+CZt	parseBraceExpression	(A,e) => parses POSIX [...] brace expression into regex fragment
+CfA	fiveSecondMsCfA	const = 5e3, magnitude only
+CHi	chownEntryRecursive	(A,e,t,i) => recurse into dir entry then lchown it

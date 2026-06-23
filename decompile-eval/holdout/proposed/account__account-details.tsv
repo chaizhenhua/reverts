@@ -1,0 +1,233 @@
+JSONSchema	jsonSchemaNamespace	var JSONSchema = {} empty json-schema namespace placeholder, exported as snr
+sdt	screenshotFilterConfig	object { screenshotFiltering: 'mask', platform: 'win32' }
+set	mapStringDeep	maps a fn over string|string[] recursively
+sgi	accountBridge	IPC bridge for interface "Account" / setAccountDetails channel
+slA	defaultTimeoutMs2000	const number 2000 (2e3)
+sne	anonymousName	string 'anonymous'
+snn	oneHourMs	3600 * 1e3 (one hour in ms)
+soA	emptyOptionsObject	empty object literal default config
+srA	launchPreviewPartition	string 'persist:launch-preview-static'
+sri	ipv4Regex	IPv4 address regex
+sst	manifestJsonFile	string 'manifest.json'
+str	credentialsSuffix	string '-credentials'
+sv	coworkArtifactKind	string 'cowork-artifact'
+sxA	toError	coerces value to Error instance ([object Error] handling)
+sxr	defaultDelayMs500	const number 500
+szA	slugRegex	/^[a-z0-9_-]+$/ slug pattern
+t0i	uuidRegex	UUID v1-8 regex
+t2r	thirtySecondMs	number 3e4
+t3A	thirtyCount	number 30
+t3t	tenThousandMs	number 1e4
+t4	skillsDirName	string 'skills'
+name	firebaseName	string 'Firebase' integration name
+zei	firebaseIntegration	returns { name: 'Firebase', setupOnce }
+t6r	oauthVersionHeader	string 'oauth-2025-04-20'
+t7i	numberTag	'[object Number]'
+tBt	apiVersionDate	string '2025-11-25' anthropic-version date
+tDe	twoThousandMs	number 2e3
+tDi	ipv4RegexDup	IPv4 address regex
+tDr	tokenNameRegex	/^[A-Za-z0-9._-]{1,128}$/
+tFr	nonPrintableCharRegex	matches non-printable/control chars
+tGe	dismissTaskTool	string 'dismiss_task' tool name
+tKe	planTypeLabels	maps seven_day_* keys to product labels (Opus, Sonnet, Claude Code)
+tPe	hundredMegabytes	100 * 1024 * 1024
+tQi	ulidRegex	/^[0-9A-HJKMNP-TV-Z]{26}$/i ULID pattern
+tRr	fiveThousandMs	number 5e3
+tVr	twentyCount	number 20
+tWi	fiveMinuteMs	5 * 6e4 (five minutes)
+tWr	thirtySecondMsDup	number 3e4
+tXi	humanTurnMarker	'\n\nHuman:' prompt injection marker
+tYe	thirtySecondMs2	number 3e4
+tZt	escapedCommaRegex	/\,/g
+thi	languageTagRegex	BCP-47-like language tag regex
+tmr	uploadSizeBuckets	[512KB, 2MB, 5MB] byte thresholds
+tmt	boldMarkerRegex	/\[1m\]/i ansi bold marker
+tne	fastifyHookNames	Fastify lifecycle hook names (onRequest, preHandler...)
+tpt	devDebugLabel	string 'dev-debug'
+trt	oauthServerMetadataPath	'.well-known/oauth-authorization-server'
+tsA	threeCount	number 3
+txe	pipeStreamEnd	attaches end/error handlers and returns stream
+u1i	noUppercaseRegex	/^[^A-Z]*$/
+u2A	fifteenSecondMs	number 15e3
+u2i	thirtySecondMs3	number 3e4
+u4t	promptMessagesAttr	'ai.prompt.messages' telemetry attribute
+u7i	uint8ArrayTag	'[object Uint8Array]'
+u8	imageTokenSizing	{ pxPerToken, maxTargetPx, maxTargetTokens } image token config
+uDr	fiveThousandMs2	number 5e3
+uEi	jsonSchemaDraft07Uri	'http://json-schema.org/draft-07/schema#'
+uIr	maxMessageBytes	16777228 byte limit
+uJr	deviceListDirKey	string 'device_list_dir'
+uKe	fiveMinuteMs2	5 * 6e4
+uLe	tenMinuteMs	6e5
+uLi	zodDateToJsonSchema	zod date -> { type:'integer', format:'unix-time' } json schema
+uUi	sixtyFourKilobytes	64 * 1024
+uV	cachedInputTokensAttr	'gen_ai.usage.input_tokens.cached'
+uWe	numericIdentifierPattern	'0|[1-9]\\d*' semver numeric identifier
+uXA	fiveCount	number 5
+u_i	desktopCallbackUrl	'https://claude.ai/desktop/callback'
+ua	remoteMarketplaceMigrationTag	'[remoteMarketplaceMigration]' log tag
+uen	diagnosticBundleSections	array of diagnostic report sections (system-info, logs, crash)
+uet	vmPipeClosedErrorCode	'ERR_VM_PIPE_CLOSED'
+ufA	inferenceEndpointKinds	{ CHAT, RESPONSES, EMBEDDINGS }
+ugi	coworkUserFilesBridge	IPC bridge for interface "CoworkUserFiles"
+ugr	emptyArray	const [] empty array
+ume	hashWithSalt	hashes _Si salt + serialized input
+utt	threeMinuteMs	3 * 6e4
+uu	frontmostAppAllowlistError	error message about frontmost app allowlist
+uve	codenameWords	scientist codename word list (albattani, turing...)
+ux	sessionStaleReloginCode	'session_stale_relogin'
+uxe	runtimeSourceModes	['bundled', 'system']
+v0	remoteOrgPluginsTag	'[custom-3p:remote-org-plugins]' log tag
+v1t	mcpPromptResultAttr	'mcp.prompt.result.message_content'
+v3i	undefinedValue	const undefined
+v4A	telemetryScrubPrefix	'desktop-telemetry-scrub-v1:'
+v4i	zodArrayToJsonSchema	zod array -> json schema with minItems/maxItems
+v7e	isoDatePattern	ISO date regex string (leap-year aware)
+vAn	mainProcessDebuggerMenuItem	menu item 'Enable Main Process Debugger' checkbox
+vDi	googleAccountsHost	'accounts.google.com'
+vFr	defaultPortsByProtocol	{ http:80, https:443, ws:80, wss:443, ftp:21 }
+vMi	tenThousandMs2	number 1e4
+vRi	hostnameRegex	dns hostname label regex
+vSi	hexColorRegex	/^#[0-9A-Fa-f]{6}$/
+vUe	memoryDirPlaceholder	'{{memoryDir}}' template placeholder
+vVr	sixtySecondMs	number 6e4
+vXi	argumentsTag	'[object Arguments]'
+vZi	functionTag	'[object Function]'
+v_i	threeHundred	number 300
+veA	fiftyMegabytes	50 * 1024 * 1024
+ven	buildViewMenu	builds 'View' menu (Reload, Back, Forward, Zoom)
+vf	sourceNameSchema	{ name: { type:'string', description:'Source name.' } }
+vfA	baggageHeaderName	string 'baggage'
+vkt	sensitiveDotfiles	list of sensitive dotfiles (.gitconfig, .env, .netrc)
+vxt	commaOrEqualsRegex	/,|=/
+w1r	threeCount2	number 3
+w1t	mcpServerNameAttr	'mcp.server.name'
+w4t	toolCallArgsAttr	'ai.toolCall.args'
+w6t	commaOrEqualsRegexDup	/,|=/
+w8e	chatsCreateAttr	'chats.create'
+wHi	splitParentPaths	builds accumulated parent path segments
+wIi	objectTypeName	string 'object'
+wKr	fortyFiveSecondMs	number 45e3
+wPA	doubleDashFlag	string '--'
+wQr	claudePluginDir	'.claude-plugin'
+wRe	authHeaderNames	['authorization', 'proxy-authorization']
+wSA	tabEnabledPredicates	feature-flag predicates for cowork/code/chat tabs
+wTe	zodUnionToJsonSchema	zod union -> { anyOf } json schema
+wWi	mediaAppNames	streaming/media app name list (netflix, spotify...)
+wXA	byocVersionHeader	'ccr-byoc-2025-07-29'
+wZA	cdnLibraries	CDN script URLs+SRI for Chart.js, Grid.js, Mermaid
+wZe	autoUpdaterBridge	IPC bridge for interface "AutoUpdater"
+wft	haloAttachEvent	string 'halo_attach'
+wgi	orbitDeploysBridge	IPC bridge for interface "OrbitDeploys"
+wlA	twoThousandMs2	number 2e3
+wrn	dedupResetter	{ resetDedup } clears SU dedup state
+wst	fiveMinuteMs3	300 * 1e3
+wur	coworkSystemPrompt	embedded Cowork mode system prompt string
+wxe	sixtyKilobytes	number 61440
+x1t	mcpClientToServerAttr	'mcp.notification.client_to_server'
+x2i	fiveThousandMs3	number 5e3
+x2r	mutableBoolFlag	let boolean flag default false
+x4i	zodDefaultToJsonSchema	zod default -> json schema with default value
+x5t	redisSetCommands	['set', 'setex']
+x7e	loopbackHosts	['127.0.0.1', 'localhost']
+x8r	previewToolNames	preview/browser MCP tool name list
+xDi	pluginTelemetryKey	'claude-plugin-telemetry-v1'
+zD	hashPluginTelemetry	hashes xDi prefix + arg via tAt
+xG	launchBridge	IPC bridge for interface "Launch" (preview server)
+xGt	fiftyKilobytes	50 * 1024
+xIr	staticNumericId	string '2486083521'
+xJt	ignoredErrorPatterns	browser error messages to ignore (sentry-style denylist)
+xL	sixtySecondMs2	60 * 1e3
+xNe	computerInUseError	'Another Claude session is currently using the computer.'
+xPe	bashToolName	string 'Bash'
+xSi	chatRestrictionsLabel	{ defaultMessage:'Chat restrictions', id }
+xSr	coworkArtifactBridgeIpc	IPC bridge for interface "CoworkArtifactBridge"
+xTe	legacyToolNameAliases	maps legacy tool names to new names (Task->Agent)
+xUi	fiveMinuteMs4	5 * 6e4
+xWr	thirtySecondMs4	number 3e4
+xWt	fourKilobytes	number 4096
+xXA	sixtySecondMs3	number 6e4
+xXe	globalShortcutBridge	IPC bridge for interface "GlobalShortcut"
+xYi	wrapOnReadEntry	wraps onReadEntry to resume tar entry streams
+x_r	memoryGuidanceLines	markdown lines about applying/verifying memories
+xfe	versionString02	string '0.2'
+xgA	executableExtensions	executable file extension list (.sh, .bat, .py)
+xje	nineCount	number 9
+xpr	markChapterSchema	json schema for mark_chapter tool (title, summary)
+xur	newlineVariants	['\n', '\r', '\r\n']
+xwt	debugJsonlFile	'debug.jsonl'
+xxe	attestationStates	['UNSPECIFIED','ABSENT','VERIFIED',...]
+xxt	spanId16HexPattern	'(?![0]{16})[\\da-f]{16}' otel span id
+xyr	conversationLengthLimitMessage	'This conversation has reached its length limit.'
+xzA	nineHundredThousandMs	number 9e5
+y1r	hundredCount	number 100
+y1t	mcpServerVersionAttr	'mcp.server.version'
+y5e	fiftyCount	number 50
+y6i	coordinateDescriptions	pixel/normalized coordinate field descriptions
+y8t	infinity	1 / 0 (Infinity)
+yCr	fiveThousandMs4	number 5e3
+yF	oauthScopes	'user:inference user:file_upload user:profile'
+yHi	getProcessUmask	returns process.umask()
+yIi	dataRefSchema	{ $data: ... } ajv $data json-pointer schema
+yJt	thisMessageUri	'thismessage:/' base URI
+yKA	maxTokensAttr	'gen_ai.request.max_tokens'
+yKe	chartsAndMapsGuide	markdown guide for Chart.js charts and D3 maps
+yOi	reconnectBackoffConfig	{ initialReconnectionDelay, maxReconnectionDelay, ... }
+yPt	semverComparatorMap	maps comparison operators to result codes
+yQr	tenCount	number 10
+yVe	semverRegex	named-group semver regex
+yVr	twoMinuteMs	number 12e4
+yYi	splitTarPathPrefix	splits long path into ustar name/prefix
+yZe	coworkArtifactsBridge	IPC bridge for interface "CoworkArtifacts"
+yZt	escapeGlobPath	escapes glob special chars in a path
+ybt	runScheduledTaskAllowedKey	'coworkArtifactRunScheduledTaskAllowed'
+ydt	fortyFiveCount	number 45
+yfA	linuxDistroVersionParsers	per-distro os-release version parsers
+ygA	windowsClaudeCodePath	'/mnt/c/Program Files/ClaudeCode'
+ygi	localSessionEnvironmentBridge	IPC bridge for interface "LocalSessionEnvironment"
+yht	maskedSecretPlaceholder	'••••••' masked value
+ypr	listSessionsToolDescription	description for list_sessions tool
+yri	aboutWindowBridge	IPC bridge for interface "AboutWindow"
+yte	oneCount	number 1
+yur	effortLevelHelpText	help text about higher effort tradeoffs
+yxe	fortyFiveSecondMs2	number 45e3
+z$e	mcpMethodNameAttr	'mcp.method.name'
+z2i	localPluginsDir	'.local-plugins'
+z3	toolResultsReadGlob	builds Read(...) permission glob for tool-results
+z4r	sevenDayMs	10080 * 60 * 1e3 (one week)
+z5r	fiveThousandMs5	number 5e3
+z7e	platformClaudeHost	'platform.claude.com'
+z7r	fiveTwentyCount	number 520
+z8i	dataRefMetaSchemaTitle	'Meta-schema for $data reference'
+z9i	assertPositiveInteger	throws unless value is a positive integer
+zAn	logLevelTagRegex	matches [error]/[warn]/[custom-3p] log tags
+zAt	deploymentEnvironments	['production','staging','local']
+zFr	http2RequestAdapter	{ request } http2 session request adapter
+zFt	defineDataProperty	defines/sets an enumerable property
+zJi	fiveMinuteMs5	300 * 1e3
+zJr	thirtySecondMs5	number 3e4
+zL	claudeAgentSdkPackage	'@anthropic-ai/claude-agent-sdk'
+zOe	stripBracketsAndDots	strips [ ] wrapper and trailing dots
+zOr	twentyThousandMs	number 2e4
+zOt	anchoredClock	class combining epoch + monotonic clock for now()
+zQr	fiveMinuteMs6	300 * 1e3
+zSi	claudeAiHost	'claude.ai'
+zSr	thumbnailPngFile	'thumbnail.png'
+zVA	nullLabelResolver	{ label:'none', resolve->null } resolver stub
+zXi	booleanTag	'[object Boolean]'
+zY	sessionMgmtPluginId	'ccd_session_mgmt'
+zZr	simulatorBridge	IPC bridge for interface "Simulator"
+z_e	fiveMinuteMs7	300 * 1e3
+zar	tokenNameRegexDup	/^[A-Za-z0-9._-]{1,128}$/
+zeA	threeCount3	number 3
+zk	twentyCount2	number 20
+zkA	thirtySecondMs6	number 3e4
+znA	escapeChar	'\x1B' ESC character
+zot	fiveMinuteSec	number 3e5
+zp	requestMessagesAttr	'gen_ai.request.messages'
+zqA	microsoftLoginHost	'login.microsoftonline.com'
+zur	framebufferLaunchHelp	help text for .claude/launch.json framebuffer entry
+zvA	escapeCharDup	'\x1B' ESC character
+zwi	whitespaceRegex	matches unicode whitespace chars
+zxe	systemVolumesDataPath	'/system/volumes/data'
+zyi	nanoIdRegex	/^[a-z0-9_-]{21}$/i nanoid pattern

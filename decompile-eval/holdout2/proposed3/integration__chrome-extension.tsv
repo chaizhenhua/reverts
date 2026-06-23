@@ -1,0 +1,234 @@
+I$A	gzipHeaderLength	returns 10 + filename length: gzip member-header size
+I$t	defaultChunkSize	const 8192 = 8KB buffer chunk size
+I0A	readUint64LE	reads 2 little-endian uint32 and combines into 64-bit (lo + hi*2^32)
+I2i	sixtyFourKiB	const 64*1024 = 64KB
+I3	stripWwwPrefix	A.replace(/^www\./,'') strips leading www.
+I4t	genAiResponseObjectAttr	'ai.response.object' / mapped to 'gen_ai.response.object' OTel attr
+I6e	sentryMessagePortMessageKey	'__sentry_message_port_message__' marker property
+I7i	int8ArrayTag	'[object Int8Array]' toString tag
+I8e	genAiAgentNameAttr	'gen_ai.agent.name' OTel span attribute key
+I9	fastifyOpType	{MIDDLEWARE:'middleware', REQUEST_HANDLER:'request_handler'}
+IFr	defaultPortByScheme	{ftp:21,http:80,https:443,...} default port per URL scheme
+IG	maxWindowDimension	32767 max width/height clamp in setBounds
+IIr	exitCode0xCAFEBABE	3405691582 = 0xCAFEBABE, compared as process exit/crash code
+ILe	memoryConsolidationPrompt	long markdown 'Memory Consolidation' reflective-pass prompt
+IMi	windowsExtendedPathPattern	/^[\\/]{2}[?.][\\/]/ Windows \\?\ device-path prefix
+IQi	ipv6CidrPattern	long regex matching IPv6 address with CIDR suffix
+IRe	coworkPluginsDirPrefix	'mnt/.claude/cowork_plugins/' path prefix
+IRr	pathOutsideAllowedDirsError	'Path is outside allowed working directories' error message
+IU	trimTrailingIncompleteTokens	recursively drops trailing incomplete JSON tokens (partial-JSON repair)
+IUi	tenSecondMs	1e4 = 10000ms; used as AbortSignal.timeout
+IV	colorPalettePrompt	long markdown '## Color palette' ramp guidance
+IVr	twenty	const 20; used as min-length threshold
+IWe	semverPattern	named-group semver regex (major/minor/patch/prerelease/build)
+IY	makeCrc32	returns {p,d} CRC-32 accumulator over int table
+IYA	fiveMinuteMs	const 3e5 = 300000ms
+I_i	desktopCallbackUrl	'http://localhost:4000/desktop/callback'
+Iae	oneSecondMs	const 1e3 = 1000ms
+Igi	chromeExtensionDispatcher	IPC dispatcher for 'ChromeExtension' interface (isInstalled/installExtension/restartChrome)
+Imr	delayMs	A => new Promise(r=>setTimeout(r,A)) sleep helper
+Inn	topThree	const 3; .slice(0,3) of sorted items
+Irt	tokenExpiryMarginMs	12e4 = 120000ms subtracted from expiresAt as refresh margin
+Itt	builtinMcpIncidentsFile	'builtin-mcp-incidents.json'
+Iu	padZero	left-pads string with '0' to width (default 2)
+Ixe	emptyObject	var = {} reused empty-object placeholder
+Iy	docsBaseUrl	'https://code.claude.com/docs/en'
+J$	resolveCredentialKind	A.inferenceCredentialKind ?? LD(A)
+J$r	remoteDeployErrorMessages	['failed to deploy claude cli','checksum mismatch',...] remote-deploy errors
+J0t	isLoopbackIpv4	true for 127.x.x.x dotted-quad (e[0]==='127', octets 0-255)
+J2r	threeMinuteMs	const 18e4 = 180000ms
+J3e	mysqlIntegrationName	'Mysql' Sentry integration name
+J3r	apiPathPrefixes	['/api/','/edge-api/','/v1/','/v2/','/mcp-registry/','/sandbox/']
+J4i	zodPipeToJsonSchema	zod->json-schema converter for pipe/innerType, sets readOnly
+J4r	githubPrUrlPattern	/https:\/\/github\.com\/.../pull/\d+/g
+J5r	ipWithOptionalPortPattern	/^[\d.]+(:\d+)?$/
+J6A	heartbeatIntervalMs	3e4 = 30000ms; '[Heartbeat] Starting (interval=...)'
+J7e	microsoft365Options	['microsoft365']
+J7r	teachNextChannel	'cu-teach:next' ipc channel
+J8t	sentrySampleRandAttr	'sentry.sample_rand' attribute key
+JBA	claudePreviewName	'Claude Preview'
+JBr	blockedExecutableExtensions	['.bat','.exe','.msi',...] dangerous file extensions
+JDi	emailAddressPattern	global regex matching email addresses
+JFr	httpsSchemePattern	/https:?/
+JH	genAiPromptToolsAttr	'ai.prompt.tools' / mapped to 'gen_ai.request.available_tools'
+JHA	httpStatusCode	{Continue:100,Ok:200,...} HTTP status-code map
+JHi	defaultDxtMaxTotalSizeMB	2048; '?? JHi) * 1024 * 1024' DXT max total size MB
+JHt	envelopeItemDataCategory	maps Sentry envelope item types to data categories
+JIA	fastifyIntegrationName	'Fastify' Sentry integration name
+JIr	thirtyMinuteMs	1800*1e3 = 1800000ms; dispatchCuGrantTtlMs default
+JOt	maxBaggageEntries	180; .slice(0,180) of baggage entries
+JPA	searchSessionTranscriptsTool	'search_session_transcripts'
+JQr	helperProcessNamePatterns	[/Helper/,/Agent/,/Service/,...] process-name regexes
+JUr	randomString	generates random string of length A from alphabet
+JVe	sentryIsolationScopeKey	'_sentryIsolationScope' weakref property
+JXe	custom3pSetupDispatcher	IPC dispatcher for 'Custom3pSetup' interface
+JXi	maxSafeInteger	9007199254740991 = Number.MAX_SAFE_INTEGER
+JZi	regexEscapePattern	/[\\^$.*+?()[\]{}|]/g chars to escape in regex
+JZt	notSlashClass	'[^/]' regex char class
+JaA	accessTierRank	{read:0,click:1,full:2} privilege-tier ranking
+Jdt	currentRef	{current:null} mutable ref holder
+Jee	HookTrieNode	trie node with hooks[] and children Map
+Jet	wildcardStar	'*'
+Jgr	buildGatedFeatureKeys	['autoMode','deepLink','voice','assistant','briefView']
+Jit	tenSecondMs	1e4 = 10000ms; Date.now()-Jit window
+Jji	jsonSchemaDraft07Url	'http://json-schema.org/draft-07/schema#'
+Jkt	filesApiBetaHeader	'files-api-2025-04-14'
+Joe	prismaInstrumentationGlobal	'PRISMA_INSTRUMENTATION' global key
+JsA	zodTypeToJsonType	{ZodString:'string',ZodNumber:'number',...}
+Jtn	tenSecondMs	1e4 = 10000ms; AbortSignal.timeout
+Jwi	stringifyArguments	JSON.stringify(arguments)
+Jxe	sixtySecondMs	const 6e4 = 60000ms
+Jyr	authErrorMessages	['authentication_error','oauth token has expired',...]
+JzA	ccdSessionServer	'ccd_session' mcp server name
+K$A	normalizeFsOptionKeys	remaps fs option aliases, handles chmod/noChmod
+K$r	platformUnavailableMessages	['claude cli not available for platform',...]
+K1r	exitCode0xC0000409	3221226505 = 0xC0000409 STATUS_STACK_BUFFER_OVERRUN exit code
+K3r	assetExtensionPattern	/\.(m?[jt]sx?|css|map)$/
+K3t	nodeSystemErrorIntegrationName	'NodeSystemError' Sentry integration name
+K5r	bracketOrColonPattern	/^\[|:.*:/
+K6A	fifteenSecondMs	15e3 = 15000ms; heartbeat timeout
+K7r	teachExitChannel	'cu-teach:exit' ipc channel
+K8t	sentrySampleRateAttr	'sentry.sample_rate' attribute key
+KAr	noop	() => {} empty function
+KBA	mcpRegistryServer	'mcp-registry' server name
+KBr	nonAsciiWhitespacePattern	regex of unicode whitespace; 'non-ASCII whitespace'
+KC	orgProvisionedMarker	'org-provisioned' sentinel value
+KEA	appProtocolScheme	'app' protocol scheme ('app://localhost')
+KHe	twentyMiB	20*1024*1024 = 20MB max file-size threshold
+KOt	maxBaggageEntryLength	4096; filters baggage entries by length
+KPA	archiveSessionTool	'archive_session'
+KPt	caretGroup	'(?:\\^)' regex fragment
+KQA	baggageHeader	'baggage' header field name
+KWr	twoFiftySixKiB	256*1024 = 256KB size threshold
+KXe	claudeAiImportDispatcher	IPC dispatcher for 'ClaudeAiImport' interface
+KXi	indexKeyPattern	/^(?:0|[1-9]\d*)$/ valid array-index string
+KY	featureFlagId1291166712	'1291166712' feature-flag/experiment id used with $r(KY,...)
+KZi	objectConstructorTag	/^\[object .+?Constructor\]$/
+Kar	AjvValidatorFactory	wraps ajv compile/getSchema into getValidator
+KbA	marketplaceMigrationDoneKey	'remote_marketplace_migration_done_v1' sentinel
+Kct	assertFileGlobal	throws if global File is undefined (file uploads)
+Kd	localSessionIdPrefix	'local_' session-id prefix
+KgA	framebufferServerName	'Framebuffer' mcp serverName
+Kit	eight	const 8; ring-buffer max length (Qp.length > Kit)
+Kji	jsonSchemaDraft07Url	'http://json-schema.org/draft-07/schema#'
+Kkt	oauthBetaHeader	'oauth-2025-04-20'
+Kli	codeRoutePaths	['/code/onboarding','/code/disabled',...]
+Kme	ten	const 10; max providers (oauth may declare at most 10)
+Kmr	humanPromptPrefix	'\\n\\nHuman:' Anthropic prompt-injection marker
+Ko	mapIfString	(A)=>(e)=> typeof e=='string'?A(e):e
+Kqt	genAiPipelineNameAttr	'gen_ai.pipeline.name' OTel attribute key
+KsA	mcpNodeHostServiceName	'Claude Desktop MCP Node Host' utility-process name
+Ktn	one	const 1; min interval clamp
+KxA	claudeCodePolicyRegistryPath	'HKLM\\SOFTWARE\\Policies\\ClaudeCode' Windows registry path
+Kyr	authErrorPattern	/401|unauthorized|authentication|revoked/i
+L1t	mcpLoggingLevelKey	'mcp.logging.level'
+L4A	resolveUserDataRoot	classifies userData dir as 'local'/'roaming' (LOCALAPPDATA/APPDATA)
+L4i	zodUnionToJsonSchema	maps zod options to oneOf/anyOf json-schema
+L4r	two	const 2; subtracted in lru victim calc
+L7r	moonIconPath	SVG path data 'M236,128a108...' (moon/contrast icon)
+L8	auditChainGenesis	'audit-chain-genesis' default genesis hmac value
+L8r	sideChatSystemPrompt	'side chat' read-only fork system prompt
+L8t	otelSdkTraceVersion	'2.6.1' version passed to getMeter('@opentelemetry/sdk-trace')
+LAi	tediousIntegration	Sentry integration named 'Tedious' for mssql spans
+LCi	dateFormatTokens	{D,DD,Do,M,MM,YYYY,...} date-format token handlers
+LDi	iamCredentialsHost	'iamcredentials.googleapis.com'
+LHi	addEntriesToTarPack	adds file/@-list entries to a tar pack stream
+LIt	isoDatePattern	regex fragment matching YYYY-MM-DD incl leap-day
+LKe	five	const 5; chunk size in slice loop
+LKt	userCrudMethods	['createUser','deleteUser','listUsers',...]
+LPt	comparatorOperatorGroup	'((?:<|>)?=?)' semver comparator-operator regex fragment
+LRe	thirtySecondMs	3e4 = 30000ms; bridge connect timeout
+LRi	managedEnvVarPrefixes	['CLAUDE_','ANTHROPIC_','OTEL_','LD_']
+LUr	hasIteratorSymbol	A != null && qu(A[Symbol.iterator])
+LVr	fiveSecondMs	5e3 = 5000ms; trusted-cwd memo ttl
+LWi	keyNameAliases	{esc:'escape',del:'delete',' ':'space','\t':'tab'}
+LYi	reducePaxHeaderLine	reduces one PAX extended-header line into record object
+LZi	proxyTag	'[object Proxy]' toString tag
+L_r	feedbackEntityTypes	['user','feedback','project','reference']
+Ldi	bcp47LocalePattern	/^[A-Za-z0-9]{2,8}(?:-...)*$/ BCP47 locale id
+Lei	unleashIntegration	Sentry 'Unleash' integration (browser-only warn)
+Lgr	nonPrintableAsciiPattern	/[^ -~]/
+Lgt	oneKiB	const 1024; min plausible byte size threshold
+LiA	systemPromptDynamicBoundary	'__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__' marker
+Ljr	fiveHundredMs	const 500; window-options refetch interval
+Lme	five	const 5; retry-loop max
+Lmi	warnDev	console.warn when NODE_ENV !== 'production'
+Loe	one	const 1; passed as logger-api version arg
+Lot	defaultMaxTurns	const 100; default agent maxTurns
+Lpr	readWidgetContextSchema	{type:'object', properties:{tool_name}, required:['tool_name']}
+LtA	tracestateHeader	'tracestate' header field name
+M$r	fiveSecondMs	const 5e3 = 5000ms
+M1t	mcpToolResultContentCountAttr	'mcp.tool.result.content_count' attribute key
+M4i	zodEnumToJsonSchema	maps zod enum entries to json-schema type/enum
+M6r	fiveMinuteMs	5*6e4 = 300000ms; used as expiresAt offset
+M6t	traceParentIdPattern	'(?![0]{16})[\\da-f]{16}' 16-hex non-zero id
+M8t	otelSpanParentOriginAttr	'otel.span.parent.origin' attribute key
+MAn	configureOutboundCcrClient	toggles outbound-only CCR client on flag change
+MB	assignNumericIfValid	sets A[e]=Number(t) when not NaN
+MDi	gstaticWildcardHost	'*.gstatic.com'
+MEr	oneDayMs	864e5 = 86400000ms (one day)
+MFA	controlCharPattern	/[\r\n\0]/ control chars in token
+MFr	callbackifyAsyncFn	wraps async fn into node-style callback fn
+MGt	featureFlagId2023768496	'2023768496' feature-flag id used with lt(MGt)
+MHi	streamTarFileToParser	pipes a tar file read-stream into parser
+MIA	genAiAvailableToolsAttr	'gen_ai.request.available_tools' attribute key
+MIr	fifty	const 50; delay/limit value
+MNe	toolManifestService	'tool.manifest' protocol-service key
+MOi	collectTransferableBuffers	collects ArrayBuffers from typed-array map for transfer
+MPA	fiveSecondMs	5e3 = 5000ms; AbortSignal.timeout
+MSA	createApiKeyScope	'org:create_api_key user:profile' oauth scope
+MSr	defaultWindowHeight	600 default BrowserWindow height
+MVt	chatRoleAlias	{human:'user',ai:'assistant',...} message-role map
+MXr	commonRepoDirNames	['code','projects','src','dev',...] repo dir names
+MXt	comparatorOperatorGroup	'((?:<|>)?=?)' semver comparator operator regex fragment
+MYi	writeOctalField	writes octal-encoded numeric field (tar header)
+MZi	undefinedTag	'[object Undefined]' toString tag
+M_e	TarFsEntry	tar fs-walk entry (path/absolute/entry/stat/readdir)
+M_r	fiveHundred	const 500; max slice length
+MdA	transitionalDefaults	{silentJSONParsing,forcedJSONParsing,...} axios transitional flags
+Mee	ProxyLoggerProvider	OTel logs ProxyLoggerProvider (getLogger/delegate)
+Mei	langGraphIntegration	Sentry 'LangGraph' integration
+Mft	debugConfigTemplate	JSON debug-launch configuration template string
+NYi	octalField	formats octal field padded to width (tar)
+OWe	tediousIntegrationName	'Tedious' Sentry integration name
+Pmr	balanceBracketTokens	balances unclosed brace/paren tokens (partial-JSON repair)
+RSr	defaultWindowWidth	800 default BrowserWindow width
+S8e	langGraphIntegrationName	'LangGraph' Sentry integration name
+TFr	isLoopbackIpv6	true for ::1 / mapped-loopback ipv6
+Tpt	repairPartialJson	JSON.parse(stringify(balance(trim(tokenize(A)))))
+Twt	WindowManager	Electron multi-window manager (register/update/destroy/dispatch)
+UX	workerSourceCache	[] cache of serialized worker source per id
+V3t	nodeSystemErrorIntegration	Sentry integration adding node_system_error context
+V_i	vmClient	VM-service client (createVM/startVM/spawn/kill/...)
+WOe	isLoopbackHost	true if host is loopback (set/ipv4/ipv6)
+WOt	baggagePropagator	OTel baggage inject/extract propagator
+Ymr	serializeTokens	joins token list back into string (partial-JSON repair)
+_Sr	windowManagerDispatcher	IPC dispatcher for 'WindowManager' interface
+aSr	windowPropSetters	map of window prop -> BrowserWindow setter
+aei	vercelAiIntegration	Sentry 'VercelAI' integration
+b4A	getUserDataDirName	basename of app.getPath('userData')
+bYi	parsePaxHeader	parses PAX extended header block into record
+c$A	writeGzipHeader	writes gzip member header bytes (magic 31,139,8,...)
+c9t	fastifyIntegration	Sentry Fastify integration (shouldHandleError)
+dPt	ProxyLogger	OTel logs ProxyLogger delegating to provider
+eoA	commaSeparator	',' join/split separator
+f$A	writeZipEndOfCentralDir	writes ZIP end-of-central-directory record (sig 101010256)
+fDe	serializeWorkerDeps	serializes functions/values for worker source
+kYi	padOctalField	pads octal string to field width with trailing space+NUL
+kwt	ManagedBrowserWindow	wraps a BrowserWindow with event/prop/bounds management
+l5t	mysqlIntegration	Sentry MySQL integration
+lUe	one	const 1; min window dimension clamp
+name	vercelAiIntegrationName	'VercelAI' integration name (exported as I1A)
+_emoji	emojiOnlyPattern	'^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$' (exported as Iir)
+regexes	regexCache	{} regex cache object (exported as L3A)
+nnt	gzipCodecModules	returns [writeGzipHeader, gzipHeaderLength, writeUint, makeCrc32, crcTable]
+ns	writeUintLE	writes value as little-endian bytes into buffer
+oYi	mapFsOptionAlias	AYi.get(A) || A fs-option alias lookup
+ooA	pathSeparator	'/' path/module-name separator
+rnt	buildWorkerFromDeps	builds worker source string + spawns from serialized deps
+sYt	HookTrie	module-name trie storing/searching hooks
+uc	readUint32LE	reads little-endian uint32 from buffer
+vHi	appendEntriesToTarFile	appends entries to an existing tar file
+vRe	stripWwwAndPort	I3(A).replace(/:\d+$/,'') strips www and port
+xmr	tokenizeJson	lexes a JSON string into token list (partial-JSON repair)
+ySA	resolveInferenceCredential	jUA(inferenceProvider, resolveCredentialKind(A))

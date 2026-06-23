@@ -1,0 +1,254 @@
+$Er	resetYukonSilverFeatureSupport	function: sets Y6A=arg, bgA=null; resets cached yukonSilver feature-support state
+$Y	startVM	async startVM(options,onProgress,reason): yukonSilver gate, virtualization check, l0 in-progress guard, ZCr start, auto-reinstall
+$fr	clickActionRoleSet	exported alias of `set`: Set of accessibility roles allowing click actions (button,link,textbox,...)
+$ur	jsonParseOptions	const = Jur; JSON parse options object reused for parsing
+A$	queueIntervalCapField	WeakMap private field on PQueue-like class Fh (intervalCap storage)
+ABr	framebufferInputToolDefs	array of MCP tool definitions: framebuffer_click/move/drag/scroll/type/key/hold_key/batch
+AF	mcpServerIds	object mapping MCP server display names to UUIDs (Claude in Chrome, computer-use, ...)
+AcA	previewMapAcA	Map() declared with other preview-state maps; role not unambiguous in-file
+ArA	queueTryAddNext	private method #ArA: dequeues and runs next queued task when concurrency/interval allow
+BT	loginShellEnvCache	module var holding resolved login-shell env var map (or {} on win32)
+Bht	setPreviewSelectionShortcutCallback	export alias of setPreviewSelectionShortcutCallback
+CBr	cronstrueInstance	var = EBr(); instance of cronstrue vendor module
+CPA	queueStartIntervalTimer	private method: starts the interval setInterval (qd) and records interval end time
+Cht	setElementSelectedCallback	export alias of setElementSelectedCallback (sets xPA)
+CzA	formDataInterop	const = fc(Vdr); CJS interop wrapper around form-data vendor module
+DBA	scheduleNextWake	function(controller,nowMs): collects claim nextWakeAt times, picks min clamped by oneDayMs, calls scheduleWake
+DQt	queueCanProcessInterval	private method: returns true if interval not exceeded (intervalCap check)
+Dhr	previewToolsNoChangeGuard	Set of preview tool names exempt from pixel-change guard (screenshot,zoom,hover,scroll,scroll_to)
+Dht	primeProcessEnvFromLoginShell	export alias of primeProcessEnvFromLoginShell
+Dy	accessibilityNodeMapDy	Map() cleared by ehr() alongside r$; preview accessibility cache, exact role ambiguous
+Efr	cursorPixelBytes	Buffer.from([30,30,30,255]); fixed RGBA pixel bytes (gray + opaque)
+FB	onCrossOriginCommitCallback	module var holding cross-origin-commit callback set by setOnCrossOriginCommit
+FCr	Sha256DigestStream	Transform stream that updates a sha256 hash and exposes getDigest()
+FW	queueIntervalCapField2	WeakMap private field on Fh queue (intervalCap value storage)
+Fdt	lastVMStartContext	module var caching last l0 VM-start context (options/onProgress) for heartbeat restart
+Fft	setPreviewNetworkActivityCallback	export alias of setPreviewNetworkActivityCallback
+Fh	PriorityTaskQueue	p-queue-style class: concurrency/interval-capped async task queue with add/addAll/onIdle
+G3	jsonParseConfigNamespace	namespace with DEFAULT = { allowTrailingComma: false }
+GC	remotePluginManager	export alias of remotePluginManager instance
+GCr	registerVMBalloonListener	function: wires BI 'balloonAdjusted' listener emitting lam_vm_balloon_adjusted telemetry
+Gdt	startKeepaliveTimer	function: sets JF setTimeout calling DCr after Ldt() interval (keepalive)
+Gft	updateLaunchPreviewAllowedOrigins	function: serializes mutation of launchPreviewAllowedOrigins setting via YLe chain
+GgA	vmStartupFailureReported	module bool flag: whether a VM startup failure was already reported
+HI	localSkillsPlugin	const = new DQr(); local skills plugin instance
+Hdt	postVMConnectSetup	async: installs SDK, enables balloon monitoring, starts heartbeat after VM connects
+Hf	heartbeatFailureCount	module counter for consecutive heartbeat ping failures
+Hz	mcpToolPrefix	export alias of MCP_TOOL_PREFIX
+I0	I0Alias	const = sst; re-export alias, underlying role not determinable in-file
+JF	keepaliveTimer	module var holding keepalive setTimeout handle
+Jft	initLaunchPreviewManager	export alias of initLaunchPreviewManager
+Jve	effortLevelDescriptions	object of model-effort tiers (five/four → low/medium/high/max) with name+description
+Jz	mcpCreateScheduledTask	export alias of MCP_CREATE_SCHEDULED_TASK
+KF	dispatchStartupError	function(error): stores SD and dispatches startup error to main view webContents
+KLe	stringSchemaKLe	const = Si(); zod-like string schema instance reused in model config schema
+KQr	monitoredAppBundleIds	Set of macOS app bundle ids (Slack,Zoom,Teams,Mail,...) for app monitoring
+Kdt	mapKdt	const = new Map(); empty map, role not determinable in-file
+Kz	mcpUpdateScheduledTask	export alias of MCP_UPDATE_SCHEDULED_TASK
+L3	dispatchRunningStatusChanged	function(status): clears SD on Booting/Ready and dispatches running-status-changed to main view
+LCr	registerVMNetworkListeners	function: wires BI 'networkStatus'/'apiReachability' listeners, network-failure timeout
+LEr	initWakeScheduler	async(scheduler): registers scheduler, reconcile, suspend/resume handlers, dark-wake tick interval
+LPA	previewMapLPA	const = new Map(); preview-state map, exact role ambiguous
+LgA	heartbeatGuestWasConnected	module bool: whether VM guest was ever connected (heartbeat disconnect detection)
+Lve	localPluginsMarketplaceManifest	default local-plugins marketplace manifest object (name,version,owner,plugins:[])
+MCr	vmSpawnModule	frozen module namespace re-exporting createVMSpawnFunction, isVMGuestConnected
+MNA	setMNA	const = new Set(); role not determinable in-file
+MO	queueCarryoverField	WeakMap private field on Fh queue (carryoverConcurrencyCount)
+MQt	queueIntervalDelayCheck	private method: schedules interval-delay timer, returns true if delaying
+Mdt	acquireKeepAwake	function(claim): adds claim, starts powerSaveBlocker on first claim
+Mfr	cookieInterop	const = fc(Rfr); CJS interop wrapper around cookie vendor module
+Mk	computerUseToolsCache	module var caching computer-use MCP tool definitions
+Mo	previewServerManager	const = new apr(); singleton preview-server manager instance
+Mve	vmNetworkListenersRegistered	module bool: whether network-status listeners were registered
+NO	queueIntervalUncappedField	WeakMap private field on Fh queue (interval is uncapped flag)
+NPA	accessibilityCacheEpoch	module counter incremented by ehr() when clearing accessibility caches
+NQt	queueAbortRejection	private async method: returns promise that rejects on signal abort
+Nfr	swiftAddonReadyPromise	Promise resolved (via irA) when claude-swift addon is ready
+Nk	onPreviewUrlChangedCallback	module var holding preview-url-changed callback
+Nr	claudeSwiftAddon	module var holding loaded @ant/claude-swift addon instance
+Nve	vmBalloonListenerRegistered	module bool: whether balloonAdjusted listener was registered
+ONA	pluginConcurrencyQueue	const = new Fh({concurrency:16}); bounded queue for plugin operations
+OW	queueIntervalEndField	WeakMap private field on Fh queue (interval end timestamp)
+Ofr	haloToolDefs	array of MCP tool definitions: halo_attach / halo_remove (window glow tooling)
+Oft	setOnCrossOriginCommit	export alias of setOnCrossOriginCommit
+Ou	aumidCache	module var caching Windows AUMID app-enumeration result
+PB	previewOriginPolicyEpoch	module counter incremented by resetPreviewOriginPolicyState
+PBr	pluginSkillExtensions	Set of file extensions ['.plugin','.skill']
+PW	queueThrowOnTimeoutField	WeakMap private field on Fh queue (throwOnTimeout flag)
+Pd	indentPrefixCache	array of 20 strings of increasing space-indent prefixes
+Pz	fetchOrgPluginsCached	function: fetches org-plugins for current url with in-flight + TTL caching
+PzA	PreviewServerStatus	enum: Starting/Running/Error/Stopped
+Qfr	win32ComputerUseModule	frozen module namespace re-exporting createWin32Executor, unhideComputerUseAppsWin32
+Qht	ClientSurfaceType	enum: client surface types (UNKNOWN,ANDROID,IOS,DESKTOP_APP,WEB_CLAUDE_AI,...)
+QzA	remotePluginsModule	frozen module namespace re-exporting _test, primePluginsSyncAtAppReady, remotePluginManager
+RQt	queueResetIntervalState	private method: resets interval-end timer state and re-checks interval
+Rfr	cookieFactoryResult	var = _fr(); result of invoking cookie vendor factory
+Rht	prependMissingPathDirs	async(path): appends WI() PATH dirs not already present (PATH floor)
+RzA	requestPreviewOriginPermission	export alias of requestPreviewOriginPermission
+S8	userFolderPaths	object of Desktop/Documents/Downloads home-relative paths
+SAA	loginShellEnvPromise	module var holding in-flight login-shell env extraction promise
+SD	startupErrorState	module var holding current startup error string (null when none)
+SQr	setLocalSkillsPlugin	function(value): sets module var rft
+SQt	queueHasCapacity	private method: returns pending < concurrency
+Su	queueStoreField	WeakMap private field on Fh queue (backing queue instance)
+TEr	onDarkWakeTick	function: periodic tick detecting dark-wake time jumps and arming chain wakes
+TLe	computerUseToolsLoaded	module bool: whether computer-use tools were loaded
+TO	queueDelayTimerField	WeakMap private field on Fh queue (interval-delay timeout handle)
+TQr	hostLoopMountModule	frozen module namespace re-exporting host-loop mount/path-translation helpers
+Tf	localPluginMarketplaceManager	const = new nur(); local plugin marketplace manager instance
+Tve	vmShutdownHookRegistered	module bool: whether the cowork-vm-shutdown quit hook was registered
+UBA	getComputerUseAdapter	function: lazily builds and memoizes the computer-use executor adapter (mAA)
+ULe	onCapsLockStateChanged	async(isOn): caps-lock dictation shortcut handler (capslock/double-tap)
+Udt	stopKeepaliveTimer	function: clears keepalive timer JF, increments oPA
+Uft	previewWeakSetUft	const = new WeakSet(); preview-related weak set, exact role ambiguous
+Uhr	terminalParityColumnWidth	const = rcA + ncA + 3; computed column width for terminal parity output
+VLe	homebrewPathFlooredOnce	module bool: whether homebrew PATH dirs were already flooded once
+VS	previewMapVS	const = new Map(); preview-state map, exact role ambiguous
+Vd	queuePendingCountField	WeakMap private field on Fh queue (pending task count)
+Vdr	formDataFactoryResult	var = qdr(); result of invoking form-data vendor factory
+Vfr	mouseTransformActions	Set of input action names (left_click,right_click,...,left_click_drag)
+ViA	releaseKeepAwake	function(claim): removes claim, stops powerSaveBlocker when last claim released
+Vve	whitespaceIndentCache	nested cache of newline+indent strings keyed by base char and line ending
+Whr	resolveSshAuthSock	async: resolves and stat-validates SSH_AUTH_SOCK socket path
+Wq	recordYukonSilverSupport	function(result): caches yukonSilver support result, emits feature-support telemetry
+XN	orgPluginsInFlightFetch	module var holding in-flight org-plugins fetch {url,promise}
+XU	keepAwakeBlockerId	module var holding active powerSaveBlocker id (null when none)
+Xfr	accessibilityCategorySet	Set of category0..category3 strings
+XgA	aumidCacheFailureAt	module var timestamp of last AUMID cache load failure
+Xhr	buildHostSpawnEnv	async(opts): builds env for host process spawn (provider routing, PATH floor, telemetry)
+Xur	framebufferReadToolDefs	array of MCP tool defs: framebuffer_list/attach/screenshot/zoom/cursor_position
+Y3	previewMapY3	exported alias of `map` (new Map()); preview-state map, role ambiguous
+Y6A	yukonSilverSupportStatus	module var holding yukonSilver support status string ('none' default)
+YLe	allowedOriginsMutationChain	module var holding the serialized promise chain for origin-list mutations
+ZC	launchPreviewManagerZC	module var set by initLaunchPreviewManager, exact role ambiguous
+ZCr	startVMInternal	async: full VM startup sequence (download, swift api, boot, guest-connect poll)
+ZQr	windowsDirLower	lowercased Windows directory path prefix (WINDIR + backslash)
+Zg	launchPreviewManagerZg	module var set by initLaunchPreviewManager (second arg), role ambiguous
+_8	setEmpty8	const = new Set(); empty set, role not determinable in-file
+_BA	heartbeatConnection	module var holding active heartbeat VM connection (null when stopped)
+_NA	mapNA	const = new Map(); role not determinable in-file
+_Qt	queueOnTaskSettled	private method: decrements pending, re-checks queue, emits 'next'
+_ht	loginShellEnvModule	frozen module namespace re-exporting login-shell env helpers
+_k	queueWeakField_k	WeakMap private field, role not determinable in-file
+_test	pluginGatingTestExports	object grouping plugin-gating functions exposed for tests
+aQr	pluginGatingTestExports	export alias of _test
+ahr	previewOriginPolicyModule	frozen module namespace re-exporting preview-origin policy functions
+apr	PreviewServerManager	EventEmitter class managing preview server processes and HTML previews
+arA	previewNetworkActivityCallback	module var holding preview network-activity callback
+aur	pluginManifestSchema	zod-like schema for a local plugin manifest entry (name,version,sha256,...)
+azA	mcpListScheduledTasks	export alias of MCP_LIST_SCHEDULED_TASKS
+bBr	eventEmitter3Interop	const = fc(vBr); CJS interop wrapper around eventemitter3 vendor module
+bEr	onPowerResume	function: powerMonitor resume handler, correlates resume with last scheduled wake
+bPA	previewSetBPA	const = new Set(); preview-related set, role ambiguous
+bgA	yukonSilverSupportResult	module var caching last yukonSilver support result object
+cLe	cLeWorkspacePath	const = Vo(rst); workspace-derived path, exact role ambiguous
+cft	windowsExplorerPath	const path to Windows explorer.exe
+crA	previewSelectionShortcutCallback	module var holding preview selection-shortcut callback
+dy	queuePausedField	WeakMap private field on Fh queue (paused/autoStart-off flag)
+eD	deniedPreviewOrigins	Set of preview origins denied by the user
+eF	previewPromptBudgetByServer	Map of per-serverId preview-origin prompt budget counters
+eG	orgPluginsCacheEntry	module var caching last org-plugins result {at,url,result}
+efr	windowsSystemProcessNames	Set of Windows system process names (dwm,winlogon,csrss,...)
+ehr	clearAccessibilityCaches	function: increments epoch and clears accessibility node maps
+epr	buildPreviewSpawnEnv	async: builds env for preview server child processes (terminal parity + PATH floor)
+erA	queueProcessAll	private method: drains queue by repeatedly calling tryAddNext
+fCr	ZstdDecompressTransform	Transform stream decompressing zstd while tee-ing to a cache stream
+gLe	mapGLe	const = new Map(); role not determinable in-file
+gU	weakFieldGU	WeakMap private field, role not determinable in-file
+grA	launchPreviewManagerGrA	module var set by initLaunchPreviewManager (optional arg), role ambiguous
+hBr	losAngelesTimeFormatter	Intl.DateTimeFormat for America/Los_Angeles weekday+hour
+hQr	hQrAlias	const = AL; re-export alias of AL, underlying role not determinable in-file
+ho	previewMapHo	const = new Map(); preview-state map, role ambiguous
+i4	aumidCacheLoadPromise	module var holding in-flight AUMID cache load promise
+ih	localSkillDiscovery	const = new idr(); local plugin/skill discovery instance
+irA	swiftAddonReadyResolver	module var holding resolver for the swift-addon-ready promise
+iur	setIur	const = new Set(); role not determinable in-file
+iw	previewExtraEnvCache	module var caching extra env (EL()) for preview/host spawn
+jfr	presentationRoleSet	Set of non-semantic a11y roles (none,presentation,generic)
+jft	setOnPreviewDestroyedCallback	export alias of setOnPreviewDestroyedCallback
+jhr	skipSshAuthSockValues	Set of values to skip for SSH_AUTH_SOCK ('SSH_AUTH_SOCK','none')
+jiA	clearNetworkErrorTimer	function: clears the pending network-connection-error timeout qF
+kBr	scheduledTasksMcpModule	frozen module namespace re-exporting scheduled-task MCP tool constants + server factory
+kO	queueIntervalField	WeakMap private field on Fh queue (interval ms)
+l0	vmStartupInFlight	module var holding in-flight VM startup {promise,controller,options}
+lrA	onPreviewDestroyedCallback	module var holding preview-destroyed callback
+m8	heartbeatTimer	module var holding heartbeat setTimeout handle
+mAA	computerUseAdapter	module var caching the computer-use executor adapter object
+mCr	startHeartbeat	function(connection): starts VM heartbeat ping loop and vmStopped listener
+nQt	asyncMutexNQt	const = new dh(); async-mutex instance, exact guarded resource ambiguous
+nhr	resetPreviewOriginPolicyState	export alias of resetPreviewOriginPolicyState
+nrA	pendingPreviewOriginPrompts	Map of in-flight preview-origin permission prompts keyed by origin
+nv	launchPreviewManagerNv	module var set by initLaunchPreviewManager (optional arg), role ambiguous
+oPA	keepaliveStopCount	module counter incremented each time keepalive stops
+ofr	resolveAumidByName	async(name): resolves Windows AUMID for an app name from cache
+orA	previewOriginPromptInProgress	module bool: whether a preview-origin approval prompt is active
+pBr	weekdayShortNames	Set of weekday abbreviations Mon..Fri
+pfr	loadComputerUseTools	async: loads and caches computer-use MCP tool definitions
+phr	previewControlModule	frozen module namespace re-exporting preview control functions (click,fill,...)
+pzA	refreshAumidCacheThrottled	async: throttled refresh of Windows AUMID app cache
+q6A	stopHeartbeat	function: clears heartbeat timer and removes vmStopped listener
+qF	networkErrorTimer	module var holding network-connection-error timeout handle
+qLe	loginShellEnvPrimed	module bool: whether process.env was primed from login shell
+qQt	taskInProgressStatuses	Set of task statuses ('unspecified','in_progress')
+qd	queueIntervalIdField	WeakMap private field on Fh queue (interval setInterval id)
+qhr	extractLoginShellEnv	async: extracts login-shell env vars, logs count, telemetry on failure
+qkA	lastCapsLockTapAt	module var timestamp of last caps-lock tap (double-tap detection)
+qz	defaultOkResponse	object { status:200, headers }; default OK response shape
+r$	accessibilityNodeMapR$	const = new Map(); accessibility cache cleared by ehr(), role ambiguous
+r_	allowedPreviewOrigins	Set of preview origins allowed (cleared on policy reset)
+rfr	loadAumidCache	async: loads Windows AUMID cache via Ift() and logs app count
+rft	localSkillsPluginRef	module var holding local skills plugin reference (set by SQr)
+rzA	McpServerHandler	class extending base MCP server: capabilities, request handlers, ping, createMessage, elicitInput
+s4	cachedSshAuthSock	module var caching resolved SSH_AUTH_SOCK path
+sU	vmDownloadInFlight	module var holding in-flight VM download promise
+sbe	localPluginsDir	const = Vo('.local-plugins'); local plugins directory path
+sft	shellQuoteChars	Set of shell-significant chars to escape (",`,],\\)
+tP	domAccessibilityHelper	module var = dAe with MAX_SUBFRAME_WARMUP_HOSTNAMES patched
+tcA	previewMapTcA	const = new Map(); preview-state map, role ambiguous
+tpr	clearPreviewExtraEnvCache	function: resets the cached preview extra env (iw=null)
+trA	queueWaitForEvent	private async method: resolves when a queue event (empty/idle/next) fires
+tur	vmRunShebangScript	string bash shebang wrapper executing the VM run binary
+tw	orgProvisionedKind	const = KC; org-provisioned-kind re-export alias
+uBr	cronstrueInterop	const = fc(CBr); CJS interop wrapper around cronstrue instance
+uht	setPreviewUrlChangedCallback	export alias of setPreviewUrlChangedCallback
+vBr	eventEmitter3FactoryResult	var = TBr(); result of invoking eventemitter3 vendor factory
+vEr	onPowerSuspend	function: powerMonitor suspend handler, schedules wake before sleep
+vLe	previewWeakMapVLe	const = new WeakMap(); preview-related weak map, role ambiguous
+vO	queueConcurrencyField	WeakMap private field on Fh queue (concurrency value)
+vdt	scheduleHeartbeatPing	function: sets heartbeat timer to fire wCr after thirtySecond interval
+vfr	loadClaudeSwiftAddon	async: imports @ant/claude-swift, wires quick-entry/dictation shortcuts and events
+vgA	keepAwakeClaims	const = new Set(); active keep-awake claim ids
+w0	queueIntervalCountField	WeakMap private field on Fh queue (current interval-window count)
+wCr	runHeartbeatPing	async: performs one VM heartbeat ping, tracks failure count, triggers reconnect
+wfr	buildComputerUseToolset	async(forceAlwaysLoad): assembles computer-use toolset for MCP exposure
+wht	ccdEnvironmentConfig	const = new _h({name:'ccd-environment-config'}); CCD env config store
+xPA	onElementSelectedCallback	module var holding element-selected callback (set by setElementSelectedCallback)
+xW	queueClassField	WeakMap private field on Fh queue (queueClass constructor)
+xdt	downloadVMIfNeeded	async: downloads VM bundle if not present, gating on yukonSilver support
+xkA	pluginConcurrencyQueueXkA	const = new Fh({concurrency:16}); second bounded plugin operation queue
+y8	heartbeatVmStoppedListener	module var holding the vmStopped listener fn used by heartbeat
+yNA	lastConnectedVmInstanceId	module var caching last connected VM instance id (balloon-skip guard)
+yp	weakFieldYp	WeakMap private field, role not determinable in-file
+zgA	remotePluginApiModule	frozen module namespace re-exporting remote-plugin fetch functions
+zq	defaultOkResponseZq	const { status:200, headers }; default OK response shape
+zx	VmRestartMode	enum: ForImmediateRestart / Terminate
+zz	getLoginShellEnv	async: returns cached login-shell env or extracts it (empty on win32)
+HOST_LOOP_RESERVED_MOUNT_NAMES	HOST_LOOP_RESERVED_MOUNT_NAMES	already-semantic original: array of reserved host-loop mount names (outputs,uploads,.host-home,...)
+MCP_CREATE_SCHEDULED_TASK	MCP_CREATE_SCHEDULED_TASK	already-semantic original: full MCP tool name for create_scheduled_task
+MCP_LIST_SCHEDULED_TASKS	MCP_LIST_SCHEDULED_TASKS	already-semantic original: full MCP tool name for list_scheduled_tasks
+MCP_TOOL_PREFIX	MCP_TOOL_PREFIX	already-semantic original: `mcp__${SERVER_NAME}__` tool-name prefix
+MCP_UPDATE_SCHEDULED_TASK	MCP_UPDATE_SCHEDULED_TASK	already-semantic original: full MCP tool name for update_scheduled_task
+Zo	queuePrivateMethods	WeakSet brand holding PriorityTaskQueue private methods (DQt,SQt,_Qt,ArA,...)
+map	previewMapMap	const = new Map(); preview-state map exported as Y3, role ambiguous
+primeProcessEnvFromLoginShell	primeProcessEnvFromLoginShell	already-semantic original: primes process.env from login-shell vars, fixes CLAUDE_CONFIG_DIR tilde
+requestPreviewOriginPermission	requestPreviewOriginPermission	already-semantic original: async permission flow for a preview origin (blocklist, prompt budget)
+resetPreviewOriginPolicyState	resetPreviewOriginPolicyState	already-semantic original: resets all preview-origin policy maps/sets and epoch
+set	clickActionRoleSet	already-semantic-ish original named `set`: Set of a11y roles allowing click (button,link,textbox,...)
+setOnCrossOriginCommit	setOnCrossOriginCommit	already-semantic original: setter for cross-origin-commit callback (FB)
+setOnPreviewDestroyedCallback	setOnPreviewDestroyedCallback	already-semantic original: setter for preview-destroyed callback (lrA)
+setPreviewNetworkActivityCallback	setPreviewNetworkActivityCallback	already-semantic original: setter for preview network-activity callback (arA)
+setPreviewSelectionShortcutCallback	setPreviewSelectionShortcutCallback	already-semantic original: setter for preview selection-shortcut callback (crA)
+setPreviewUrlChangedCallback	setPreviewUrlChangedCallback	already-semantic original: setter for preview-url-changed callback (Nk)
+uPA	queueOnIntervalElapsed	private method: resets interval-window count when window elapses, drains queue
+x3	HOST_LOOP_RESERVED_MOUNT_NAMES	export alias of HOST_LOOP_RESERVED_MOUNT_NAMES (already-semantic)
+xBr	structuredTextMimeTypes	Set of MIME types treated as structured text (application/json,xml,javascript,typescript,svg)

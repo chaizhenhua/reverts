@@ -1,0 +1,180 @@
+Mg	disposeUsingStack	helper that drains a `using` disposal stack, wraps errors in SuppressedError (TS lowering helper)
+Min	elicitationFormSkillDoc	const string = full "Elicitation — collecting skill arguments" widget/form documentation
+Mir	describeEsperantoType	(A)=>switch on typeof returning Esperanto type names ('nombro','tabelo','senvalora')
+Mpr	archiveSessionToolSchema	JSON schema object {type:'object',properties:{session_id,reason},required:['session_id']} for archive-session tool
+Mtt	bigintObjectTypeofNames	{number:'number',bigint:'bigint',object:'date'} typeof-to-name map
+Mvt	hasInDedupeSet	(A)=>_vt.has(A) membership check against a set
+Mzt	copyFileMethodNames	['copyFile','cp','copyFileSync','cpSync'] fs method name list
+N$r	oneMebibyteBytes	1024 * 1024
+N1A	menuEventsDispatcher	getDispatcher/for(setImplementation) IPC dispatcher over MenuEvents channel (openFile/closeWindow/toggleSidebar)
+N1t	mcpToolResultContentAttr	'mcp.tool.result.content' attribute key string
+N4t	openaiInstrumentedMethods	['responses.create','chat.completions.create','embeddings.create'] method names
+N6t	hexBytePattern	'[\\da-f]{2}' regex fragment string for one hex byte
+N8t	otelSdkSpanLiveMetric	'otel.sdk.span.live' metric name string
+NBA	lowerAlnumDashUnderscore64Pattern	/^[a-z0-9][a-z0-9_-]{0,63}$/ identifier validation regex
+NBt	emitWarningOrConsoleError	(A,e,t,i)=> use process.emitWarning if available else console.error
+NDi	claudeUserContentHost	'www.claudeusercontent.com' hostname string
+NEr	thirtyThousandThreshold	3e4; single use as a `> NEr` threshold in wake-scheduler
+NHi	readFileToParserPromise	(A,e)=>new Promise wrapping a stream parser over A.file with maxReadSize
+NNA	emptyJsonObjectString	'{}' literal string
+NNe	modifierKeyNames	['ctrl','alt','shift','meta'] keyboard modifier names
+NSA	userInferenceScope	'user:inference' scope string
+NSi	lightGrayHexColor	'#F5F5F5' color literal
+NU	honoAttributeKeys	{HONO_TYPE:'hono.type',HONO_NAME:'hono.name'}
+NUA	thirdPartySuffix	'-3p' string suffix literal
+NUt	azureCognitiveServicesScope	'https://cognitiveservices.azure.com/.default offline_access' OAuth scope string
+NWi	browserAppNames	list of browser names ('safari','chrome','firefox',...)
+NXA	twoThousandLimit	2e3; used as upper bound in `<= NXA` comparisons
+NZA	clientDataCacheKey	'clientDataCache' literal string
+NZe	scheduledTasksDispatcher	IPC dispatcher over CCDScheduledTasks channel (getAllScheduledTasks/createScheduledTask/...)
+Ndt	windowsErrorCode80070569Pattern	/0x80070569/i regex
+Nee	numberOne	1
+Nei	launchDarklyIntegration	(A)=>warns browser-only and returns {name:'LaunchDarkly'}
+Net	getDefaultStackParser	()=>NsA accessor returning a default value
+Nft	debugRuntimeConfigHint	instructional string about runtimeExecutable/runtimeArgs/port for preview servers
+NgA	fiveThousand	5e3
+Ngt	nine	9
+Nin	diagramTypesSkillDoc	(A)=>returns the full "Diagram types" visualization skill documentation string, A-width parameterized
+Nme	lowerSnakeShortPattern	/^[a-z_]{1,32}$/ regex
+NoA	assertGlobPattern	(A)=>throws TypeError if not string or longer than lZt (glob pattern validator)
+Npr	sendMessageToolDoc	"Send a message to another CCD session..." tool description string
+Nti	oneDayMs	24 * 3600 * 1e3
+Nzt	linkMethodNames	['link','linkSync'] fs method names
+name	koaIntegrationName	const name='Koa' literal string (exported as NWe), used by the Koa integration
+O$	nonWhitespacePattern	'[^\\s]+' regex fragment string
+O0t	emptyObjectLiteral	{} empty object
+O1t	networkProtocolVersionAttr	'network.protocol.version' attribute key
+O4i	resolveZodInnerTypeRef	(A,e,t,i)=>resolves a zod def innerType ref into seen map
+O5i	isBlobLikeWithUrl	(A)=>true when object has string url and function blob
+O5t	redisGetSetMethods	['get','set','setex'] method names
+OC	readUint16LE	(A,e)=>A[e] | A[e+1]<<8 little-endian 16-bit read
+OGi	twoThousandMsOffset	2e3; added to a timeout (`timeoutMs + OGi`)
+OI	localDesktopAppUploadsKey	'local-desktop-app-uploads' literal string
+OL	uploadSizeLimits	{MAX_FILE_SIZE,MAX_FILE_COUNT,MAX_COMPRESSION_RATIO}
+OOr	thirtyThousandMsArg	3e4; passed as a duration arg to a setter
+OWt	oneEighty	180 numeric literal
+OXe	startupSettingsDispatcher	IPC dispatcher over Startup channel (isStartupOnLoginEnabled/isMenuBarEnabled/...)
+OXt	caretEscapePattern	'(?:\\^)' regex fragment string
+OZt	makeLowercaseSuffixMatcher	([A,e])=>builds a length+lowercase-endsWith matcher
+O_r	memoryAccessGuidanceLines	array of "## When to access memories" doc lines
+Oat	dateString20251125	'2025-11-25' date literal
+Oer	fiveThousandMs	5e3
+Ofe	versionStringZeroPointOne	'0.1' string
+OgA	executableFileExtensions	['.exe','.com','.msi','.bin','.app','.dmg','.pkg','.jar']
+Oin	visualizeName	'visualize' literal string
+Opr	markChapterToolDoc	"Mark the start of a new chapter in this session..." tool description string
+Oqt	otelSeverityToSentryLevel	{0:'fatal',1:'warn',2:'info',3:'info',4:'debug',5:'trace'} level map
+Ore	fileSystemIntegrationName	'FileSystem' literal string
+Orn	tenThousandMsElapsedThreshold	1e4; single use as elapsed-time threshold (`Date.now()-e >= Orn`)
+Owe	desktopIntlDispatcher	IPC dispatcher over DesktopIntl channel (getInitialLocale/requestLocaleChange/localeChanged)
+Oxe	deviceAttestationStatusPrefix	'DEVICE_ATTESTATION_STATUS_' string prefix
+Oxt	nonZeroHex32Pattern	'(?![0]{32})[\\da-f]{32}' regex fragment string
+P1t	mcpNotificationServerToClientAttr	'mcp.notification.server_to_client' attribute key
+P3e	mongooseIntegrationName	'Mongoose' literal string
+P3t	spotlightIntegration	(A)=>Spotlight integration with sidecarUrl default localhost:8969
+P4i	resolveZodPrefaultRef	(A,e,t,i)=>resolves zod inner type and sets _prefault default value
+P4r	gitAndGhMutatingCommandPattern	regex matching mutating git/gh subcommands
+PAi	genericPoolIntegration	()=>GenericPool integration tagging generic-pool spans
+PDi	maskBedrockArnAccountId	(A)=>replaces account id digits in a bedrock ARN with ***
+PEA	awsRegionPattern	/^[a-z]{2}(-[a-z]+)+-\d{1,2}$/ AWS region regex
+PGi	sixty	60 numeric literal
+PIr	falseFlag	!1 boolean false literal
+PJt	eventFiltersIntegrationName	'EventFilters' literal string
+POr	cliString	'cli' literal string
+PPA	ellipsisString	'...' literal string
+PPe	eighty	80 numeric literal
+PSi	lastSurfaceReasonMessage	{defaultMessage:'At least one surface must remain enabled.',id:'LastSurfaceReason'}
+PTi	defineZodErrorProperties	(A,e)=>initializes a ZodError: sets name, format/flatten/addIssue/isEmpty props
+PUi	sixtyFourKibibyteBytes	64 * 1024
+PVe	sentryMeasurementUnitAttr	'sentry.measurement_unit' attribute key
+PVr	htmlFileExtensionPattern	/\.html?$/i regex
+PWe	genericPoolIntegrationName	'GenericPool' literal string
+PWr	twoMebibyteBytes	2 * 1024 * 1024
+PWt	eightyOneNinetyTwo	8192 numeric literal
+PXe	filePickersDispatcher	IPC dispatcher over FilePickers channel (getDirectoryPath/getFilePath)
+PXr	fiveHundredThreshold	500; single use as `<= PXr` early-return threshold
+PYi	readFileSyncToStream	(A)=>opens file and writes bytes into a stream in chunks (maxReadSize bound)
+PZt	makeCaseSensitiveSuffixMatcher	([A,e])=>builds a length+endsWith matcher (case-sensitive)
+P_e	firstUint32OrFallback	(A,e,t)=>returns first arg coercible to uint32, else next, else t
+P_i	oneThousandMs	1e3; single use as setTimeout delay
+Pet	resetLocalVariablesState	()=>fx=null, Vj=undefined module-state reset
+Pfe	versionStringZeroPointThree	'0.3' string
+Pfi	localePlaceholderPattern	/\$\{locale\}/i regex matching ${locale}
+Pie	oneThousandSpanLimit	1e3; single use capping number of spans
+PjA	interopCjsNamespace	(A)=>builds an esModule interop namespace object with cached WeakMap (bundler helper)
+Pjt	contextIntegrationName	'Context' literal string
+Pke	anthropicOAuthEndpoints	{BASE_API_URL,CONSOLE_AUTHORIZE_URL,...CLIENT_ID,...} OAuth/API endpoint config
+Plt	privateKeyBlockPattern	'-----BEGIN...PRIVATE KEY...-----' regex fragment matching PEM private key blocks
+Ppr	spawnTaskToolSchema	JSON schema {properties:{title,prompt,tldr,cwd},required:[title,prompt,tldr]}
+Pqt	genAiPromptAttr	'gen_ai.prompt' attribute key
+Pst	chromeExtensionIdString	'dihbgbndebgnbjfmelmegjepbnkhlgni' extension id literal
+Ptn	deviceCodeGrantType	'urn:ietf:params:oauth:grant-type:device_code' OAuth grant-type string
+Pxt	hexBytePatternDup	'[\\da-f]{2}' regex fragment string for one hex byte
+Q2i	eightKibibyteBytes	8 * 1024
+Q2r	safeAttributeCharsPattern	/^[\w@%+=:,./-]+$/ regex
+Q2t	sentryScopeFieldNames	['user','level','extra','contexts','tags','fingerprint','propagationContext']
+Q3t	localVariablesIntegration	(A,e)=>LocalVariables integration capturing local vars on exceptions via debugger
+Q4A	deploymentModeKey	'deploymentMode' literal string
+Q4t	aiUsageCachedInputTokensAttr	'ai.usage.cachedInputTokens' attribute key
+Q7i	uint32ArrayTag	'[object Uint32Array]' object tag string
+Q7r	sixtyFour	64 numeric literal
+QAA	eightKibibyteBytesDup	8 * 1024
+QEi	objectBooleanTypeNames	['object','boolean'] type-name list
+QGt	fourThousandMsFadeDuration	4e3; used as a fade animation duration / timeout (two consistent sites)
+QHi	mkdirpManualSync	(A,e)=>recursive mkdir with mode/uid/gid handling and symlink/unlink fallbacks
+QHt	leadingSentryProjectPrefixPattern	/^o(\d+)\./ regex
+QJr	fifteenHundredMsDelay	1500; single use as setTimeout delay
+QKA	eventFiltersIntegration	(A)=>EventFilters integration dropping events matching configured filters
+QKi	javascriptToolName	'javascript_tool' literal string
+QOr	anthropicApiVersionDate	'2023-06-01' API version date string
+QQr	threeHundredThousandMs	300 * 1e3
+QUe	uuidPattern	/^[0-9a-f]{8}-...-[0-9a-f]{12}$/i UUID regex
+QV	sentryGraphqlOperationAttr	'sentry.graphql.operation' attribute key
+QWe	prismaInstrumentationPackageMeta	{name:'@prisma/instrumentation',version:'6.19.0'}
+QXr	fifteenThousandMsTimeout	15e3; single use as fetch AbortSignal.timeout duration
+QXt	semverComparatorResultMap	{'>':[1],'>=':[0,1],'=':[0],...} comparator-to-sign map
+QYi	encodeNegativeBigEndian	(A,e)=>writes negated number as big-endian two's-complement into buffer
+Q_	genAiOperationNameAttr	'gen_ai.operation.name' attribute key
+Qbt	hasInDedupeSet2	(A)=>dbt.has(A) membership check against a set
+Qcr	plutilBinaryPath	'/usr/bin/plutil' filesystem path literal
+Qei	anthropicAiIntegration	(A)=>Anthropic_AI integration
+Qf	stringFormatPatterns	{cuid,cuid2,ulid,email,uuid,ipv4,ipv6,base64,nanoid,jwt,...} regex map
+Qfe	versionStringZeroPointThreeDup	'0.3' string
+Qgi	coworkFeedbackDispatcher	IPC dispatcher over CoworkFeedback channel (getSystemInfo/captureScreenshot/submitFeedback)
+Qie	thirtyTwo	32 numeric literal
+Qii	parseStackTraceFrames	(A,e)=>parses up to uii frames from a newline-split stack string
+QsA	isNonEmptyStringOrPresent	(A)=>true for non-empty trimmed string or non-null value
+Rg	addToUsingStack	helper registering a disposable on the `using` stack (TS lowering helper)
+Rir	describeEsperantoTypeDup	(A)=>typeof-based Esperanto type-name describer
+Rzt	renameMethodNames	['rename','renameSync'] fs method names
+TIA	anthropicAiIntegrationName	'Anthropic_AI' literal string
+TSA	maskBedrockArnIfPresent	(A)=>masks the account id when a bedrock ARN is found
+Tzt	symlinkMethodNames	['symlink','symlinkSync'] fs method names
+YJt	inboundFiltersIntegration	(A)=>EventFilters integration aliased name 'InboundFilters'
+YZt	makeCaseSensitiveDotlessSuffixMatcher	([A,e])=>length+endsWith matcher excluding dotfiles
+Yjt	contextIntegration	(A)=>Context integration adding app/os/device/culture/cloud_resource contexts
+Z7t	koaIntegration	()=>Koa integration ({name:'Koa',setupOnce})
+_zt	fileSystemIntegration	(A)=>FileSystem integration instrumenting fs spans
+d3t	localVariablesIntegrationName	'LocalVariables' literal string
+dHi	assertDirectorySync	(A)=>throws unless statSync(A).isDirectory()
+e_t	getCliString	()=>POr returns 'cli'
+eer	nodeFsAdapter	object wrapping node fs ops (cwd/stat/readFile/mkdir/...) with traced sync variants
+eot	bitwiseNotByte	(A)=>(255 ^ A) & 255 byte complement
+f3e	makeExactLengthNonDotMatcher	([A])=>matcher: same length and not starting with '.'
+fie	commaSeparator	',' literal separator
+h3e	makeExactLengthNonDotDotMatcher	([A])=>matcher: same length and not '.'/'..'
+hPt	proxyLoggerProviderRegistry	class wVe singleton wrapping a global logger provider (getLoggerProvider/setGlobalLoggerProvider)
+hie	equalsSeparator	'=' literal separator
+hnt	parseZipCentralDirectoryEntry	(A,e,t)=>parses a zip central-directory record into fields
+i5t	mongooseIntegration	()=>Mongoose integration
+kzt	mkdtempMethodNames	['mkdtemp','mkdtempSync'] fs method names
+lZt	sixtyFourKibibyteBytesGlob	1024 * 64 max glob pattern length
+pnt	parseZip64ExtraField	(A,e)=>reads zip64 extended-info extra field sizes
+s4A	inferenceAuthSchemesByProvider	per-provider (gateway/anthropic/bedrock/vertex/foundry/...) auth-scheme field config
+uii	fiftyFrameLimit	50 max stack-frame count
+v8e	traceStateMap	class b8e implementing a W3C-tracestate-like key/value store (set/unset/serialize/_parse)
+vzt	singlePathArgMethodNames	fs method names taking a single path argument
+w3e	expandBracePattern	(A,e)=>validates then brace-expands a glob pattern
+x3t	spotlightIntegrationName	'Spotlight' literal string
+xZt	makeLowercaseDotlessSuffixMatcher	([A,e])=>lowercase length+endsWith matcher excluding '.'/'..'
+y$t	fiveHundredTwelve	512 numeric literal
