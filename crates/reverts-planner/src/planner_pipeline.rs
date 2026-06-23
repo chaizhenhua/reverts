@@ -27,6 +27,9 @@ use crate::{
 use reverts_ir::BindingName;
 use std::collections::{BTreeMap, BTreeSet};
 
+// `last` is a timing cursor reassigned inside the `tick!` macro; the final pass's
+// write is intentionally never read, so the last-write warning is expected here.
+#[allow(unused_assignments)]
 pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitPlan, PlanError> {
     let timing = std::env::var_os("REVERTS_GENERATE_TIMING").is_some();
     let mut last = std::time::Instant::now();

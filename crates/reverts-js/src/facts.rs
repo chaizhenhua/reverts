@@ -1846,7 +1846,8 @@ mod void_zero_collector_tests {
         // `BindingIdentifier` dropped these, so a chunk owning such a binding
         // never exported it and cross-module importers dangled.
         let source = "var { isArray: rH, from: gA } = Array;\nconst [a, , b] = xs;\nlet { p = 1, ...rest } = o;";
-        let facts = collect_top_level_statement_facts(source, None, ParseGoal::TypeScript).unwrap();
+        let facts = collect_top_level_statement_facts(source, None, ParseGoal::TypeScript)
+            .expect("collect top-level statement facts");
         let bindings: std::collections::BTreeSet<&str> = facts
             .iter()
             .flat_map(|fact| fact.bindings.iter().map(String::as_str))

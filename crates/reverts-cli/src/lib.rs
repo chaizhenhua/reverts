@@ -212,7 +212,11 @@ struct ClapCli {
 
 #[derive(Debug, Subcommand)]
 enum ClapCommand {
-    #[command(name = "generate", alias = "generate-project-v2", disable_help_flag = true)]
+    #[command(
+        name = "generate",
+        alias = "generate-project-v2",
+        disable_help_flag = true
+    )]
     GenerateProjectV2(GenerateProjectV2Args),
     #[command(name = "import-unpacked", disable_help_flag = true)]
     ImportUnpacked(ImportUnpackedArgs),

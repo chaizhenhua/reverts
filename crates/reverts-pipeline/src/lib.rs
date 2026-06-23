@@ -1028,7 +1028,8 @@ mod tests {
 
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
-        assert!(source.contains("run(inputValue)"));
+        // Type inference marks the unconstrained param optional (`inputValue?`).
+        assert!(source.contains("run(inputValue?)"));
         assert!(source.contains("const resultValue = inputValue + 1;"));
         assert!(source.contains("return resultValue;"));
     }

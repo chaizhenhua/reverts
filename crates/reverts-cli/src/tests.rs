@@ -474,7 +474,10 @@ fn parses_command_specific_help_without_running_command() {
 #[test]
 fn grouped_command_surface_normalizes_to_flat_commands() {
     let cases: &[(&[&str], &[&str])] = &[
-        (&["import", "--input", "x"], &["import-unpacked", "--input", "x"]),
+        (
+            &["import", "--input", "x"],
+            &["import-unpacked", "--input", "x"],
+        ),
         (&["match", "--apply"], &["match-packages", "--apply"]),
         (&["classify"], &["module-classify"]),
         (&["name", "symbols", "--list"], &["symbol-names", "--list"]),
@@ -482,15 +485,24 @@ fn grouped_command_surface_normalizes_to_flat_commands() {
         (&["name", "from-package"], &["ownership-source-names"]),
         (&["package", "candidates"], &["island-package-candidates"]),
         (&["package", "versions"], &["package-version-diagnostics"]),
-        (&["package", "cache", "audit", "--input", "x"], &["package-cache-audit", "--input", "x"]),
-        (&["package", "cache", "prune"], &["package-cache-prune-stale"]),
+        (
+            &["package", "cache", "audit", "--input", "x"],
+            &["package-cache-audit", "--input", "x"],
+        ),
+        (
+            &["package", "cache", "prune"],
+            &["package-cache-prune-stale"],
+        ),
         (&["report", "coverage"], &["coverage-ledger"]),
         (&["report", "packages"], &["match-packages-report"]),
         (&["assets", "extract"], &["extract-assets"]),
         (&["dev", "recall"], &["match-modules-recall"]),
         // Legacy flat names pass through unchanged.
         (&["symbol-names", "--list"], &["symbol-names", "--list"]),
-        (&["generate", "--input", "db"], &["generate", "--input", "db"]),
+        (
+            &["generate", "--input", "db"],
+            &["generate", "--input", "db"],
+        ),
     ];
     for (input, expected) in cases {
         let got = crate::normalize_command(input.iter().map(|token| token.to_string()).collect());
@@ -514,8 +526,12 @@ fn group_names_and_grouped_help_resolve() {
         CliCommand::Help(HelpTopic::ReportGroup)
     );
     assert_eq!(
-        CliCommand::parse(["help".to_string(), "name".to_string(), "symbols".to_string()])
-            .expect("name symbols help"),
+        CliCommand::parse([
+            "help".to_string(),
+            "name".to_string(),
+            "symbols".to_string()
+        ])
+        .expect("name symbols help"),
         CliCommand::Help(HelpTopic::SymbolNames)
     );
 }

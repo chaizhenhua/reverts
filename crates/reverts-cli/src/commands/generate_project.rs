@@ -45,10 +45,9 @@ pub struct GenerateProjectV2Args {
 impl GenerateProjectV2Args {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
         let mut args = args.into_iter().collect::<Vec<_>>();
-        if args
-            .first()
-            .is_some_and(|argument| argument == crate::help::GENERATE_COMMAND || argument == "generate-project-v2")
-        {
+        if args.first().is_some_and(|argument| {
+            argument == crate::help::GENERATE_COMMAND || argument == "generate-project-v2"
+        }) {
             args.remove(0);
         }
         parse_args_with_name(crate::help::GENERATE_COMMAND, args)
