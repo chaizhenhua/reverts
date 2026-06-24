@@ -1,8 +1,9 @@
 # Post-output Structural Audits
 
-Run these checks after `generate_app_decompiled_files` and before handing the
-output to `reverts-decompile`. Each finding is a ReverTS pipeline defect to fix
-with a regression test; do not hand-edit generated `.ts` output to hide it.
+Run these checks after `reverts-cli generate --input <db> --project-id <id>
+--output <dir> --source-root src` and before handing the output to
+`reverts-decompile`. Each finding is a ReverTS pipeline defect to fix with a
+regression test; do not hand-edit generated `.ts` output to hide it.
 
 Use AST or structured parsing (for example `oxc`) to enumerate imports,
 exports, and declarations. Avoid regex over expression bodies; these audits are
@@ -53,8 +54,8 @@ require, dynamic import, script, or equivalent edge.
 
 Audit steps:
 
-1. Pull source-unit to file mapping from `list_app_artifacts` /
-   `get_artifact_manifest`.
+1. Pull source-unit, file, and coverage counts from `reverts-cli full-inventory
+   --input <db> --project-id <id> --json <file>`.
 2. Compute the source-partition label of each generated `.ts` file from
    source-unit/file provenance.
 3. Enumerate each file's top-level relative or alias imports that resolve to
@@ -100,9 +101,11 @@ Fix workflow:
 1. For each leaked property `Y`, run `query(project_id, entity="symbols",
    search=Y)` and identify the actual owner module.
 2. If the owner module is application code misclassified as a package, correct
-   it with `update_modules` and durable classification evidence.
+   it with `reverts-cli module-classify --input <db> --project-id <id> --batch
+   <TSV> --apply` (the TSV row carries durable classification evidence).
 3. If the module classification is already correct, file the finding against the
    import-binding/cross-reference synthesis mechanism.
-4. Regenerate with `generate_app_decompiled_files(..., overwrite=true)`.
+4. Regenerate with `reverts-cli generate --input <db> --project-id <id> --output
+   <dir> --source-root src` (it overwrites the output directory in place).
 5. Re-run the scan and require the finding count to reach zero or be explicitly
    documented as non-actionable with evidence.

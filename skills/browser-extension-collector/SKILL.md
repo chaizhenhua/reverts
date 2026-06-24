@@ -119,13 +119,13 @@ The manifest always records source units and edges; `--ingest-include` /
    This creates the project, registers source units, and discovers modules
    in one step (import always discovers). Note the printed `project-id`.
 3. Validate inventory with
-   `reverts-cli report inventory --input <db.sqlite> --project-id <id>`
+   `reverts-cli full-inventory --input <db.sqlite> --project-id <id>`
    (add `--json <file>` to capture the report).
 4. Run the standard ReverTS recovery phases (generation, validation,
    quality reporting).
 5. After mechanical recovery is structurally valid, use
    [decompile](../decompile/SKILL.md) for the rename worklist
-   (`reverts-cli name progress` / `name plan` / `generate`)
+   (`reverts-cli naming-progress` / `name plan` / `generate`)
    and [reverts-decompile](../reverts-decompile/SKILL.md) for export
    validation.
 
@@ -147,7 +147,7 @@ following hold:
    `content_style`.
 6. After
    `reverts-cli import --input <artifact_root> --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>`,
-   `reverts-cli report inventory --input <db.sqlite> --project-id <id>` reports
+   `reverts-cli full-inventory --input <db.sqlite> --project-id <id>` reports
    the same source-unit count as the manifest. Mismatch indicates an import
    bug — file as a ReverTS issue, do not retry blindly.
 

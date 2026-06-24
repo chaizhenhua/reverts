@@ -134,15 +134,17 @@ edges.
 
 ## ReverTS Workflow
 
-1. Resolve or create a ReverTS project for the captured app.
-2. Run the collector and inspect the JSON report.
-3. Call `ingest_app_manifest(project_id, manifest_path, run_discovery=true)` so
-   source-unit registration and module discovery run. For a single big bundle,
-   discovery is where bundled-module extraction is driven; expect minutes on
-   large chunks and use a generous MCP client timeout.
-4. Validate inventory with `list_app_artifacts` and `get_artifact_manifest`.
-5. Run [decompile](../decompile/SKILL.md) until its public-surface gate passes
-   and `generate_app_decompiled_files` succeeds with strict gates enabled.
+1. Run the collector and inspect the JSON report.
+2. Import the staged source + manifest into a SQLite facts DB with
+   `reverts-cli import-unpacked --input <artifact_root> --manifest <manifest.json>
+   --project-name <name> --output-db <db.sqlite>`. This registers source units and
+   runs module discovery; for a single big bundle, discovery drives bundled-module
+   extraction — expect minutes on large chunks (let the command run to completion).
+3. Validate inventory with `reverts-cli full-inventory --input <db> --project-id <id>
+   [--json <file>]`.
+4. Run [decompile](../decompile/SKILL.md) — it drives `reverts-cli` — until its
+   public-surface gate passes, then `reverts-cli generate --input <db>
+   --project-id <id> --output <dir> --source-root src` succeeds with strict gates.
 6. Run [reverts-decompile](../reverts-decompile/SKILL.md) with the **web-app**
    runtime profile: install, `tsc --noEmit`, serve the recovered app, then
    Playwright-load the served URL and assert the root UI renders, routes/controls
@@ -165,12 +167,13 @@ A collection run is successful only when **all** hold:
    capture recorded an `entry_url` in `metadata`.
 5. Every `ingest == true` source unit has a real physical path under the stage
    directory or inside `artifact_root` (no dangling refs).
-6. After `ingest_app_manifest(... run_discovery=true)`, `list_app_artifacts`
-   returns the same source-unit count as the manifest. A mismatch is an
-   ingestion bug — file it as a ReverTS issue, do not retry blindly.
-7. `decompile_status(project_id)` can see discovered modules. If discovery
-   produced zero modules from a single large bundle, the bundle-extraction stage
-   failed — fix the pipeline mechanism and rerun; do not mutate the manifest.
+6. After `reverts-cli import-unpacked ...`, `reverts-cli full-inventory --input
+   <db> --project-id <id>` reports the same source-unit count as the manifest. A
+   mismatch is an import bug — file it as a ReverTS issue, do not retry blindly.
+7. `reverts-cli naming-progress --input <db> --project-id <id>` sees discovered
+   modules. If discovery produced zero modules from a single large bundle, the
+   bundle-extraction stage failed — fix the pipeline mechanism and rerun; do not
+   mutate the manifest.
 8. Web-app post-export validation completes through
    [reverts-decompile](../reverts-decompile/SKILL.md): dependency install
    succeeds, real `tsc` runs, the app serves, and Playwright confirms a
@@ -190,9 +193,9 @@ stage directory to make a bad run look good.
 | HAR omits response bodies | notes list `no response body for …` | re-record the HAR with content capture enabled, or allow `--no-refetch-missing` off so the collector refetches |
 | Network fetch fails | `Network error fetching …` / `HTTP 4xx/5xx` | the asset is gone or auth-gated; capture via an authenticated browser session and use HAR/directory mode |
 | Cross-origin CDN chunks | units appear under `_cross/<host>/…` | expected; CDN-hosted chunks are namespaced by host so they never collide with first-party paths |
-| `ingest_app_manifest` rejects manifest | MCP schema validation error | fix the collector or ReverTS ingest with a regression test; do NOT mutate JSON to satisfy the validator |
-| Discovery extracts 0 modules from the bundle | `decompile_status` shows no modules though a large `entry_chunk` ingested | reproduce against the bundle, add a ReverTS bundle-extraction regression test, fix the extractor, re-ingest |
-| Source-unit count mismatch after ingest | `list_app_artifacts.count != manifest.sources.length` | stop; file as a ReverTS bug. Re-ingesting masks the defect |
+| `import-unpacked` rejects manifest | `reverts-cli` exits non-zero with a manifest coverage/evidence error | fix the collector or ReverTS import with a regression test; do NOT mutate JSON to satisfy the validator |
+| Discovery extracts 0 modules from the bundle | `reverts-cli naming-progress` shows no modules though a large `entry_chunk` imported | reproduce against the bundle, add a ReverTS bundle-extraction regression test, fix the extractor, re-import |
+| Source-unit count mismatch after import | `reverts-cli full-inventory` count != `manifest.sources.length` | stop; file as a ReverTS bug. Re-importing masks the defect |
 
 If a site cannot be fetched on the current host (auth wall, geofence, bot
 challenge), stop and report it. Do not fabricate a manifest for assets you could
@@ -204,13 +207,13 @@ not capture.
 |---|---|
 | Drive browser + record HAR / list requests | Playwright MCP `browser_navigate`, `browser_network_requests`, plus the host's HAR export |
 | Collect HAR / URL / directory | `python3 skills/website-collector/bin/collect_website_artifact … --json-report` |
-| Project + ingest | ReverTS MCP `create_project`, `ingest_app_manifest`, `list_app_artifacts`, `get_artifact_manifest` |
-| Semantic naming + output | [decompile](../decompile/SKILL.md): `decompile_status`, `query`, `submit_module_decompilation`, `update_modules`, `generate_app_decompiled_files` |
+| Project + import + inventory | `reverts-cli import-unpacked --input <root> --manifest <manifest.json> --project-name <name> --output-db <db>`, `reverts-cli full-inventory --input <db> --project-id <id> [--json <file>]` |
+| Semantic naming + output | [decompile](../decompile/SKILL.md) (drives `reverts-cli`), ending with `reverts-cli generate --input <db> --project-id <id> --output <dir> --source-root src` |
 | Install / compile / serve / UI | [reverts-decompile](../reverts-decompile/SKILL.md), web-app profile in `references/runtime-validation-profiles.md` |
 
 ## Output Contract
 
-The script writes a manifest accepted by `ingest_app_manifest`:
+The script writes a manifest accepted by `reverts-cli import-unpacked --manifest`:
 
 ```json
 {

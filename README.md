@@ -1,7 +1,8 @@
 # ReverTS
 
-**Decompile minified production JavaScript bundles back into readable,
-runnable, semantically-named TypeScript projects.**
+**Turn shipped, minified JavaScript back into real TypeScript source.**
+
+Readable, runnable, and named like a human wrote it — not just reformatted.
 
 Most "unminifiers" stop at reformatting one file and renaming a few variables.
 ReverTS does *structural* recovery: it splits a single esbuild / webpack /
@@ -112,6 +113,30 @@ rebinds. The skills appear under the `reverts:` namespace:
 - `reverts:website-collector` — capture a live URL / HAR / asset directory
 - `reverts:decompile` — the core webpack/esbuild bundle decompilation pipeline
 - `reverts:reverts-decompile` — post-export install / `tsc` / startup validation
+
+### Your first decompile
+
+You don't run the skills by name — just **describe the input and the goal**, and
+the right skill loads and runs the whole pipeline (it fetches `reverts-cli` on
+first use if needed):
+
+```text
+# in Claude Code or Codex, after install:
+> Decompile the Electron app at /Applications/Claude.app into a readable,
+  runnable TypeScript project, then verify it compiles with tsc.
+```
+
+Point it at any input the same way:
+
+```text
+> Decompile the Chrome extension ~/Downloads/ublock.crx into readable TypeScript.
+> Capture and decompile the SPA at https://app.example.com into TypeScript.
+```
+
+Tips: name the input with an absolute path/URL, say **"decompile"**, and state
+the end goal ("readable, runnable TypeScript") so the agent runs through
+generation *and* validation. Full prompt guidance and the equivalent raw
+`reverts-cli` commands are in [`skills/README.md`](skills/README.md#usage).
 
 ### Update / uninstall
 

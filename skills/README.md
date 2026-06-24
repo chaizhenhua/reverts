@@ -80,42 +80,128 @@ each `SKILL.md` for the exact commands and completion criteria.
 
 ## Install
 
-The skills shell out to the `reverts-cli` binary; they are not MCP tools.
-Installing therefore has two parts: put `reverts-cli` on `PATH`, then register
-the skill directories with your host skill loader.
+A working setup is **two pieces** and they install **together**: the
+`reverts-cli` **binary** (the engine the skills shell out to) and the **skill
+bundle** (the agent playbook). The skills are not MCP tools — there is no server.
 
-### 1. Build and install the CLI
+### Recommended: one command (downloads the prebuilt release)
 
-Build the release binary and put it on `PATH` so the skills can invoke it:
+This downloads the platform binary **and** installs the skills — no Rust
+toolchain, no build from source:
 
 ```bash
-cargo build --release --bin reverts-cli
-# then either symlink it onto PATH ...
+curl -fsSL https://raw.githubusercontent.com/chaizhenhua/reverts/main/install.sh | sh
+```
+
+It fetches the release tarball for your platform (Linux/macOS · x86_64/aarch64),
+verifies its checksum, installs the binary into `~/.reverts/bin`, and installs
+the skills into `~/.claude/skills` (and `~/.codex/skills` when present). Pin a
+version or change paths via env vars — see the [top-level
+README](../README.md#install-options) (`REVERTS_VERSION`, `REVERTS_HOME`,
+`REVERTS_SKILLS_DIR`, `REVERTS_NO_SKILLS`, `REVERTS_BASE_URL`).
+
+**Restart your Claude/Codex session** after installing so the registry rebinds.
+The skills then appear under the `reverts:` namespace
+(`reverts:electron-collector`, `reverts:decompile`, …).
+
+### Auto-bootstrap: the binary installs itself on first use
+
+You do **not** have to install the binary separately ahead of time. Each
+collector skill runs a preflight — [`bin/ensure-reverts-cli`](bin/ensure-reverts-cli) —
+that checks for `reverts-cli` and, if it is missing, **downloads the release
+binary** before the first command. So the minimum is: install the skill bundle,
+ask the agent to decompile something, and the binary is fetched on demand.
+
+### For skill development (this worktree)
+
+Working *on* the skills? Build the binary locally and symlink the skill dirs so
+edits show up live:
+
+```bash
+cargo build --release --bin reverts-cli          # local engine
 ln -sf "$(pwd)/target/release/reverts-cli" ~/.local/bin/reverts-cli
-# ... or install it via cargo:
-cargo install --path crates/reverts-cli
+./skills/install                                  # symlink skills → ~/.claude/skills
+./skills/install --target ~/.codex/skills         # ... and/or Codex
+./skills/install --uninstall                       # remove the symlinks
 ```
 
-<!-- TODO(reverts-cli): confirm npm distribution path -->
-There is currently no npm package in this repository, so `npm install -g reverts`
-is not a supported install path. Use the cargo build above until a published
-distribution exists.
+## Usage
 
-### 2. Install the skills (this worktree)
+Drive the pipeline two ways: inside a Claude/Codex session you describe the
+input and the matching collector skill sequences the steps; or you run the
+`reverts-cli` commands directly (the skills wrap exactly these).
 
-Run the bundled installer once. It creates symlinks from
-`~/.claude/skills/<name>` to each subdirectory under `skills/`, so edits in
-the worktree show up in Claude Code immediately:
+### From a session (recommended) — trigger prompts
+
+After install, **start Claude Code (or Codex) and just ask**, naming the
+artifact path and the goal. The matching skill loads automatically and runs the
+full `collect → import → decompile → validate` loop (fetching `reverts-cli` on
+first use if needed):
+
+```
+# Electron app  → reverts:electron-collector
+> Decompile the Electron app at /Applications/Claude.app into a readable,
+  runnable TypeScript project, then verify it compiles with tsc.
+
+# Browser extension  → reverts:browser-extension-collector
+> Decompile the Chrome extension at ~/Downloads/ublock.crx into readable
+  TypeScript and validate the build.
+
+# Website / SPA  → reverts:website-collector
+> Capture and decompile the SPA at https://app.example.com into readable
+  TypeScript — recover the module structure and externalize npm packages.
+```
+
+Prompt tips that make the skill trigger reliably and finish well:
+
+- **Name the input explicitly** — an absolute path (`/Applications/Foo.app`), a
+  file (`~/Downloads/ext.crx`), or a URL. Vague asks ("decompile my app") stall.
+- **State the end goal** — "readable, runnable TypeScript" / "validate it
+  compiles" — so the agent runs through generation *and* validation, not just
+  ingestion.
+- **Say "decompile"** (not "deobfuscate"/"unminify") — it maps to the skill set.
+- You can force a path: *"use the reverts:electron-collector skill to …"*.
+
+### Directly with reverts-cli (Electron example)
 
 ```bash
-./skills/install                      # default: ~/.claude/skills
-./skills/install --target ~/.codex/skills
-./skills/install --uninstall          # remove all symlinks
+# 0. Collect the artifact manifest (collector script — Electron shown here)
+python3 ~/.claude/skills/electron-collector/bin/collect_electron_artifact \
+  /Applications/Claude.app \
+  --output-manifest /tmp/claude/manifest.json \
+  --stage-dir /tmp/claude/stage --json-report
+
+# 1. Import the unpacked source + manifest into a SQLite facts DB (creates project 1)
+reverts-cli import-unpacked \
+  --input /tmp/claude/stage \
+  --manifest /tmp/claude/manifest.json \
+  --project-name claude-desktop \
+  --output-db /tmp/claude/claude.sqlite
+
+# 2. Generate the readable TypeScript project (modern src/ layout)
+reverts-cli generate \
+  --input /tmp/claude/claude.sqlite --project-id 1 \
+  --output /tmp/claude/claude-src --source-root src
+
+# 3. Externalize inlined npm packages back into bare imports
+reverts-cli match-packages \
+  --input /tmp/claude/claude.sqlite --project-id 1 \
+  --materialize-package-sources --apply
+
+# 4. Report coverage + naming progress (truthful numbers, JSON for CI)
+reverts-cli full-inventory  --input /tmp/claude/claude.sqlite --project-id 1 --json /tmp/claude/inventory.json
+reverts-cli naming-progress --input /tmp/claude/claude.sqlite --project-id 1
+reverts-cli coverage-ledger --input /tmp/claude/claude.sqlite --project-id 1
+
+# 5. Validate the generated project (install + tsc + runtime), via the
+#    reverts-decompile skill's Electron profile
+cd /tmp/claude/claude-src && npm install && npx tsc --noEmit
 ```
 
-Restart your Claude/Codex session after the first install so the skill registry
-picks them up. Subsequent edits to `SKILL.md` or `references/*.md` are picked
-up live (next skill invocation).
+Browser-extension and website inputs follow the same shape — only step 0 (the
+collector) differs (`browser-extension-collector` / `website-collector`); steps
+1–5 are identical. Run `reverts-cli help <command>` for the full flag list of any
+step.
 
 ## Authoring conventions
 

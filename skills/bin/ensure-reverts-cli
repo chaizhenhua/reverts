@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Ensure the `reverts-cli` binary is on PATH, downloading the pre-compiled
+# release if it is missing. Idempotent and safe to run on every skill
+# invocation.
+#
+#   bash ensure-reverts-cli            # ensure on PATH (download if missing)
+#   bash ensure-reverts-cli --print    # also print the resolved path
+#
+# The ReverTS skills shell out to `reverts-cli`. They call this as a preflight so
+# a decompile run bootstraps the binary the first time it is needed — by
+# downloading the platform release asset (no build from source), exactly like the
+# top-level `install.sh`. Binary only: the skill itself is already installed.
+
+set -eu
+
+print=0
+for arg in "$@"; do
+    case "$arg" in
+        --print) print=1 ;;
+        -h|--help) sed -n '2,13p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) echo "ensure-reverts-cli: unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+# Already available → nothing to do.
+if command -v reverts-cli >/dev/null 2>&1; then
+    [ "$print" -eq 1 ] && command -v reverts-cli
+    exit 0
+fi
+
+REPO="chaizhenhua/reverts"
+INSTALL_URL="https://raw.githubusercontent.com/${REPO}/main/install.sh"
+
+echo "ensure-reverts-cli: reverts-cli not found — downloading the release binary…" >&2
+
+# Reuse the canonical installer (handles platform detection + checksum verify).
+# REVERTS_NO_SKILLS=1: only the binary; the skill calling us is already installed.
+if command -v curl >/dev/null 2>&1; then
+    REVERTS_NO_SKILLS=1 sh -c "$(curl -fsSL "$INSTALL_URL")"
+elif command -v wget >/dev/null 2>&1; then
+    REVERTS_NO_SKILLS=1 sh -c "$(wget -qO- "$INSTALL_URL")"
+else
+    echo "ensure-reverts-cli: need curl or wget to download the release." >&2
+    exit 1
+fi
+
+# install.sh puts the binary in ~/.reverts/bin; make sure it's reachable now.
+case ":${PATH}:" in
+    *":${HOME}/.reverts/bin:"*) ;;
+    *) PATH="${HOME}/.reverts/bin:${PATH}"; export PATH ;;
+esac
+
+if ! command -v reverts-cli >/dev/null 2>&1; then
+    echo "ensure-reverts-cli: installed to ~/.reverts/bin but it is not on PATH." >&2
+    echo "  Add it to your shell:  export PATH=\"\$HOME/.reverts/bin:\$PATH\"" >&2
+    exit 1
+fi
+
+[ "$print" -eq 1 ] && command -v reverts-cli
+exit 0

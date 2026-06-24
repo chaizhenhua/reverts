@@ -157,9 +157,9 @@ id, name FROM projects;'`).
 
 After resolving `project_id`:
 
-1. Run `reverts-cli name progress --input <db> --project-id <id>` (add
+1. Run `reverts-cli naming-progress --input <db> --project-id <id>` (add
    `report coverage` for the unified view).
-2. Run `reverts-cli name plan --input <db> --project-id <id> --target-level
+2. Run `reverts-cli naming-plan --input <db> --project-id <id> --target-level
    public-surface` to see the unnamed app worklist.
 3. If modules already exist, skip setup and enter the decision loop.
 
@@ -167,8 +167,8 @@ After resolving `project_id`:
 
 Repeat:
 
-1. `reverts-cli name progress --input <db> --project-id <id> [--json]`
-2. `reverts-cli name plan --input <db> --project-id <id> --target-level
+1. `reverts-cli naming-progress --input <db> --project-id <id> [--json]`
+2. `reverts-cli naming-plan --input <db> --project-id <id> --target-level
    public-surface` (the unnamed-module/symbol worklist)
 3. Match the first applicable rule below
 4. Dispatch parallel sub-agents
@@ -349,10 +349,12 @@ below cut it to **~2% with higher overall quality**. The rules, in priority orde
    **Never use the minified token as a uniqueness suffix.** When several constants
    share a value or role and you need distinct names, disambiguate with a *context*
    word (`pollIntervalMs` / `retryDelayMs`) or, failing that, a plain numeric index
-   (`okResponse`, `okResponse2`) — never `fiveSecondMsBJe` or `mapKdt`. (A broad
-   held-out run showed this is the single most common hygiene failure; the
-   `binding-names` accept path should reject any semantic name that contains its own
-   `original_name` as a substring.)
+   (`okResponse`, `okResponse2`) — never `fiveSecondMsBJe` or `mapKdt`. A broad
+   held-out run showed this is the single most common hygiene failure, so review
+   for it explicitly. (There is no deterministic CLI gate for this: a minified
+   token like `Kdt` is structurally indistinguishable from a real word like
+   `Class`, so a code check would wrongly reject good names such as
+   `emptyConstructorClass` and block `generate` — it is an agent-discipline rule.)
 7. **Never label a binding "unused" or leave it minified-generic from a lack of
    in-file reads.** A declared, exported binding is consumed cross-file (it is public
    surface by definition). Grep the generated tree for its importers and name it for
@@ -548,6 +550,39 @@ state is N externalized `import 'pkg'` + a `vendor/` tree that mirrors the
 remaining inlined libraries by package, leaving only true first-party code as
 anonymous/named clusters.
 
+### Driving island clusters to zero
+
+The split island emits as many `modules/island/cluster-<n>.ts` files. The `<n>`
+is a **mechanical fallback that renumbers every regenerate** — so a cluster only
+gets a stable, meaningful name when you assign one keyed by its **content
+fingerprint**, not its number. `generate` writes the full worklist to
+`.reverts/island-clusters.json` (`{fingerprint, path, binding_count}` per
+cluster); the unnamed ones are exactly those whose `path` still matches
+`cluster-<n>`. The Phase 4 gate requires that set to be empty (the
+`UnnamedMechanicalPath` audit reports zero).
+
+Loop until zero:
+
+1. **Read the worklist** — `.reverts/island-clusters.json`; filter to entries
+   whose `path` is `modules/island/cluster-<n>.ts`. That is the exact remaining set.
+2. **Classify each cluster** (an agent reads the cluster body): externalizable
+   third-party → externalize (shape A/B) and it leaves the set entirely;
+   recognized inlined third-party → `name clusters --accept <fp>=vendor/<pkg>`;
+   genuine first-party → `name clusters --accept <fp>=<feature/subfeature>` from
+   string/API evidence, gated by `name tokens ⊆ evidence` (generic-but-true beats
+   specific-but-false, per the naming discipline).
+3. **Regenerate and re-read the worklist.** Externalization shrinks the cluster
+   set, so re-run the package pass between rounds; remaining `cluster-<n>` entries
+   are the next round's work.
+4. Repeat until `.reverts/island-clusters.json` has no `cluster-<n>` path and the
+   `UnnamedMechanicalPath` audit is clean.
+
+Module file paths follow the same principle through a different channel: drive
+`modules.semantic_name` coverage to 100% via `name from-reference` (deterministic,
+when an upstream source tree exists) then `name modules --accept <id>=<path>` for
+the residue. `report coverage` tracks the module side; the cluster audit tracks
+the island side.
+
 ## Phase 1: Setup
 
 Only for fresh projects:
@@ -562,7 +597,7 @@ Only for fresh projects:
    part of the import.
 3. Runtime helpers are detected deterministically by `import` and
    `generate` — there is no manual confirm step. Inspect them with
-   `reverts-cli report runtime --input <db> --project-id <id>`.
+   `reverts-cli runtime-inventory --input <db> --project-id <id>`.
 
 Helper detection is automatic, so naming/fix agents read the runtime inventory
 rather than receiving a hand-confirmed mapping.
@@ -582,7 +617,7 @@ Classification and symbol naming happen in ONE pass per agent. Each agent reads 
 
 For each module the agent must:
 
-1. Read the worklist from `reverts-cli name plan --input <db> --project-id
+1. Read the worklist from `reverts-cli naming-plan --input <db> --project-id
    <id> --target-level <tier>` — each unnamed target carries its `module_id`,
    `evidence_tokens`, and `rename_channel`. Skip modules with no unnamed targets.
 2. Read the module's source on disk (under `<output>/src/...`) once it has been
@@ -633,7 +668,7 @@ If `incomplete_decompilation > 0` after Phase 2:
 
 ### 3.2 Mechanical names
 
-- Re-read `reverts-cli name progress --input <db> --project-id <id> --json`
+- Re-read `reverts-cli naming-progress --input <db> --project-id <id> --json`
   (and `report coverage`) for the mechanical-name residue
 - Process by subject kind in order: **module** first, then **symbol**, then **global**
 - Module-level: often indicates misclassified packages or bad init-wrapper names
@@ -651,7 +686,7 @@ If `incomplete_decompilation > 0` after Phase 2:
 
 
 - Read the package match/externalization state with
-  `reverts-cli report packages --input <db> --project-id <id>` (or
+  `reverts-cli match-packages-report --input <db> --project-id <id>` (or
   `--all-projects`); unverified or proposed attributions show up there.
 - For modules that still need attribution, run `match
   --package-source-root <appRoot> [--reference-source-root <appRoot>]
@@ -729,6 +764,12 @@ for the residue. The gate below only *checks* the result; it does not produce it
 - `non_existent_package == 0`
 - unnamed app module query `total == 0`
 - `public_surface` ratio == 100% (all public-surface symbols named)
+- **no mechanical island-cluster paths**: the `UnnamedMechanicalPath` audit
+  reports zero — i.e. no `modules/island/cluster-<n>.ts` survives in the output.
+  Every island cluster must carry a semantic (or `vendor/`) path via
+  `name clusters`, keyed by its stable fingerprint in
+  `.reverts/island-clusters.json` (never the `<n>`, which renumbers each
+  regenerate). Drive it to zero with the [cluster worklist loop](#driving-island-clusters-to-zero).
 
 ### P0 — naming-denominator integrity (no silent exclusion)
 
@@ -798,7 +839,7 @@ If any P0 condition fails, do not generate output yet.
    $OUTPUT_DIR --source-root src`
 2. If generation errors occur (non-zero exit + stderr), go back to the control loop.
 3. Spot-check key modules by reading the generated TypeScript on disk under
-   `$OUTPUT_DIR/src/...`, and re-run `reverts-cli report inventory --input <db>
+   `$OUTPUT_DIR/src/...`, and re-run `reverts-cli full-inventory --input <db>
    --project-id <id>` / `report coverage` to confirm the inventory matches.
 4. Run the **post-output structural audit** (5.1a → 5.1b → 5.1c) before
    handing off to [reverts-decompile](../reverts-decompile/SKILL.md).
@@ -819,6 +860,7 @@ regeneration, not a generated-output hand edit. Full procedures live in
 | Package misclassification scan | Every generated output with package imports | App-owned symbol appears as a property of `__reverts_pkg_*` |
 | Oversized module file | Every generated output | A generated file exceeds the line budget (`OversizedModuleFile` audit warning, budget 10k lines) |
 | Dangling named import | Every generated output | A first-party `import { Orig }` has no matching export in its target module (`DanglingNamedImport` audit **error**, blocks output) — esbuild's `No matching export`, caught in-pipeline |
+| Unnamed island cluster | Every generated output with split islands | An island cluster reached output still named `modules/island/cluster-<n>.ts` (`UnnamedMechanicalPath` audit **warning**) — name it via `name clusters` keyed by its fingerprint; this is the Phase 4 cluster gate |
 
 Use the SQLite project DB metadata and AST or structured parsing for these
 audits (the pipeline emits them during `generate`). Do not replace

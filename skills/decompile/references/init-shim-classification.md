@@ -185,7 +185,7 @@ human-review queue.
 `propagate_module_metadata_by_id_with_origin`:
 
 - `application` → `package` upgrade allowed *only* when source authoritatively says `package` AND carries a non-empty `package_name`.
-- `package` → `application` downgrade is **never** allowed (use the explicit `update_modules` MCP tool with `replace=true` to demote).
+- `package` → `application` downgrade is **never** allowed (use `reverts-cli module-classify --input <db> --project-id <id> --batch <TSV> --apply` to demote explicitly).
 - `package_name`, `package_version`, and `semantic_name` are overwritten when target value is NULL **or empty string**.
 
 ### Layer 2 — matcher widens scan (commit `ad770014`)
@@ -251,6 +251,6 @@ For projects whose contaminated cluster cannot be repaired by L2 + L3 alone (the
    `mcp__reverts__match_functions(project_id, original_module=<npm-source>,
    bundled_module=<unknown>, min_confidence=0.8, use_call_graph=true)`.
 6. Use the matcher's confidence to write final classifications via
-   `update_modules`.
+   `reverts-cli module-classify --input <db> --project-id <id> --batch <TSV> --apply`.
 7. Run a final `cross_project_propagate` so newly-classified rows fan
    out to siblings; the L3 guards prevent regression.

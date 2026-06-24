@@ -33,7 +33,7 @@ For Electron decompilation requests, do not stop after producing
    This single command creates the project, registers source units, and
    discovers modules — there is no separate "create project" or "discovery
    toggle" step.
-3. Validate inventory with `reverts-cli report inventory --input <db>
+3. Validate inventory with `reverts-cli full-inventory --input <db>
    --project-id <id>`.
 4. Run [decompile](../decompile/SKILL.md) — it now drives `reverts-cli` —
    until its public-surface gate passes, then run `reverts-cli
@@ -124,7 +124,7 @@ The manifest always records source units and edges. Only JS/TS-family sources pa
    to create the project, register artifact inventory, and discover modules in
    one step. Note the project id assigned in the new SQLite database for the
    following steps.
-3. Validate inventory with `reverts-cli report inventory --input <db>
+3. Validate inventory with `reverts-cli full-inventory --input <db>
    --project-id <id> --json <inventory.json>` and compare source-unit counts
    against the collector manifest.
 4. Run the standard [decompile](../decompile/SKILL.md) control loop (it drives
@@ -155,10 +155,10 @@ A collection run is considered successful only when **all** of the following hol
 4. Every entry with `ingest_enabled == true` has a real path under the
    stage directory or directly inside `artifact_root` (no dangling refs).
 5. After `reverts-cli import ...`, the source-unit count reported by
-   `reverts-cli report inventory --input <db> --project-id <id>` matches the
+   `reverts-cli full-inventory --input <db> --project-id <id>` matches the
    manifest. A mismatch indicates an import bug — file it as a
    ReverTS issue, do not retry blindly.
-6. `reverts-cli name progress --input <db> --project-id <id>` (and
+6. `reverts-cli naming-progress --input <db> --project-id <id>` (and
    `report coverage` for the unified ledger) can see discovered modules. If
    discovery fails during import, fix the pipeline mechanism and rerun
    collection + import; do not remove source units or mutate the manifest to
@@ -195,7 +195,7 @@ files.
 |---|---|
 | Collect `.dmg` / `.img` / `.app` / `Resources` / `app.asar` | `python3 skills/electron-collector/bin/collect_electron_artifact ... --json-report` |
 | Project + import + discovery | `reverts-cli import --input <app> --manifest <manifest.json> --project-name <name> --output-db <db.sqlite>` |
-| Inventory + progress | `reverts-cli report inventory --input <db> --project-id <id> [--json <file>]`, `reverts-cli name progress --input <db> --project-id <id> [--json]`, `reverts-cli report coverage --input <db> --project-id <id>` |
+| Inventory + progress | `reverts-cli full-inventory --input <db> --project-id <id> [--json <file>]`, `reverts-cli naming-progress --input <db> --project-id <id> [--json]`, `reverts-cli coverage-ledger --input <db> --project-id <id>` |
 | Semantic naming + output | [decompile](../decompile/SKILL.md) (drives `reverts-cli`), ending with `reverts-cli generate --input <db> --project-id <id> --output <dir> --source-root src` |
 | Install/compile/runtime/UI | [reverts-decompile](../reverts-decompile/SKILL.md), Electron profile in `references/runtime-validation-profiles.md` |
 
