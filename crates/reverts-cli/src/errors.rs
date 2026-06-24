@@ -452,6 +452,12 @@ pub enum NamingProgressError {
     Pipeline(PipelineError),
     Classification(ModuleClassifyError),
     ReadSymbolIndex(io::Error),
+    /// `--gate` was requested and the target tier is not fully named.
+    GateUnmet {
+        tier: String,
+        named: usize,
+        universe: usize,
+    },
 }
 
 impl fmt::Display for NamingProgressError {
@@ -463,6 +469,16 @@ impl fmt::Display for NamingProgressError {
             Self::ReadSymbolIndex(source) => {
                 write!(formatter, "failed to read symbol index: {source}")
             }
+            Self::GateUnmet {
+                tier,
+                named,
+                universe,
+            } => write!(
+                formatter,
+                "naming gate unmet: tier '{tier}' is {named}/{universe} named \
+                 ({} symbol(s) still need a semantic name)",
+                universe.saturating_sub(*named),
+            ),
         }
     }
 }
@@ -474,6 +490,7 @@ impl Error for NamingProgressError {
             Self::Pipeline(source) => Some(source),
             Self::Classification(source) => Some(source),
             Self::ReadSymbolIndex(source) => Some(source),
+            Self::GateUnmet { .. } => None,
         }
     }
 }
@@ -754,6 +771,13 @@ impl CliRunError {
             Self::RuntimeInventory(_) | Self::FullInventory(_) | Self::IdentifierInventory(_) => {
                 "next: inventory could not be computed. Ensure the DB loads (`naming-progress` should succeed) \
                  and that any `--symbol-index` path exists; regenerate the project to refresh `.reverts/`."
+            }
+            // The `--gate` failure is not a compute error — coverage was computed
+            // fine, the tier simply is not 100% named. Point at the naming loop.
+            Self::NamingProgress(NamingProgressError::GateUnmet { .. }) => {
+                "next: naming gate failed — the tier is not 100% named. Pull the residue with \
+                 `naming-plan --target-level <tier>`, accept names (`symbol-names`/`binding-names`), \
+                 regenerate, then re-run `naming-progress --gate` until it exits 0."
             }
             Self::NamingProgress(_) | Self::CoverageLedger(_) => {
                 "next: could not compute naming coverage. Ensure the DB loads and the `--symbol-index` file (if \

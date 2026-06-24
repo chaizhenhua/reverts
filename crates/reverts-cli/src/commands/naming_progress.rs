@@ -628,14 +628,30 @@ pub fn naming_progress_json(report: &NamingProgressReport, target: NamingProgres
     serde_json::to_string_pretty(&value).expect("serializing naming progress JSON is infallible")
 }
 
+/// When `--gate` is set, fail unless the target tier is 100% named. The report
+/// has already been printed (so the unnamed worklist is visible) — this only
+/// decides the exit status.
+fn gate_result(args: &NamingProgressArgs, headline: TierCoverage) -> Result<(), CliRunError> {
+    if args.gate && headline.named != headline.universe {
+        return Err(CliRunError::NamingProgress(
+            NamingProgressError::GateUnmet {
+                tier: target_label(args.target_level).to_string(),
+                named: headline.named,
+                universe: headline.universe,
+            },
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn run(args: NamingProgressArgs) -> Result<(), CliRunError> {
     let report = naming_progress_from_sqlite(&args).map_err(CliRunError::NamingProgress)?;
+    let headline = headline_coverage(&report.totals, args.target_level);
     if args.json {
         println!("{}", naming_progress_json(&report, args.target_level));
-        return Ok(());
+        return gate_result(&args, headline);
     }
     let totals = &report.totals;
-    let headline = headline_coverage(totals, args.target_level);
     println!(
         "naming progress for project {}: target={} {}/{} ({:.2}%) | global_api_surface {}/{} ({:.2}%), internal_module_surface {}/{} ({:.2}%), module_scope_symbols {}/{} ({:.2}%), declarations {}/{} ({:.2}%), reached={}, modules={}",
         report.project_id,
@@ -692,7 +708,7 @@ pub(crate) fn run(args: NamingProgressArgs) -> Result<(), CliRunError> {
             target_label(args.target_level),
         );
     }
-    Ok(())
+    gate_result(&args, headline)
 }
 
 #[cfg(test)]
@@ -1095,5 +1111,31 @@ mod tests {
         assert_eq!(provider.imported_by_count, 2);
         assert_eq!(provider.internal_module_surface.len(), 2);
         assert_eq!(provider.global_api_surface.len(), 1);
+    }
+
+    #[test]
+    fn gate_fails_only_when_enabled_and_tier_incomplete() {
+        use super::{TierCoverage, gate_result};
+        use crate::args::{NamingProgressArgs, NamingProgressTier};
+        use std::path::PathBuf;
+
+        let mk = |gate: bool| NamingProgressArgs {
+            input: PathBuf::from("x.sqlite"),
+            project_id: 1,
+            target_level: NamingProgressTier::PublicSurface,
+            json: false,
+            symbol_index: None,
+            gate,
+        };
+        let cov = |universe, named| TierCoverage { universe, named };
+
+        // gate on + tier incomplete -> non-zero exit
+        assert!(gate_result(&mk(true), cov(5, 3)).is_err());
+        // gate on + tier fully named -> ok
+        assert!(gate_result(&mk(true), cov(5, 5)).is_ok());
+        // gate off -> always ok regardless of coverage
+        assert!(gate_result(&mk(false), cov(5, 3)).is_ok());
+        // gate on + empty tier (nothing to name) -> ok
+        assert!(gate_result(&mk(true), cov(0, 0)).is_ok());
     }
 }

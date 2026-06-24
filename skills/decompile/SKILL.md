@@ -799,7 +799,13 @@ for the residue. The gate below only *checks* the result; it does not produce it
 - `package_attribution_unverified == 0` (every `cat:"pkg"` module has an accepted attribution contract)
 - `non_existent_package == 0`
 - unnamed app module query `total == 0`
-- `public_surface` ratio == 100% (all public-surface symbols named)
+- `public_surface` ratio == 100% (all public-surface symbols named) —
+  **machine-enforced, do not eyeball the percentage**: run
+  `reverts-cli naming-progress --input <db> --project-id <id> --target-level
+  public-surface --gate`. It prints the report **and exits non-zero** while any
+  public-surface symbol lacks a semantic name (`naming gate unmet: tier
+  'public-surface' is N/M named`). Wire this exact command as the blocking gate;
+  output is not done until it exits 0.
 - **no mechanical island-cluster paths**: the `UnnamedMechanicalPath` audit
   reports zero — i.e. no `modules/island/cluster-<n>.ts` survives in the output.
   Every island cluster must carry a semantic (or `vendor/`) path via

@@ -289,6 +289,14 @@ pub struct NamingProgressArgs {
     /// re-emitting the project just to compute naming coverage.
     #[arg(long = "symbol-index")]
     pub symbol_index: Option<PathBuf>,
+    /// Exit non-zero unless the `--target-level` tier is 100% named. Turns the
+    /// coverage report into an enforceable completion gate (CI / skill use):
+    /// the report still prints (so the unnamed worklist is visible), then the
+    /// command fails if any symbol at that tier lacks a semantic name. Default
+    /// tier is `full`; pass `--target-level public-surface` for the public-surface
+    /// gate.
+    #[arg(long)]
+    pub gate: bool,
 }
 
 impl NamingProgressArgs {
