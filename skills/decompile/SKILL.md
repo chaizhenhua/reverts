@@ -63,6 +63,22 @@ Playwright-backed UI interaction checks for browser or extension outputs.
   public-surface pass, not as an afterthought (`name modules --accept
   <MODULE_ID=path>` for paths; `name from-reference` sets both automatically
   when an upstream tree exists). The `public_surface` ratio must reach 100%.
+- **Naming order of operations — do these in order:**
+  1. **Module/file names first, to 100%.** Before naming any internal binding,
+     give *every* module a semantic path + name: `name from-reference`
+     (deterministic, when an upstream tree exists), then `name modules --accept
+     <MODULE_ID=path>` for the residue, plus the island
+     [cluster-to-zero loop](#driving-island-clusters-to-zero) so no `cluster-<n>`
+     (numeric/anonymous) path survives. Gate: `report coverage` module side =
+     100% and the `UnnamedMechanicalPath` audit is clean. No file ships with a
+     numeric/anonymous name.
+  2. **Then internals, module by module, until the public surface is named.**
+     Walk modules one at a time. For each, `name plan --target-level
+     public-surface` lists that module's unnamed exported symbols + owned globals;
+     name them, then move to the next module. Repeat until `public_surface` = 100%
+     across **all** modules — the mandatory output gate. Deeper tiers
+     (`declarations` → `full`, internal helpers, locals) are optional and only
+     after the public surface is complete, per the user's chosen tier.
 - Prioritize public surface first: module paths/names, exported symbols, owned
   globals, constructor/state fields, internal helpers, locals last.
 - Do not rename bundler/runtime helpers into fake business terms just to
@@ -539,16 +555,31 @@ name reflects the recognized package, so the output is honest about provenance:
 2. Regenerate — the cluster now emits as `modules/island/vendor/<package>.ts`
    instead of `cluster-NNNN.ts`. The code stays inlined (it runs; equivalence
    trace unchanged), but it is clearly labeled third-party.
-3. **`vendor/` contents are NOT first-party naming work.** Once a region is
-   relocated under `vendor/`, agents must not spend semantic-naming effort on its
-   internal bindings — it is recovered third-party code, not application code.
-   Only genuinely first-party clusters get binding/symbol names.
+3. **The internal-naming exemption applies ONLY to a *confidently recognized*
+   package.** When a region is relocated under `vendor/<pkg>` because the agent
+   identified the library with real evidence (string / `VERSION` / API anchors),
+   its internal bindings may be left as-is — a reader who needs them reads the
+   genuine package source, so inventing names for `zod`/`lodash` internals is
+   false-provenance noise. **But "I could not externalize it" is NOT the same as
+   "it is a known package."** A region that cannot be externalized *and* cannot be
+   confidently tied to a named package is, to the reader, indistinguishable from
+   application code — it ships inline with no upstream to consult. It does **not**
+   get the exemption: treat it as first-party and **fully name its
+   bindings/symbols**. Unidentifiable is never a license to leave minified `a, b,
+   c` in the output.
 
-Decision order per recognized third-party region: **externalize (A or B) first;
-only if that is impossible, relocate to `vendor/` via `name clusters`.** The end
-state is N externalized `import 'pkg'` + a `vendor/` tree that mirrors the
-remaining inlined libraries by package, leaving only true first-party code as
-anonymous/named clusters.
+Decision order per non-externalizable region:
+1. **Externalize (A or B)** — removes it from the output and from naming. Best.
+2. **Else, if confidently a recognized package** → relocate to `vendor/<pkg>` via
+   `name clusters` (module-level path name required; internal bindings optional).
+3. **Else (cannot externalize, cannot confidently identify)** → it is shipping
+   inline output → **name it fully as first-party.** No anonymous cluster and no
+   minified-binding region survives to output under "it's probably a library."
+
+The end state is N externalized `import 'pkg'` + a `vendor/` tree mirroring the
+*recognized* inlined libraries by package + every remaining inline module
+(first-party **or** unidentified) carrying a semantic path **and** fully named
+bindings. **No non-externalized module reaches output without a semantic name.**
 
 ### Driving island clusters to zero
 
@@ -565,12 +596,17 @@ Loop until zero:
 
 1. **Read the worklist** — `.reverts/island-clusters.json`; filter to entries
    whose `path` is `modules/island/cluster-<n>.ts`. That is the exact remaining set.
-2. **Classify each cluster** (an agent reads the cluster body): externalizable
-   third-party → externalize (shape A/B) and it leaves the set entirely;
-   recognized inlined third-party → `name clusters --accept <fp>=vendor/<pkg>`;
-   genuine first-party → `name clusters --accept <fp>=<feature/subfeature>` from
-   string/API evidence, gated by `name tokens ⊆ evidence` (generic-but-true beats
-   specific-but-false, per the naming discipline).
+2. **Classify each cluster** (an agent reads the cluster body), in priority order:
+   externalizable third-party → externalize (shape A/B) and it leaves the set
+   entirely; **confidently** recognized inlined third-party (real package evidence)
+   → `name clusters --accept <fp>=vendor/<pkg>`; **otherwise — genuine first-party
+   *or* code you cannot externalize and cannot confidently tie to a named package**
+   → `name clusters --accept <fp>=<feature/subfeature>` from string/API evidence,
+   gated by `name tokens ⊆ evidence` (generic-but-true beats specific-but-false,
+   per the naming discipline), **and fully binding-name it**. "Unidentified inline
+   code" resolves to the first-party path, never to a leftover `cluster-<n>`: if
+   you cannot externalize it and cannot prove the package, it ships as readable
+   output, so it must be named.
 3. **Regenerate and re-read the worklist.** Externalization shrinks the cluster
    set, so re-run the package pass between rounds; remaining `cluster-<n>` entries
    are the next round's work.
@@ -805,6 +841,15 @@ Before accepting the gate:
    and fix the mechanism — do not proceed to output.
 3. Never declare naming complete from `reached_level` alone. A `complete: true`
    over an under-counted universe is a false pass.
+4. **A `vendor/` exclusion is valid only with confident package evidence.** Every
+   module/cluster excluded from the naming denominator must be either truly
+   externalized (gone from output) or relocated to `vendor/<pkg>` under a *named,
+   evidenced* package. Code that is merely "not first-party-looking" but carries
+   no package identity is **unidentified inline output** — it stays in the
+   first-party `full`-tier denominator and must be named. Spot-check: for each
+   `vendor/<pkg>` path, the acceptance must record real evidence
+   (`origin=agent`, non-empty `--evidence`); a `vendor/` path with no package
+   evidence is a denominator-dodge, not a recognized library.
 
 ### Naming module-less (entry-island) code
 
