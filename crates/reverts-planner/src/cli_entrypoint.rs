@@ -339,9 +339,23 @@ pub(crate) fn emit_entrypoint_island(
     emit_planned_entrypoint_island(program, plan, island)
 }
 
-/// Emit path of one island cluster file (mechanical fallback name).
+/// Emit path of one island cluster file (degenerate `cluster_id`-keyed form).
+///
+/// Only the unreachable safety-net fallback inside the `*_path_for` closures
+/// uses this (when a path map is somehow incomplete). The real path computation
+/// uses `mechanical_cluster_path`, keyed by content fingerprint, so the name is
+/// stable across regenerates.
 fn island_cluster_path(cluster_id: usize) -> String {
     format!("modules/island/cluster-{cluster_id}.ts")
+}
+
+/// Stable mechanical path for an unnamed island cluster, keyed by its **content
+/// fingerprint** so it does NOT renumber across regenerates (unlike the legacy
+/// sequential `cluster-<id>` form). Binding names keyed to this path therefore
+/// survive a regenerate without re-homing. A cluster with an accepted
+/// `cluster-names` override emits at its semantic path instead.
+fn mechanical_cluster_path(fingerprint: &str) -> String {
+    format!("modules/island/cluster-{fingerprint}.ts")
 }
 
 /// Emit path for a cluster with an accepted semantic `cluster-names` override.
@@ -890,11 +904,16 @@ fn emit_island_clusters(
     let mut cluster_paths: BTreeMap<usize, String> = BTreeMap::new();
     let mut used_cluster_paths: BTreeSet<String> = BTreeSet::new();
     for group in &clusters {
-        let path = cluster_fingerprints
-            .get(&group.cluster_id)
+        let fingerprint = cluster_fingerprints.get(&group.cluster_id);
+        let path = fingerprint
             .and_then(|fingerprint| cluster_name_overrides.get(fingerprint))
             .map(|semantic| semantic_island_cluster_path(semantic, &mut used_cluster_paths))
-            .unwrap_or_else(|| island_cluster_path(group.cluster_id));
+            .unwrap_or_else(|| match fingerprint {
+                // Stable, fingerprint-keyed mechanical path (survives regenerate).
+                Some(fingerprint) => mechanical_cluster_path(fingerprint),
+                // Unreachable: a cluster always has a fingerprint here.
+                None => island_cluster_path(group.cluster_id),
+            });
         cluster_paths.insert(group.cluster_id, path);
     }
     let cluster_path_for = |cluster_id: usize| -> String {
@@ -1097,7 +1116,8 @@ fn emit_island_clusters(
             let chunk_path = cluster_name_overrides
                 .get(&chunk_fingerprint)
                 .map(|semantic| semantic_island_cluster_path(semantic, &mut used_cluster_paths))
-                .unwrap_or_else(|| island_cluster_path(chunk_ids[index]));
+                // Stable, fingerprint-keyed mechanical path (survives regenerate).
+                .unwrap_or_else(|| mechanical_cluster_path(&chunk_fingerprint));
             plan.record_island_cluster(chunk_fingerprint, chunk_path.clone(), locals.len());
             chunk_paths.insert(chunk_ids[index], chunk_path);
         }
@@ -1540,6 +1560,28 @@ fn module_file_is_planned(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mechanical_cluster_path_is_fingerprint_keyed_not_renumbering() {
+        // The mechanical fallback path is keyed by the cluster's content
+        // fingerprint, so the same cluster content emits the same path across
+        // regenerates — which is what lets binding names keyed to it survive a
+        // regenerate (the renumbering `cluster_id` form does not).
+        let fp = crate::island_split::cluster_fingerprint(
+            &["a", "b", "c"].iter().map(|n| BindingName::new((*n).to_string())).collect(),
+        );
+        assert_eq!(
+            mechanical_cluster_path(&fp),
+            format!("modules/island/cluster-{fp}.ts"),
+        );
+        // Order-independent fingerprint → identical path for the same content.
+        let fp2 = crate::island_split::cluster_fingerprint(
+            &["c", "a", "b"].iter().map(|n| BindingName::new((*n).to_string())).collect(),
+        );
+        assert_eq!(mechanical_cluster_path(&fp), mechanical_cluster_path(&fp2));
+        // Distinct from the legacy id-form so a stale id can't masquerade as it.
+        assert_ne!(mechanical_cluster_path(&fp), island_cluster_path(1186));
+    }
 
     #[test]
     fn semantic_island_path_sanitizes_segments_and_breaks_collisions() {
