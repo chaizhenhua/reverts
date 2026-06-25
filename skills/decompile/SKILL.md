@@ -802,10 +802,22 @@ for the residue. The gate below only *checks* the result; it does not produce it
 - `public_surface` ratio == 100% (all public-surface symbols named) —
   **machine-enforced, do not eyeball the percentage**: run
   `reverts-cli naming-progress --input <db> --project-id <id> --target-level
-  public-surface --gate`. It prints the report **and exits non-zero** while any
-  public-surface symbol lacks a semantic name (`naming gate unmet: tier
-  'public-surface' is N/M named`). Wire this exact command as the blocking gate;
-  output is not done until it exits 0.
+  public-surface --gate --symbol-index <output>/.reverts/symbol-index.json`. It
+  prints the report **and exits non-zero** while any public-surface symbol lacks a
+  semantic name (`naming gate unmet: tier 'public-surface' is N/M named`). Wire
+  this exact command as the blocking gate; output is not done until it exits 0.
+  - **`--symbol-index` is mandatory here, not optional.** Without it the command
+    re-emits the project, and island clusters **renumber on every emit** — so
+    binding names keyed to the previous `cluster-<n>` paths are orphaned and the
+    gate falsely reports `0` even when thousands of names exist. Always gate
+    against the **same** `symbol-index.json` the names were applied against (the
+    one written by the authoritative `generate`).
+  - This is also *why* clusters must be given **stable, fingerprint-keyed semantic
+    paths before naming their bindings** (the paths-first "Naming order of
+    operations"): bindings keyed to mechanical `cluster-<n>` paths do not survive a
+    regenerate;
+    bindings keyed to stable semantic paths do. Name paths → regenerate → name
+    bindings against the stable emit → gate against that same emit.
 - **no mechanical island-cluster paths**: the `UnnamedMechanicalPath` audit
   reports zero — i.e. no `modules/island/cluster-<n>.ts` survives in the output.
   Every island cluster must carry a semantic (or `vendor/`) path via
