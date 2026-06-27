@@ -1,0 +1,143 @@
+accept	2c8531331ffaf17f	vendor/opentelemetry-instrumentation	InstrumentationBase + registers http/express/graphql/mongodb/redis OpenTelemetry instrumentations
+accept	ea1904afae5a40e6	auth/oauth	OAuth authorize+token-exchange flow, sessionKey/lastActiveOrg cookies, token cache persist
+accept	de468a7a8b3ab9e8	auth/sso	gateway SSO device-code grant + LoopbackPkce sign-in error classification
+accept	a0c6b1b3c13c326b	auth/oidc	OIDC discovery document/endpoints + oauth/profile subscription-tier fetch
+accept	ddde038f134aa32e	agent/session-error-classification	error categories sdk_binary_missing/disclaimer_binary_missing/process_crashed/worktree_hook_failed/remote_worktree_failed/network + Stream idle timeout, tool_progress/tool_result streaming (66 category: hits)
+accept	f0b4f597f94fcdfb	plugins/cli-manifest-validation	plugin CLI manifest validation: clis/oauth/confirm/displayName/icon/envVar checks ("Top-level oauth/confirm cannot be combined with clis", "already used by clis"); plus Bedrock SSO + scheduled-task tool desc
+accept	54d5315f143bcd71	agent/tool-permissions	allow/deny permission decisions (67 hits), PreToolUse/PostToolUse hooks, skip_all_permission_checks, BLOCKED_EXTENSION, handleToolCall export
+accept	f1860425885c7596	vendor/sentry-integrations	inlined Sentry SDK: @sentry/instrumentation-{anthropic-ai,openai,langchain,langgraph,google-genai,firebase,vercel-ai} strings; hundreds of *Integration factories, NodeClient, init, getDefaultIntegrations, makeElectronTransport
+accept	f0d96d81f8151683	vendor/opentelemetry-semantic-conventions-utils	createConstMap helper (uppercase/replace [-.]→_)
+accept	7a4172e74ae3c68d	vendor/opentelemetry-semantic-conventions	ATTR_* const map (http/db/jvm/dotnet/aspnetcore semconv strings)
+accept	4dccfaf872cb674c	vendor/opentelemetry-instrumentation-http	super('@opentelemetry/instrumentation-http'); HttpInstrumentation extends InstrumentationBase
+accept	02f3740aebf42920	vendor/opentelemetry-semantic-conventions-utils	createConstMap helper
+accept	885bfbea91977746	vendor/opentelemetry-semantic-conventions	ATTR_* const map (incl service.namespace/aspnetcore.user incubating semconv)
+accept	51bcb637f1981c15	vendor/opentelemetry-context-async-hooks	AbstractAsyncHooksContextManager export
+accept	6e7c5dce892a3591	vendor/opentelemetry-semantic-conventions-utils	createConstMap helper
+accept	3acdfb6d3e0a886d	vendor/opentelemetry-semantic-conventions	ATTR_* const map (semconv strings)
+accept	77d1ccf9d0e62674	vendor/opentelemetry-instrumentation-fs	FsInstrumentation extends InstrumentationBase; vendor/opentelemetry imports
+accept	391ca6528ef803bd	vendor/opentelemetry-instrumentation-graphql-utils	wrapFields/wrapFieldResolver/addSpanSource graphql instrumentation helpers
+accept	77f36374e955b719	vendor/opentelemetry-instrumentation-graphql	GraphQLInstrumentation extends InstrumentationBase
+accept	8bf54f2541bbb655	vendor/opentelemetry-instrumentation-kafkajs	KafkaJsInstrumentation extends InstrumentationBase
+accept	3927c70e4589b4ac	vendor/opentelemetry-instrumentation-mongodb	MongoDBInstrumentation extends InstrumentationBase
+accept	9e4b0362b3a90326	vendor/opentelemetry-instrumentation-mongoose	MongooseInstrumentation; vendor/opentelemetry-instrumentation-mongoose imports
+accept	5cc6190cc515bea1	vendor/opentelemetry-instrumentation-mysql	MySQLInstrumentation extends InstrumentationBase
+accept	d2278c3899032019	vendor/opentelemetry-sql-common	addSqlCommenterComment export (sql-common)
+accept	4aa517b4a49e4c6e	vendor/opentelemetry-semantic-conventions-utils	createConstMap helper
+accept	ffdd53e910b4b2cb	vendor/opentelemetry-semantic-conventions	ATTR_* const map (semconv strings)
+accept	029578d38f903b62	vendor/opentelemetry-instrumentation-mysql2	MySQL2Instrumentation extends InstrumentationBase
+accept	963536b1408f7816	vendor/opentelemetry-instrumentation-redis	RedisInstrumentationV4_V5; '@redis/client'/'@node-redis/client'
+accept	fc3d7052c2b898e4	vendor/opentelemetry-instrumentation-pg-attribute-names	AttributeNames enum (db.postgresql.values/plan/idle.timeout)
+accept	1e0751178b96eb65	vendor/opentelemetry-semantic-conventions-utils	createConstMap helper
+accept	e041c93131654b7f	vendor/opentelemetry-semantic-conventions	ATTR_* const map (semconv strings)
+accept	795855ba981b4e05	vendor/opentelemetry-instrumentation-pg-utils	getQuerySpanName/getConnectionString/getPoolName pg helpers
+accept	8348f068c165621b	vendor/opentelemetry-instrumentation-pg	PgInstrumentation extends InstrumentationBase
+accept	f424dec78f4374b9	vendor/opentelemetry-instrumentation-hapi	HapiInstrumentation extends InstrumentationBase
+accept	c70d89ecf9820d3f	vendor/opentelemetry-semantic-conventions-utils	createConstMap helper
+accept	335f0cd17b93a52b	vendor/opentelemetry-semantic-conventions	ATTR_*/DB_SYSTEM_NAME/aspnetcore/signalr semconv const-map ('telemetry.sdk.*','db.system.name')
+accept	ed6ad50f8b0a6aa8	vendor/opentelemetry-semantic-conventions	createConstMap helper (toUpperCase().replace(/[-.]/g,'_')) — semconv internal builder
+accept	62a7100b1d6d24e4	vendor/opentelemetry-semantic-conventions	stable ATTR_* semconv const-map (service.name/http.route/otel.status_code)
+accept	2b65393884194122	vendor/opentelemetry-instrumentation-knex	getFormatter/otelExceptionFromKnexError/mapSystem/extractTableName; imports opentelemetry-semantic-conventions
+accept	1516f066384d4652	vendor/opentelemetry-instrumentation-knex	KnexInstrumentation extends InstrumentationBase; 'opentelemetry.instrumentation-knex.context'; knex/*/runner.js
+accept	c02e8b6140a44755	vendor/opentelemetry-instrumentation-tedious	TediousInstrumentation COMPONENT='tedious'; 'opentelemetry.instrumentation-tedious.*'
+accept	5c4c2640fc8f5728	vendor/opentelemetry-instrumentation-generic-pool	GenericPoolInstrumentation; 'generic-pool'; imports opentelemetry-instrumentation-generic-pool
+accept	bd3977b98a9354b5	vendor/opentelemetry-instrumentation-dataloader	DataloaderInstrumentation; 'dataloader'; imports opentelemetry-instrumentation-dataloader-2
+accept	6b39395e3cc42e20	vendor/opentelemetry-instrumentation-amqplib	AmqplibInstrumentation; 'amqplib'; amqplib/lib/channel_model.js; imports instrumentation-amqplib
+accept	460529913ad73baa	vendor/rxjs-util-create-error-class	createErrorClass (Error.call + prototype chain) — rxjs internal util
+accept	dbfdc96b7ba9ab70	vendor/rxjs-subscription	Subscription/isSubscription/EMPTY_SUBSCRIPTION; imports rxjs-unsubscription-error/arrremove
+accept	c796f85941c04a0e	vendor/rxjs-observable	Observable class (subscribe/lift/pipe/toPromise); imports rxjs vendor siblings
+accept	65f9bfcb676a7984	vendor/rxjs-connectable-observable	ConnectableObservable extends Observable (refCount/connect/subjectFactory)
+accept	820f0a2f8e75fac3	vendor/rxjs-animation-frame-provider	animationFrameProvider (requestAnimationFrame/cancelAnimationFrame) — rxjs scheduler
+accept	eaab1f343ef634db	vendor/rxjs-subject	Subject/AnonymousSubject extends Observable; imports rxjs ObjectUnsubscribedError
+accept	d264c91649009e02	vendor/rxjs-async-action	AsyncAction extends Action; intervalProvider.setInterval — rxjs scheduler
+accept	68b13f3097a8e45b	vendor/rxjs-asap-action	AsapAction extends AsyncAction; immediateProvider.setImmediate
+accept	62fc732aa0e48c65	vendor/rxjs-scheduler	Scheduler class (schedulerActionCtor/now); imports rxjs/scheduler
+accept	413f1a54388bef9e	vendor/rxjs-queue-action	QueueAction extends AsyncAction (synchronous flush) — rxjs scheduler
+accept	98ba19619da8792b	vendor/rxjs-animation-frame-action	AnimationFrameAction extends AsyncAction; animationFrameProvider.requestAnimationFrame
+accept	e0238d02ea080dde	vendor/rxjs-util-readable-stream-like	isReadableStreamLike/readableStreamLikeToAsyncGenerator — rxjs internal util
+accept	63572d23eb1448c8	vendor/rxjs-observable-inner-from	innerFrom/fromArrayLike/fromPromise/fromIterable/fromReadableStreamLike — rxjs
+accept	d476b4bcbe9e2d19	vendor/rxjs-notification	Notification/NotificationKind/observeNotification; imports rxjs of/throwError/EMPTY
+accept	a4ce20a50baaf3fd	vendor/rxjs-bind-callback-internals	bindCallbackInternals (AsyncSubject/subscribeOn/observeOn) — rxjs
+accept	7e7ac1e90cc7a4ee	vendor/rxjs-util-create-object	createObject (keys.reduce zip values) — rxjs internal util
+accept	9a47ebd05d11e625	vendor/rxjs-observable-combine-latest	combineLatest/combineLatestInit; popScheduler/argsArgArrayOrObject — rxjs
+accept	d39dac3465d56596	vendor/rxjs-merge-internals	mergeInternals (concurrency-bounded merge); imports rxjs innerFrom/executeSchedule
+accept	6230051f63e23713	vendor/rxjs/operators/merge-map	exports YJ.mergeMap; mergeInternals + map; imports ./vendor/rxjs-*
+accept	8ca87726c4b99953	vendor/rxjs/observable/fork-join	exports qJ.forkJoin; Observable + argsArgArrayOrObject + popResultSelector
+accept	91fef2b3df74d87e	vendor/rxjs/observable/generate	exports aN.generate; defer + scheduleIterable + isScheduler
+accept	6f6e42c4d25adfc6	vendor/rxjs/observable/iif	exports $J.iif; defer(()=>cond?a:b)
+accept	ca042dfe38df334a	vendor/rxjs/observable/race	exports gN.race/raceInit; Observable + innerFrom + argsOrArgArray
+accept	6c2ca215861ef0ab	vendor/rxjs/operators/buffer	exports aK.buffer; operate + createOperatorSubscriber + innerFrom + noop
+accept	8b826a8592a674ed	vendor/rxjs/operators/buffer-count	exports cN.bufferCount; operate + arrRemove + __values
+accept	3b8309ef3c9ffa47	vendor/rxjs/operators/buffer-time	exports lN.bufferTime; operate + asyncScheduler + executeSchedule + Subscription
+accept	a98ca2e4d66179cd	vendor/rxjs/operators/buffer-toggle	exports IN.bufferToggle; operate + innerFrom + Subscription + arrRemove
+accept	ffe35bd6b171754d	vendor/rxjs/operators/every	exports GK.every; operate + createOperatorSubscriber
+accept	0e9ab33f06e30b2f	vendor/rxjs/operators/expand	exports xK.expand; operate + mergeInternals
+accept	2b489cd7c9c45242	vendor/rxjs/operators/finalize	exports PK.finalize; operate + subscribe/finally add
+accept	1dda2d6128716e6d	vendor/rxjs/operators/find	exports EN.find/createFind; operate + createOperatorSubscriber
+accept	3b3ff6d64020ca3d	vendor/rxjs/operators/is-empty	exports KK.isEmpty; operate + createOperatorSubscriber
+accept	fa00db282faef518	vendor/rxjs/operators/take-last	exports CN.takeLast; operate + EMPTY + __values
+accept	c900f9a5296254d6	vendor/rxjs/operators/materialize	exports VK.materialize; operate + Notification.createNext/Complete/Error
+accept	a1530522550a19b0	vendor/rxjs/operators/merge-map-to	exports WK.mergeMapTo; wraps mergeMap + isFunction
+accept	c4060d823e127d06	vendor/rxjs/operators/merge-scan	exports zK.mergeScan; operate + mergeInternals accumulator
+accept	0dd0f455ed93c963	vendor/rxjs/operators/pluck	exports e1.pluck; map over property path
+accept	dd02a94cf7439955	vendor/rxjs/operators/publish	exports t1.publish; multicast(new Subject()) + connect
+accept	2dfa8b6976a2000e	vendor/rxjs/operators/throttle	exports R1.throttle; operate + innerFrom leading/trailing
+accept	2e912e19796a7d1b	vendor/rxjs/operators/window-count	exports BN.windowCount; operate + Subject + asObservable
+accept	05a456ee5785c217	vendor/rxjs/operators/window-time	exports v1.windowTime; operate + Subject + asyncScheduler + executeSchedule
+accept	985df08b76688131	vendor/rxjs/operators/window-toggle	exports dN.windowToggle; operate + Subject + Subscription + arrRemove
+accept	40e8a6917e70e552	vendor/ajv/codegen-scope	exports ValueScope/ValueScopeName/Scope/varKinds/UsedValueState; "CodeGen:" Name(const/let/var)
+accept	adcd89d58adfd445	vendor/ajv/codegen	exports CodeGen/operators/_/str/Name; _Code('>'...) render nodes; imports ajv-codegen
+accept	79eff43129a35610	vendor/ajv/util	exports toHash/alwaysValidSchema/checkStrictMode/escapeJsonPointer/mergeEvaluated; ajv compile util
+accept	5a0f39a3cb7bcfc7	vendor/ajv/compile/errors	ajv error reporters: reportError/extendErrors/keywordError, imports vendor/ajv-9
+accept	ff56fa7825ad84a0	vendor/ajv/compile/validate/datatype	ajv DataType: getSchemaTypes/checkDataType/coerceAndCheckDataType/reportTypeError
+accept	d292721023b9fc4a	vendor/ajv/vocabularies/code	ajv code util: allSchemaProperties/callValidateCode/usePattern/validateArray/validateUnion
+accept	69b35987bf65bb33	vendor/ajv/compile/validate/keyword	ajv keyword: funcKeywordCode/macroKeywordCode/validSchemaType/validateKeywordUsage
+accept	e9f877e2af6ae93a	vendor/ajv/compile/resolve	ajv resolve: getFullPath/inlineRef/getSchemaRefs/normalizeId/resolveUrl
+accept	f95e50a967e215b1	vendor/ajv/compile/validate	ajv validate: KeywordCxt class/validateFunctionCode/getData
+accept	1103c183a52f5478	vendor/ajv/core	ajv core: CodeGen/Ajv class with ValidationError+MissingRefError, ajv.removeSchema string
+accept	8ae5976260aa5ca0	vendor/ajv/vocabularies/core/ref	ajv $ref keyword: callRef/getValidate, MissingRefError
+accept	c890b053da4491b3	vendor/ajv/vocabularies/validation/required	ajv keyword 'required': must have required property message
+accept	a2d65636e970deb9	vendor/ajv/vocabularies/applicator/additionalitems	ajv keyword 'additionalItems': validateAdditionalItems
+accept	87cb35da2ce24ec6	vendor/ajv/vocabularies/applicator/additionalproperties	ajv keyword 'additionalProperties': removeAdditional handling
+accept	ef784c50e82b42e0	vendor/ajv/vocabularies/applicator/properties	ajv keyword 'properties': definedProperties/subschema
+accept	418b204d74ff32ca	vendor/winston/format	winston format index: align/errors/cli/colorize/logstash/splat/timestamp getters
+accept	83acbae050a291e9	vendor/readable-stream/errors	node stream error codes: ERR_STREAM_PUSH_AFTER_EOF/ERR_STREAM_DESTROYED/codes
+accept	788c6a094e8bddd6	vendor/readable-stream/errors	node stream error codes (dup): ERR_STREAM_* codes map
+accept	4f040fa11dc6d23b	vendor/winston	winston main: version/transports/config/createLogger/Logger/ExceptionHandler/Container
+accept	02aa47583e3da850	vendor/universalify	universalify: fromCallback/fromPromise wrappers
+accept	681b125c921833f1	vendor/fs-extra/fs	fs-extra fs wrapper: graceful-fs + universalify, fs-extra-WARN0003
+accept	3d5574bd675ca817	vendor/universalify	universalify (dup): fromCallback/fromPromise wrappers
+accept	281e6513c65c4145	vendor/fs-extra/fs	fs-extra fs wrapper: graceful-fs + universalify, cp/glob/statfs/readv, WARN0003
+accept	1a30faa26a45de75	vendor/agent-base/helpers	agent-base helpers: toBuffer/json/req over http/https
+accept	807b5226cd8381f8	vendor/agent-base	agent-base Agent class: AgentBaseInternalState/isSecureEndpoint/createSocket
+accept	0eed3fa9b546e951	vendor/https-proxy-agent/parse-proxy-response	https-proxy-agent:parse-proxy-response debug, CONNECT response parsing
+accept	b1bb2b8ea0f25545	vendor/https-proxy-agent	HttpsProxyAgent class extends agent-base Agent, CONNECT tunneling
+accept	b277657e33096d4b	vendor/fs-extra/fs	fs-extra fs wrapper: graceful-fs + universalify, fs-extra-WARN0003
+accept	30a6ea515ae73c9c	vendor/fs-extra/fs	fs-extra fs wrapper: graceful-fs + universalify, fs-extra-WARN0003
+accept	8fa665a28f5c1c64	vendor/fd-slicer	fd-slicer: BufferSlicer/FdSlicer/createFromBuffer/createFromFd, run-parallel-limit
+accept	98fcc3cd7b1ae1e3	vendor/yauzl	ZipFile/LocalFileHeader/RandomAccessReader/fromBuffer + crc-32 import = yauzl
+accept	118515e8497779ad	vendor/ajv/codegen-scope	ValueScope/ValueScopeName/Scope/varKinds, imports vendor/ajv-11-2 = ajv codegen scope
+accept	8ca7e74d5b2d2726	vendor/ajv/codegen	CodeGen/operators/Name/or/and/not, ajv codegen index
+accept	3d0b014059fe9a91	vendor/ajv/util	alwaysValidSchema/checkStrictMode/escapeFragment/toHash = ajv compile util
+accept	bbe2ca14fbba6339	vendor/ajv/errors	reportError/extendErrors/keywordError = ajv compile errors
+accept	388e428232c38892	vendor/ajv/data-type	getSchemaTypes/checkDataType/DataType/reportTypeError = ajv dataType
+accept	9e40854433a8a085	vendor/ajv/vocabulary-code	allSchemaProperties/callValidateCode/usePattern/propertyInData = ajv vocabulary code
+accept	abc0f9941bfcffb9	vendor/ajv/keyword	macroKeywordCode/funcKeywordCode/validateKeywordUsage = ajv keyword
+accept	91b4eff312c8a42c	vendor/ajv/resolve	getSchemaRefs/inlineRef/resolveUrl/normalizeId/getFullPath = ajv resolve
+accept	a175f4a16e3ef3fd	vendor/ajv/validate	validateFunctionCode/KeywordCxt/getData = ajv compile validate
+accept	ef6399ec1ce3c35e	vendor/ajv/core	re-exports KeywordCxt/CodeGen/Name + ajv-core/validation-error/uri imports = ajv core facade
+accept	1f8d3b449691e846	vendor/ajv/ref	callRef/getValidate, keyword '$ref' = ajv ref vocabulary
+accept	465bbc8f37d13c5e	vendor/ajv/required	keyword 'required', "must have required property" = ajv required
+accept	2e39234db71641f8	vendor/ajv/additional-items	keyword 'additionalItems', validateAdditionalItems = ajv additionalItems
+accept	5f99ff0ba5c99c77	vendor/ajv/additional-properties	keyword 'additionalProperties' = ajv additionalProperties
+accept	9e26a82b601c21c1	vendor/ajv/properties	keyword 'properties' + additionalProperties dep = ajv properties
+accept	1f9ccb27de313fe9	vendor/ssh2/http-agents	SSHTTPAgent/SSHTTPSAgent, forwardOut, imports vendor/ssh2-client = ssh2 http agents
+accept	f1fda07ec674c02b	vendor/xmldom/dom	DOMImplementation/Node/Element/XMLSerializer, imports vendor/xmldom-conventions = xmldom dom
+accept	ec0c02cb852a2d41	vendor/xmldom/sax	ParseError/XMLReader, startDocument/endDocument, vendor/xmldom-conventions = xmldom sax reader
+accept	fb37b8ebb5b56548	vendor/plist/parse	parses <plist>/<dict>/<key>, 'malformed document. First element should be <plist>' = plist parse
+accept	715156b1db126e48	vendor/xmlbuilder	create/begin/streamWriter/stringWriter, imports vendor/xmlbuilder-* = xmlbuilder index
+accept	e706fa5303c50c2d	vendor/setimmediate	setImmediate polyfill, 'setImmediate$'/'[object process]'/postMessage = setimmediate
+accept	d7904b0c66b5a10d	vendor/pako/common	assign/shrinkBuf/arraySet/flattenChunks typed-array utils = pako common
+accept	4e26aca5c95e872c	vendor/pako/trees	_tr_init/_tr_flush_block/_tr_tally/_tr_align, imports pako common = pako trees
+accept	11169e10fe8af825	vendor/pako/inflate	inflate/inflateInit/inflateReset, 'pako inflate (from Nodeca project)' = pako inflate
+accept	de48a47eb89b1d5f	vendor/jszip/flate	compressWorker/uncompressWorker, 'FlateWorker/'+Deflate/Inflate, imports vendor/jszip-* = jszip flate
+accept	0b929ab89d072293	util/stringify-values	joinValues/stringifyPrimitive helpers, no package literal = generic stringify util
