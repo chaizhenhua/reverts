@@ -1568,7 +1568,10 @@ mod tests {
         // regenerates — which is what lets binding names keyed to it survive a
         // regenerate (the renumbering `cluster_id` form does not).
         let fp = crate::island_split::cluster_fingerprint(
-            &["a", "b", "c"].iter().map(|n| BindingName::new((*n).to_string())).collect(),
+            &["a", "b", "c"]
+                .iter()
+                .map(|n| BindingName::new((*n).to_string()))
+                .collect(),
         );
         assert_eq!(
             mechanical_cluster_path(&fp),
@@ -1576,7 +1579,10 @@ mod tests {
         );
         // Order-independent fingerprint → identical path for the same content.
         let fp2 = crate::island_split::cluster_fingerprint(
-            &["c", "a", "b"].iter().map(|n| BindingName::new((*n).to_string())).collect(),
+            &["c", "a", "b"]
+                .iter()
+                .map(|n| BindingName::new((*n).to_string()))
+                .collect(),
         );
         assert_eq!(mechanical_cluster_path(&fp), mechanical_cluster_path(&fp2));
         // Distinct from the legacy id-form so a stale id can't masquerade as it.

@@ -17,6 +17,7 @@ use audit::{
     audit_emitted_named_export_consistency, audit_emitted_project_parse,
     audit_emitted_relative_import_targets, audit_module_file_sizes,
     audit_namespace_object_member_consistency, audit_required_sources,
+    audit_unnamed_mechanical_paths,
 };
 use output_paths::module_output_paths;
 pub(crate) use output_paths::relative_asset_specifier;
@@ -653,6 +654,8 @@ pub fn generate_project_from_prepared_with_options(
     mark_timing!("namespace_audit");
     audit.extend(audit_module_file_sizes(&plan));
     mark_timing!("module_file_size_audit");
+    audit.extend(audit_unnamed_mechanical_paths(&plan));
+    mark_timing!("unnamed_mechanical_path_audit");
     let accepted_project = pre_accept.clone().accept_if_clean(&audit);
     // Planner-marked unmodularized recovered-code files (e.g. the eager
     // entrypoint island): owned by no module, but their declarations are

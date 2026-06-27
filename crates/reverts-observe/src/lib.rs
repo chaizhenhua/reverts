@@ -79,6 +79,16 @@ pub enum FindingCode {
     /// importer / name / target instead of leaving it for esbuild to surface
     /// cryptically.
     DanglingNamedImport,
+    /// An island cluster reached final output still carrying its mechanical
+    /// fallback name `modules/island/cluster-<n>.ts` — i.e. it never received a
+    /// semantic name. The name conveys nothing and the `<n>` renumbers on every
+    /// regenerate, so it cannot be referenced stably. This is a naming-coverage
+    /// gap, not acceptable final output: assign a semantic path via
+    /// `name clusters`, keyed by the cluster's stable content fingerprint.
+    /// Surfaced as a Warning — the output still compiles and runs — so the
+    /// completion gate can drive it to zero. (Module naming coverage is tracked
+    /// separately via `modules.semantic_name`, not by file-path shape.)
+    UnnamedMechanicalPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

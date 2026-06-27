@@ -92,6 +92,46 @@ pub(crate) fn audit_emit_plan_synthesis(plan: &EmitPlan) -> AuditReport {
 /// and a further split implemented in-pipeline, per the readability contract.
 pub(crate) const MAX_MODULE_FILE_LINES: usize = 10_000;
 
+/// True for the mechanical fallback name an island cluster keeps when it never
+/// received a semantic name: `…/island/cluster-<token>.ts`, where `<token>` is
+/// the cluster's content fingerprint (stable hex) or, for the unreachable
+/// `cluster_id` safety-net, decimal digits — both are hex-only and carry no
+/// semantic meaning, so either form is an unnamed-island gap. A named cluster's
+/// emitted path replaces this with its semantic path. Module naming coverage is
+/// tracked separately via `modules.semantic_name` (report coverage), not by path
+/// shape, since unnamed modules share the `<id>-esbuild-<token>` form with many
+/// legitimate fixtures.
+fn is_mechanical_cluster_path(path: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    let stem = base.strip_suffix(".ts").unwrap_or(base);
+    stem.strip_prefix("cluster-").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+/// Flags island clusters that reached output without a semantic name (mechanical
+/// `island/cluster-<n>.ts` paths). A Warning, not an Error: the project still
+/// builds and runs, but these are naming gaps the completion gate must drive to
+/// zero via `name clusters` (keyed by the cluster's stable content fingerprint).
+pub(crate) fn audit_unnamed_mechanical_paths(plan: &EmitPlan) -> AuditReport {
+    let mut audit = AuditReport::default();
+    for file in &plan.files {
+        if is_mechanical_cluster_path(&file.path) {
+            audit.push(
+                AuditFinding::warning(
+                    FindingCode::UnnamedMechanicalPath,
+                    "island cluster has a mechanical fallback name (no semantic name assigned); \
+                     name it via `name clusters`, keyed by its content fingerprint from \
+                     .reverts/island-clusters.json"
+                        .to_string(),
+                )
+                .with_module(file.path.clone()),
+            );
+        }
+    }
+    audit
+}
+
 pub(crate) fn audit_module_file_sizes(plan: &EmitPlan) -> AuditReport {
     let mut audit = AuditReport::default();
     for file in &plan.files {
@@ -900,6 +940,31 @@ mod tests {
         // Exactly the oversized file is flagged, and it is a Warning (not an
         // Error that would block output — the file still compiles and runs).
         assert_eq!(audit.warning_count(), 1);
+        assert_eq!(audit.error_count(), 0);
+    }
+
+    #[test]
+    fn unnamed_island_clusters_are_flagged_as_warnings() {
+        use reverts_planner::{EmitPlan, PlannedFile};
+        let mut plan = EmitPlan::default();
+        for path in [
+            "modules/island/cluster-42.ts",   // legacy id-form (digits)  -> flag
+            "modules/island/cluster-2875.ts", // legacy id-form          -> flag
+            "modules/island/cluster-00000000000004a2.ts", // fingerprint  -> flag
+            "modules/island/cluster-deadbeefcafef00d.ts", // fingerprint  -> flag
+            "modules/island/auth/oauth-token-flow.ts", // named cluster path -> ok
+            "modules/island/cluster-huge.ts", // suffix not all-hex      -> ok
+            "modules/island/vendor/zod-checks.ts", // vendor-relocated    -> ok
+            "modules/388-esbuild-XY.ts",      // module (tracked via DB) -> ok
+        ] {
+            let mut file = PlannedFile::new(path);
+            file.push_source("var a = 1;\n");
+            plan.push_file(file);
+        }
+        let audit = super::audit_unnamed_mechanical_paths(&plan);
+        assert!(audit.has(FindingCode::UnnamedMechanicalPath));
+        // The two legacy id-form + two fingerprint-form clusters, all Warnings.
+        assert_eq!(audit.warning_count(), 4);
         assert_eq!(audit.error_count(), 0);
     }
 
