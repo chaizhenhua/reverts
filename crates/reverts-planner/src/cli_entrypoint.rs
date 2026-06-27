@@ -385,6 +385,10 @@ fn semantic_island_cluster_path(semantic: &str, used: &mut BTreeSet<String>) -> 
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>()
         .join("/");
+    // Strip a redundant source extension the accepted name may carry (e.g. a
+    // path recorded as `account/active-org-resolver.ts`); otherwise the
+    // `.ts` template below doubles it into `…active-org-resolver.ts.ts`.
+    let cleaned = strip_source_extension(&cleaned).to_string();
     let base = if cleaned.is_empty() {
         "island-cluster".to_string()
     } else {
@@ -401,6 +405,18 @@ fn semantic_island_cluster_path(semantic: &str, used: &mut BTreeSet<String>) -> 
         }
     }
     unreachable!("numeric suffix search always finds a free island path")
+}
+
+/// Strip a single trailing TypeScript/JavaScript source extension from a path,
+/// so an accepted semantic name recorded with one (`foo/bar.ts`) does not get
+/// doubled by the `.ts` emit template (`foo/bar.ts.ts`).
+fn strip_source_extension(path: &str) -> &str {
+    for ext in [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"] {
+        if let Some(stripped) = path.strip_suffix(ext) {
+            return stripped;
+        }
+    }
+    path
 }
 
 /// Reduce one path segment to `[A-Za-z0-9._-]`, collapsing other runs to `-`.
@@ -1693,5 +1709,33 @@ mod tests {
         );
         // An entry-resident / runtime binding routes through the entry hub.
         assert_eq!(route("glob"), ChunkNeedRoute::Entry);
+    }
+
+    #[test]
+    fn semantic_island_cluster_path_strips_redundant_extension_and_prefix() {
+        let mut used = std::collections::BTreeSet::new();
+        // A name recorded with a trailing `.ts` must NOT double into `.ts.ts`.
+        assert_eq!(
+            super::semantic_island_cluster_path("account/active-org-resolver.ts", &mut used),
+            "modules/island/account/active-org-resolver.ts"
+        );
+        // A redundant `modules/island/` prefix is still stripped (not nested).
+        assert_eq!(
+            super::semantic_island_cluster_path(
+                "modules/island/util/deferred-promise.ts",
+                &mut used
+            ),
+            "modules/island/util/deferred-promise.ts"
+        );
+        // A clean name (no extension) is unchanged, and collisions get a numeric
+        // suffix rather than re-doubling.
+        assert_eq!(
+            super::semantic_island_cluster_path("auth/oauth", &mut used),
+            "modules/island/auth/oauth.ts"
+        );
+        assert_eq!(
+            super::semantic_island_cluster_path("auth/oauth.ts", &mut used),
+            "modules/island/auth/oauth-2.ts"
+        );
     }
 }
