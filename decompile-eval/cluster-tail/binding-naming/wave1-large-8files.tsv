@@ -1,0 +1,1133 @@
+accept	modules/island/auth/oauth.ts	wer	isJsonObjectString	is json object string | trim(); startsWith('{') && endsWith('}')
+accept	modules/island/auth/oauth.ts	mer	applySandboxSettingsOption	apply sandbox settings option | builds settings; throws 'Cannot use both a settings file path and the sandbox option'; failIfUnavailable
+accept	modules/island/auth/oauth.ts	met	enqueueTelemetryEvent	enqueue telemetry event | kt().telemetryOrgUuid(); pushes {organization_uuid} to YT; flush when length>=het
+accept	modules/island/auth/oauth.ts	mni	isActiveIndexState	is active index state | guards object with numeric activeIndex and total
+accept	modules/island/auth/oauth.ts	mri	isErrorCodeResponse	is error code response | guards object with numeric errorCode and string errorDescription
+accept	modules/island/auth/oauth.ts	zht	sendMcpDirectoryBridgeRequest	send mcp directory bridge request | '[mcpDirectoryBridge]'; JI.getDispatcher().dispatchOnEvent({type,sessionId,data}); requestId timeout
+accept	modules/island/auth/oauth.ts	mwr	resolveSlashMenuSkills	resolve slash menu skills | zht(A,'slash_menu_skills_resolve',{skillNames,keywords})
+accept	modules/island/auth/oauth.ts	ywr	searchAddableSkills	search addable skills | zht(A,'addable_skills_search',{keywords})
+accept	modules/island/auth/oauth.ts	n$A	fetchWithHeaderFallback	fetch with header fallback | fetch(A,{headers}); on TypeError retries without headers
+accept	modules/island/auth/oauth.ts	uDe	fetchWithMcpProtocolVersion	fetch with mcp protocol version | n$A(A,{'MCP-Protocol-Version':e},t)
+accept	modules/island/auth/oauth.ts	r0i	sha1ToUuidV5	sha1 to uuid v5 | createHash('sha1'); sets version-5 bits r[6]&15|80; formats UUID
+accept	modules/island/auth/oauth.ts	n0i	normalizeUrlHostPath	normalize url host path | URL; hostname.toLowerCase()+pathname (trailing slash stripped)
+accept	modules/island/auth/oauth.ts	o0i	deriveInferenceProviderCacheKey	derive inference provider cache key | switch inferenceProvider vertex/gateway/foundry/bedrock/anthropic -> r0i UUID
+accept	modules/island/auth/oauth.ts	yZA	readCoworkDataCache	read cowork data cache | Qn.getDataCachePath; '[CoworkArtifacts] Unparseable data cache'; JSON.parse
+accept	modules/island/auth/oauth.ts	n0r	getLatestDataCacheUpdate	get latest data cache update | scans yZA entries for max numeric updatedAt
+accept	modules/island/auth/oauth.ts	pUe	readDataCacheEntryIfFresh	read data cache entry if fresh | yZA entry; returns value if Date.now()-updatedAt < ttl
+accept	modules/island/auth/oauth.ts	nFr	parseKeyValueHeader	parse key value header | regex /([^\s,;=]+)\s*(?:=\s*([^,;]+))?/g into object
+accept	modules/island/auth/oauth.ts	nG	readFileOrNull	read file or null | Ls.promises.readFile utf-8; catch returns null
+accept	modules/island/auth/oauth.ts	nKe	isLoggedIn	is logged in | vs(); returns !A.isLoggedOut
+accept	modules/island/auth/oauth.ts	nRi	classifyApiHost	classify api host | '.invalid'->'unconfigured'; $y->'anthropic'; localhost/private/other
+accept	modules/island/auth/oauth.ts	nSr	debounce	debounce | setTimeout/clearTimeout wrapper with .cancel()
+accept	modules/island/auth/oauth.ts	nUe	collectRuleToolNames	collect rule tool names | addRules/replaceRules -> push {toolName}
+accept	modules/island/auth/oauth.ts	nVA	classifyArrayOrStringType	classify array or string type | Array->'array'; string->'string'; else 'unknown'
+accept	modules/island/auth/oauth.ts	nVr	parseNextLinkHeader	parse next link header | regex /<([^>]+)>\s*;\s*rel="next"/
+accept	modules/island/auth/oauth.ts	nXr	redactUrlsInText	redact urls in text | replace https?:// with mQ() ?? '<url>'
+accept	modules/island/auth/oauth.ts	vLt	formatMcpProbeResult	format mcp probe result | '[mcp-probe]'; result kind ok/auth/err formatting
+accept	modules/island/auth/oauth.ts	rZt	escapeBraceChars	escape brace chars | replaces brace/comma/dot specials with placeholders
+accept	modules/island/auth/oauth.ts	nZt	unescapeBraceChars	unescape brace chars | inverse of rZt; restores \\ { } , .
+accept	modules/island/auth/oauth.ts	oZt	expandBraces	expand braces | fV(rZt(A),true).map(nZt); brace expansion
+accept	modules/island/auth/oauth.ts	r_t	getSessionAccessToken	get session access token | process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN || $Or()
+accept	modules/island/auth/oauth.ts	n_t	buildSessionAuthHeaders	build session auth headers | 'sk-ant-sid'->Cookie sessionKey + X-Organization-Uuid; else Bearer
+accept	modules/island/auth/oauth.ts	nbA	isTrustedClaudeFrame	is trusted claude frame | senderFrame.parent===null; origin in claude.ai/preview.claude.ai/claude.com/app://localhost
+accept	modules/island/auth/oauth.ts	tet	parseErrorCode	parse error code | JSON.parse; reads error.details.error_code
+accept	modules/island/auth/oauth.ts	p_i	parseErrorMessage	parse error message | JSON.parse; reads error.message
+accept	modules/island/auth/oauth.ts	net	getOauthToken	get oauth token | '[getOauthToken]'; lastActiveOrg/sessionKey cookies; /v1/oauth/{org}/authorize; code_challenge
+accept	modules/island/auth/oauth.ts	y_i	generatePkceChallenge	generate pkce challenge | random verifier; SHA-256 challenge; base64url; returns [verifier,challenge,state]
+accept	modules/island/auth/oauth.ts	y4t	handleVercelAiToolCallSpan	handle vercel ai tool call span | span data 'ai.toolCall'; reads attributes; calls _4t/R4t
+accept	modules/island/auth/oauth.ts	nie	installVercelAiSpanProcessor	install vercel ai span processor | on('spanStart',y4t); addEventProcessor id 'VercelAiEventProcessor'
+accept	modules/island/auth/oauth.ts	nne	startTrackedSpan	start tracked span | e.startSpan(); pushes into A[voA] array; defineProperty
+accept	modules/island/auth/oauth.ts	nq	openFileRejectingSymlinks	open file rejecting symlinks | lstat isSymbolicLink -> throw Bp; open with O_CREAT; ELOOP/EMLINK guard
+accept	modules/island/auth/oauth.ts	nsi	isPairedResult	is paired result | guards {paired:boolean, error?:string}
+accept	modules/island/auth/oauth.ts	nvA	isPowerOfTwo	is power of two | A===0 || (A & A-1)===0
+accept	modules/island/auth/oauth.ts	qXA	resolveSessionDir	resolve session dir | AA.join(oQA(), A)
+accept	modules/island/auth/oauth.ts	nvt	materializeSessionSecrets	materialize session secrets | '[ccd-session-secrets]'; writeSessionSecrets; sessionId
+accept	modules/island/auth/oauth.ts	nwi	isOkResult	is ok result | guards {ok:boolean, error?:string}
+accept	modules/island/auth/oauth.ts	nxt	readEnvNumber	read env number | process.env[A] as Number; diag.warn 'expected a number'
+accept	modules/island/auth/oauth.ts	ny	isAppLocalhostFrame	is app localhost frame | senderFrame.parent===null; origin==='app://localhost'
+accept	modules/island/auth/oauth.ts	o5i	stringifyQueryParams	stringify query params | encodeURIComponent k=v joined by '&'; throws on nested
+accept	modules/island/auth/oauth.ts	oEr	readVmStat	read vm stat | '/usr/bin/vm_stat'; '[vmDiagnostics]'
+accept	modules/island/auth/oauth.ts	oPt	withTimeout	with timeout | Promise.race with setTimeout -> 'Operation timed out.'
+accept	modules/island/auth/oauth.ts	oRr	matchesHostPattern	matches host pattern | '*' all; '*.' suffix; else exact host compare
+accept	modules/island/auth/oauth.ts	wmt	checkUrlAgainstAllowlist	check url against allowlist | http/https only; allowlist; 'web_fetch tool is disabled'; coworkEgressAllowedHosts
+accept	modules/island/auth/oauth.ts	oSr	isLinux	is linux | process.platform==='linux'
+accept	modules/island/auth/oauth.ts	oUr	getGlobalThis	get global this | globalThis||self||window||global
+accept	modules/island/auth/oauth.ts	one	isThenable	is thenable | getOwnPropertyDescriptor 'then' value is function
+accept	modules/island/auth/oauth.ts	oai	isReviewComment	is review comment | guards {file,start_line,end_line,comment,suggestion?}
+accept	modules/island/auth/oauth.ts	sai	isReviewCommentList	is review comment list | guards {comments:[]} each oai
+accept	modules/island/auth/oauth.ts	obA	tryLoadComputerUse	try load computer use | await vE() (computer-use-loader); catch null
+accept	modules/island/auth/oauth.ts	oet	getAccountTaggedId	get account tagged id | vs(); accountTaggedId; isLoggedOut
+accept	modules/island/auth/oauth.ts	ohr	addAllowedSite	add allowed site | Gft append-if-absent to persisted list
+accept	modules/island/auth/oauth.ts	shr	promptOpenPreviewOrigin	prompt open preview origin | dialog 'Open {host} in the preview?'; allowed sites; 'desktop_launch_preview_origin_prompt'
+accept	modules/island/auth/oauth.ts	ort	removeOriginEntry	remove origin entry | URL.origin; fCA.delete + QCA.delete
+accept	modules/island/auth/oauth.ts	nrt	persistOriginEntry	persist origin entry | fCA.set + QCA.write keyed by value
+accept	modules/island/auth/oauth.ts	owi	isOidcConfig	is oidc config | guards {issuer,authorizationUrl,tokenUrl,clientId,scopes,redirectPort}
+accept	modules/island/auth/oauth.ts	swi	isBootstrapAuthConfig	is bootstrap auth config | guards {oidc?:owi, bootstrapUrl?}
+accept	modules/island/auth/oauth.ts	oxt	readEnvBoolean	read env boolean | process.env true/false; diag.warn "expected 'true' or 'false'"
+accept	modules/island/auth/oauth.ts	p3	isAbortError	is abort error | 'AbortError' name or message includes 'FetchRequestCanceledException'
+accept	modules/island/auth/oauth.ts	p7e	loadLocaleMessages	load locale messages | d7e (intl-messageformat); readFileSync `${locale}.json`; messages
+accept	modules/island/auth/oauth.ts	p7r	filterRendererCrashEvent	filter renderer crash event | native renderer; 'exit.reason' killed; 'Simulated Exception' -> null
+accept	modules/island/auth/oauth.ts	pFt	selectReapableSessions	select reapable sessions | group by baseRepo; maxWarm; reapAfterMs; lastActivityAt sort
+accept	modules/island/auth/oauth.ts	pIA	redactUrlCredentials	redact url credentials | replaces user:pass with '[filtered]:[filtered]@'; strips :80/:443
+accept	modules/island/auth/oauth.ts	z8t	extractSpanHttpUrlParts	extract span http url parts | OTel SEMATTRS_HTTP_TARGET/ATTR_URL_FULL/ATTR_HTTP_ROUTE -> urlPath/url/query
+accept	modules/island/auth/oauth.ts	pXr	isUsageUnchanged	is usage unchanged | compares extra_usage is_enabled/utilization/used_credits/monthly_limit/resets_at
+accept	modules/island/auth/oauth.ts	pYA	append1mModelTag	append1m model tag | `${A}[1m]` appended when tmt regex not matched
+accept	modules/island/auth/oauth.ts	s3t	coalesceNumberRanges	coalesce number ranges | merges adjacent numeric ranges via qie
+accept	modules/island/auth/oauth.ts	pkt	persistPluginEnvStore	persist plugin env store | safeStorage.encryptString({v:1,entries}); fkt.set base64
+accept	modules/island/auth/oauth.ts	s2r	updatePluginEnvSecrets	update plugin env secrets | set/remove plugin env secrets by accountId/orgId/pluginId/cliName/envKey/envVar
+accept	modules/island/auth/oauth.ts	pmr	concatUint8Arrays	concat uint8 arrays | sums lengths; Uint8Array set at offset
+accept	modules/island/auth/oauth.ts	xhA	isUpdateStatus	is update status | guards {status,version?,versionNumber?,errorMessage?,isManualCheck?}
+accept	modules/island/auth/oauth.ts	prn	showAuthExpiryToast	show auth expiry toast | 'custom3p_auth_expiry_toast'; 'Your session has expired'; showToastInWebapp
+accept	modules/island/auth/oauth.ts	pwi	isModelCoverageEntry	is model coverage entry | guards {id:string, covers?:string[]}
+accept	modules/island/auth/oauth.ts	wwi	isModelsResponse	is models response | guards {ok,models?:[],kind?,message?,httpStatus?,requestUrl?}
+accept	modules/island/auth/oauth.ts	pxe	mergeMetadata	merge metadata | deep-merges external_metadata/internal_metadata
+accept	modules/island/auth/oauth.ts	q$	rejectAllPendingRequests	reject all pending requests | Np.values clearTimeout + reject; Np.clear()
+accept	modules/island/auth/oauth.ts	q$e	addFlagsToEventContext	add flags to event context | bo().getScopeData().contexts.flags -> event.contexts.flags
+accept	modules/island/auth/oauth.ts	q3t	isSystemError	is system error | errno in lOt.getSystemErrorMap()
+accept	modules/island/auth/oauth.ts	q8	abortableDelay	abortable delay | setTimeout; removeEventListener('abort'); abortError option
+accept	modules/island/auth/oauth.ts	qAr	createBufferedWriter	create buffered writer | writeFn/flushIntervalMs/maxBufferSize/maxBufferBytes; write/flush/dispose
+accept	modules/island/auth/oauth.ts	qGt	buildSpendCapUsageRow	build spend cap usage row | hasUsageBasedSeatTier; extra_usage; 'Spend · {used}'; currency USD
+accept	modules/island/auth/oauth.ts	qJi	verifyUpdaterOverrideToken	verify updater override token | CLAUDE_UPDATER_TOKEN; 'Updater override token rejected'; createPublicKey verify
+accept	modules/island/auth/oauth.ts	y$	getEnabledPlugins	get enabled plugins | (await LTt(A))?.enabledPlugins ?? {}
+accept	modules/island/auth/oauth.ts	qVr	resolveEnabledPlugins	resolve enabled plugins | merges global + .claude/settings.json + settings.local.json + dir enabledPlugins
+accept	modules/island/auth/oauth.ts	qYe	isConnectionClosedError	is connection closed error | 'Connection closed'/'Not connected to remote server'; EPIPE/ECONNRESET
+accept	modules/island/auth/oauth.ts	qYt	getSentryOriginal	get sentry original | returns A.__sentry_original__
+accept	modules/island/auth/oauth.ts	rsi	isBooleanRecord	is boolean record | all keys string and all values boolean
+accept	modules/island/auth/oauth.ts	qhA	isPairedRecordState	is paired record state | guards {paired: boolean-record}
+accept	modules/island/auth/oauth.ts	suA	isVcsDirectory	is vcs directory | '.git'/'.svn'/'.hg'/'CVS'
+accept	modules/island/auth/oauth.ts	qjr	walkDirectoryBreadthFirst	walk directory breadth first | BFS readdir withFileTypes; depth limit; relativePath
+accept	modules/island/auth/oauth.ts	qjt	captureMemoryUsage	capture memory usage | process.memoryUsage().rss; app_start_time; app_memory; free_memory
+accept	modules/island/auth/oauth.ts	zlt	unique	unique | [...new Set(A)]
+accept	modules/island/auth/oauth.ts	qlr	union	union | zlt([...A,...e])
+accept	modules/island/auth/oauth.ts	qni	isWindowState	is window state | guards {sessionId,name,origin,width,height}
+accept	modules/island/auth/oauth.ts	qsr	assertPromptRef	assert prompt ref | throws unless ref.type==='ref/prompt' (CompleteRequestPrompt)
+accept	modules/island/auth/oauth.ts	qui	collectPerformanceMeasures	collect performance measures | performance.getEntriesByType('measure'); rounded durations
+accept	modules/island/auth/oauth.ts	r5i	closeStreamOrIterator	close stream or iterator | Symbol.asyncIterator return() or reader.cancel()
+accept	modules/island/auth/oauth.ts	rFt	isExternalAuthProvider	is external auth provider | ExternalIdp/Vertex/VertexWorkforce/AnthropicConsole
+accept	modules/island/auth/oauth.ts	rJA	setWindowAlwaysOnTop	set window always on top | setAlwaysOnTop; setVisibleOnAllWorkspaces; 'floating'/'screen-saver'
+accept	modules/island/auth/oauth.ts	rTt	checkMcpToolPermission	check mcp tool permission | /^mcp__(.+?)__(.+)$/; enabledMcpTools; block/allow decision
+accept	modules/island/auth/oauth.ts	rVr	getGithubApiUrls	get github api urls | api.github.com or {host}/api/v3 + /api/graphql
+accept	modules/island/auth/oauth.ts	ren	formatModeDiagnostics	format mode diagnostics | 'Effective mode' 3P/1P; inferenceProvider; 'Bootstrap configured'
+accept	modules/island/auth/oauth.ts	rlA	resolveRealPaths	resolve real paths | realpathSync; returns [orig, real] if differ
+accept	modules/island/auth/oauth.ts	rme	redactUrlsToPathPlaceholder	redact urls to path placeholder | replaces urls with protocol//host/<path>
+accept	modules/island/auth/oauth.ts	rve	checkMachOArchitecture	check mach oarchitecture | Mach-O magic; cputype; arm64; 'not_macho'/'arch_mismatch'
+accept	modules/island/auth/oauth.ts	sEr	readJetsamPressureLevel	read jetsam pressure level | '/usr/sbin/sysctl' kern.memorystatus_vm_pressure_level
+accept	modules/island/auth/oauth.ts	sFA	hasAnySessionCallback	has any session callback | zg.onStdout/onStderr/onExit/onNetworkStatus/...
+accept	modules/island/auth/oauth.ts	sFi	authorizeGoogleOauth	authorize google oauth | Google OAuth; refresh_token; 'Desktop app'; token_uri
+accept	modules/island/auth/oauth.ts	sFr	toTitleCase	to title case | replace /([a-z\d])(\w*)/ first char uppercase
+accept	modules/island/auth/oauth.ts	sei	hasAiModule	has ai module | getIntegrationByName('Modules').getModules().ai
+accept	modules/island/auth/oauth.ts	yLt	describeOauthClient	describe oauth client | clientId/clientSecret; 'oauth: dynamic registration'
+accept	modules/island/auth/oauth.ts	sen	summarizeMcpServer	summarize mcp server | transport built-in/stdio/http; command/env/oauth/headers/toolPolicy
+accept	modules/island/auth/oauth.ts	tVe	readEnvString	read env string | process.env[A] non-empty trimmed
+accept	modules/island/auth/oauth.ts	sxt	readEnvList	read env list | env value split(',').map(trim).filter
+accept	modules/island/auth/oauth.ts	t5i	detectBrowser	detect browser | navigator.userAgent patterns edge/ie/chrome/firefox/safari
+accept	modules/island/auth/oauth.ts	tSr	findDisplayForBounds	find display for bounds | screen.getAllDisplays(); workArea intersection
+accept	modules/island/auth/oauth.ts	ten	listCrashDumps	list crash dumps | app.getPath('crashDumps'); '.dmp'; mtime sort
+accept	modules/island/auth/oauth.ts	tiA	persistOauthTokenCache	persist oauth token cache | '[oauth] persisting token cache'; safeStorage.encryptString(Zf)
+accept	modules/island/auth/oauth.ts	toi	isSessionTemplate	is session template | guards {id,name,description,origin,sampleTitles[],sampleFirstMessages[]}
+accept	modules/island/auth/oauth.ts	u3i	fetchActiveTabOrigin	fetch active tab origin | callTool('tabs_context_mcp'); availableTabs/selectedTabId; 'fetchActiveTabOrigin failed'
+accept	modules/island/auth/oauth.ts	wKi	slugify	slugify | toLowerCase; strip [^\w\s-]; collapse to '-'
+accept	modules/island/auth/oauth.ts	u6t	hrtimeToMicroseconds	hrtime to microseconds | A[0]*1e6 + A[1]/1e3
+accept	modules/island/auth/oauth.ts	uGt	dedupeByPathLatest	dedupe by path latest | Set of paths; sorts by lastActivity desc; keeps first
+accept	modules/island/auth/oauth.ts	uZr	normalizeMarketplaceInstallLocations	normalize marketplace install locations | known_marketplaces.json; rewrites installLocation
+accept	modules/island/auth/oauth.ts	uje	deriveSpanStatus	derive span status | OTel SpanStatusCode OK/ERROR/UNSET -> code/message
+accept	modules/island/auth/oauth.ts	xie	deriveStatusFromAttributes	derive status from attributes | ATTR_HTTP_RESPONSE_STATUS_CODE / SEMATTRS_RPC_GRPC_STATUS_CODE
+accept	modules/island/auth/oauth.ts	uri	isIpAddress	is ip address | v4/v6 regex sri.test/gri.test
+accept	modules/island/auth/oauth.ts	v5i	partitionAtFirst	partition at first | indexOf; returns [before, sep, after]
+accept	modules/island/auth/oauth.ts	v8	isMacOS	is mac os | process.platform==='darwin'
+accept	modules/island/auth/oauth.ts	v8t	describeSessionLocation	describe session location | isRemote?'remote':'local' else 'none'
+accept	modules/island/auth/oauth.ts	ywt	createNoOpMcpServer	create no op mcp server | Jw({name,tools:[]})
+accept	modules/island/auth/oauth.ts	vDr	shadowRemoteMcpServers	shadow remote mcp servers | 'Shadowing with no-ops to prevent SDK double-load'
+accept	modules/island/auth/oauth.ts	vKr	stripSuppressedPermissionUpdates	strip suppressed permission updates | 'always-allow suppressed'; deletes updatedPermissions
+accept	modules/island/auth/oauth.ts	vWi	classifyMcpServerCategory	classify mcp server category | name match -> 'trading'/'browser'/'terminal'
+accept	modules/island/auth/oauth.ts	vZr	mapSettingsScope	map settings scope | 'user'/'local'/'project' -> YtA.User/Local/Project
+accept	modules/island/auth/oauth.ts	vai	isSuccessResult	is success result | guards {success:boolean, error?:string}
+accept	modules/island/auth/oauth.ts	viA	hasSyntheticAllowedModels	has synthetic allowed models | pI().syntheticAllowedModels non-empty
+accept	modules/island/auth/oauth.ts	vjA	isMemoryBalloonEnabled	is memory balloon enabled | pI().memoryBalloon.enabled
+accept	modules/island/auth/oauth.ts	vmi	assert	assert | throws new (t??Error)(e) when !A
+accept	modules/island/auth/oauth.ts	vrn	addTokensToday	add tokens today | '[buddy]'; QP.tokens += A; IFt.set('tokens-today')
+accept	modules/island/auth/oauth.ts	vyr	hasReadyPairedDevice	has ready paired device | iZ.values() any isPaired && isReady
+accept	modules/island/auth/oauth.ts	w7r	detectTurnstileChallenge	detect turnstile challenge | executeJavaScript; 'challenges.cloudflare.com'; turnstile; data-sitekey
+accept	modules/island/auth/oauth.ts	w8r	listDesktopMcpConfigs	list desktop mcp configs | nQA().configs; source w_.Desktop
+accept	modules/island/auth/oauth.ts	y2A	mergeMcpConfigSources	merge mcp config sources | merges w8r + p8r + l8r deduped by id
+accept	modules/island/auth/oauth.ts	w9t	formatListPreview	format list preview | sort; first 5 joined; '+N'
+accept	modules/island/auth/oauth.ts	wBr	hashToBucket	hash to bucket | createHash('sha256').readUInt32BE % buckets
+accept	modules/island/auth/oauth.ts	wGi	recordEventTimestamp	record event timestamp | Qp.push(Date.now()); cap at Kit; shift
+accept	modules/island/auth/oauth.ts	wVr	readTemplateFile	read template file | candidate paths; size limit pVr; 'template truncated'
+accept	modules/island/auth/oauth.ts	wZr	ensureVmStarted	ensure vm started | 'Ensuring VM is started'; await $Y()
+accept	modules/island/auth/oauth.ts	wbt	listAllRunningSessions	list all running sessions | flatMap e.listRunningSessions()
+accept	modules/island/auth/oauth.ts	wf	emitRemoteToolsDeviceState	emit remote tools device state | Ve('lam_remote_tools_device_state', A)
+accept	modules/island/auth/oauth.ts	wmr	findLineBreak	find line break | scans for 10(LF)/13(CR); returns {preceding,index,carriage}
+accept	modules/island/auth/oauth.ts	wnn	formatCiMonitorEvent	format ci monitor event | '<ci-monitor-event>'; 'gh pr checks'; merge conflicts; review comments
+accept	modules/island/auth/oauth.ts	wsi	isCdpTargetInfo	is cdp target info | guards {pid,cdpPort,build?,frontend?,backend?}
+accept	modules/island/auth/oauth.ts	wwr	resolveBridgeRequest	resolve bridge request | acA.get(id); clearTimeout; resolve parsed JSON array
+accept	modules/island/auth/oauth.ts	wxt	formatTimestampWithPrecision	format timestamp with precision | toISOString; replaces '000Z' with sub-second digits
+accept	modules/island/auth/oauth.ts	wzr	openLocalFileWithConsent	open local file with consent | 'showFileInFolder'/'openLocalFile'; shell.openPath; 'Path moved during consent'
+accept	modules/island/auth/oauth.ts	xFr	dataUrlByteLength	data url byte length | 'data:'; ';base64'; Math.floor(len/4)*3 minus padding
+accept	modules/island/auth/oauth.ts	xUe	checkHostLoopVmPath	check host loop vm path | '[canUseTool:HostLoop]'; '/sessions' VM path -> deny
+accept	modules/island/auth/oauth.ts	xYt	isSyntheticEvent	is synthetic event | 'nativeEvent'+'preventDefault'+'stopPropagation'
+accept	modules/island/auth/oauth.ts	xen	getCenteredWindowPosition	get centered window position | getPrimaryDisplay workAreaSize; (w-XGt)/2
+accept	modules/island/auth/oauth.ts	xet	getOrganizationUuid	get organization uuid | T6()?.organizationUuid
+accept	modules/island/auth/oauth.ts	xlA	resetZoomLevel	reset zoom level | webContents.setZoomLevel(0); yBA()
+accept	modules/island/auth/oauth.ts	xqt	normalizeLogLevel	normalize log level | 'verbose'->'debug'; 'silent'->'trace'; Fqt/Oqt maps; 'info' default
+accept	modules/island/auth/oauth.ts	xrn	handleAckMessage	handle ack message | JSON ack -> eT.get/resolve {ack,ok,n,data,error}; cmd dispatch
+accept	modules/island/auth/oauth.ts	xve	getOrgPluginsCached	get org plugins cached | dedupes pur(A) by accountId:orgId in _NA map
+accept	modules/island/auth/oauth.ts	y5r	encodeUtf16LeWithBom	encode utf16 le with bom | '﻿' BOM; bytes char&255, char>>8
+accept	modules/island/auth/oauth.ts	yAA	truncateWithEllipsis	truncate with ellipsis | slice(0,e)+'...' when over length
+accept	modules/island/auth/oauth.ts	yAn	startSessionsBridge	start sessions bridge | '[sessions-bridge]'; getOAuthToken; COWORK_OAUTH_CONFIGS; getTrustedDeviceToken
+accept	modules/island/auth/oauth.ts	qgr	mergeZodShapes	merge zod shapes | merges fBA[t].shape() entries
+accept	modules/island/auth/oauth.ts	r3i	createAjvInstance	create ajv instance | new Ajv strict:false validateFormats allErrors; i3i adds formats
+accept	modules/island/plugins/cli-manifest-validation.ts	U7r	renderTeachModeOverlayHtml	render teach mode overlay html | returns full HTML for teach-mode tooltip overlay (window.cuTeach, "Teaching" title)
+accept	modules/island/plugins/cli-manifest-validation.ts	U8r	summarizeToolInvocation	summarize tool invocation | switch over 'Read'/'Grep'/'Glob' returning {tool, detail}
+accept	modules/island/plugins/cli-manifest-validation.ts	UBr	lowerBoundIndex	lower bound index | binary-search insertion index via comparator (Math.trunc(r/2))
+accept	modules/island/plugins/cli-manifest-validation.ts	UNA	escapeHtml	escape html | replaces &<>"' with HTML entities
+accept	modules/island/plugins/cli-manifest-validation.ts	XBr	renderImportedKnowledgePrompt	render imported knowledge prompt | builds <imported_knowledge> block ("knowledge from Claude.ai")
+accept	modules/island/plugins/cli-manifest-validation.ts	UQr	renderScheduledTasksPrompt	render scheduled tasks prompt | returns "## Scheduled tasks" instruction text
+accept	modules/island/plugins/cli-manifest-validation.ts	URi	validatePluginManifest	validate plugin manifest | validates plugin.json object -> {valid,userErrors,securityErrors}
+accept	modules/island/plugins/cli-manifest-validation.ts	zet	validateRuleList	validate rule list | validates array of confirm/command rules (snake_case op, match/flag)
+accept	modules/island/plugins/cli-manifest-validation.ts	YRi	validateClisManifest	validate clis manifest | validates clis object "keyed by CLI binary name"
+accept	modules/island/plugins/cli-manifest-validation.ts	USr	isSessionResultShape	is session result shape | guard for {sessionId?,isError?,error?}
+accept	modules/island/plugins/cli-manifest-validation.ts	vUi	runBedrockSsoDeviceFlow	run bedrock sso device flow | SSO device-authorization polling ("Bedrock SSO grant cancelled")
+accept	modules/island/plugins/cli-manifest-validation.ts	UUi	clampIntOrDefault	clamp int or default | Math.min(max(trunc)) into [e,t] with default fallback
+accept	modules/island/plugins/cli-manifest-validation.ts	UYt	isEvent	is event | typeof Event !== undefined && instanceof Event
+accept	modules/island/plugins/cli-manifest-validation.ts	UVe	serializeErrorOrEvent	serialize error or event | turns Error/Event into a plain object
+accept	modules/island/plugins/cli-manifest-validation.ts	gte	copyOwnEnumerableProps	copy own enumerable props | copies own enumerable props into a new object
+accept	modules/island/plugins/cli-manifest-validation.ts	Uct	assertValidProfileName	assert valid profile name | throws on empty/'.'/path-sep/disallowed-char profile names
+accept	modules/island/plugins/cli-manifest-validation.ts	Uie	makeRandomHexIdGenerator	make random hex id generator | returns fn producing random hex string of length A
+accept	modules/island/plugins/cli-manifest-validation.ts	Uje	makeDiagErrorLogger	make diag error logger | returns fn that logs via de.diag.error
+accept	modules/island/plugins/cli-manifest-validation.ts	WWt	stringifyError	stringify error | string passthrough else JSON.stringify(flattened error)
+accept	modules/island/plugins/cli-manifest-validation.ts	zWt	flattenErrorProperties	flatten error properties | walks prototype chain collecting own props as strings
+accept	modules/island/plugins/cli-manifest-validation.ts	Umr	iterateHeaderEntries	iterate header entries | generator yielding header name/value pairs
+accept	modules/island/plugins/cli-manifest-validation.ts	v$r	buildSshArgs	build ssh args | builds ssh CLI args (-p,-i,BatchMode,StrictHostKeyChecking)
+accept	modules/island/plugins/cli-manifest-validation.ts	Up	runSshCommand	run ssh command | spawns ssh, returns {stdout,stderr,exitCode}
+accept	modules/island/plugins/cli-manifest-validation.ts	Ust	tryParseUrl	try parse url | new URL(A) or null on throw
+accept	modules/island/plugins/cli-manifest-validation.ts	Uwe	isTrustedClaudeFrame	is trusted claude frame | top-level senderFrame with origin in claude.ai/claude.com/etc
+accept	modules/island/plugins/cli-manifest-validation.ts	UxA	appendDiagnosticLog	append diagnostic log | appends {timestamp,level,event,data} line to diagnostics file
+accept	modules/island/plugins/cli-manifest-validation.ts	ngr	getDiagnosticsFilePath	get diagnostics file path | process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
+accept	modules/island/plugins/cli-manifest-validation.ts	V$r	isConnectionClosedError	is connection closed error | 'Connection closed'/EPIPE/ECONNRESET/RPC-timeout
+accept	modules/island/plugins/cli-manifest-validation.ts	t8e	isJsonRpcNotification	is json rpc notification | jsonrpc==='2.0' + method + no id
+accept	modules/island/plugins/cli-manifest-validation.ts	V1t	isJsonRpcResponse	is json rpc response | jsonrpc==='2.0' + id + (result|error)
+accept	modules/island/plugins/cli-manifest-validation.ts	fqt	instrumentJsonRpcSend	instrument json rpc send | wraps transport.send to intercept notifications/responses
+accept	modules/island/plugins/cli-manifest-validation.ts	wqt	reportJsonRpcError	report json rpc error | wraps JSON-RPC error codes into Error, Fk(...,'protocol')
+accept	modules/island/plugins/cli-manifest-validation.ts	q3r	hostMatchesPattern	host matches pattern | '*.' suffix match else equality
+accept	modules/island/plugins/cli-manifest-validation.ts	V3r	findMatchingHostRule	find matching host rule | first rule matching host/path/pathSuffix
+accept	modules/island/plugins/cli-manifest-validation.ts	V4	normalizeLowerCase	normalize lower case | trim().toLowerCase()
+accept	modules/island/plugins/cli-manifest-validation.ts	oUt	oauthIssuerOrigin	oauth issuer origin | new URL(A.oauthIssuer).origin
+accept	modules/island/plugins/cli-manifest-validation.ts	eAe	getValidIssuerToken	get valid issuer token | returns unexpired token for an oauth issuer config
+accept	modules/island/plugins/cli-manifest-validation.ts	Ven	getClaudeAiImportAuthStatus	get claude ai import auth status | resolves claudeAiImport sign-in status (Jl.SignedOut/AwaitingApproval)
+accept	modules/island/plugins/cli-manifest-validation.ts	VAr	getDisposer	get disposer | returns Symbol.asyncDispose/dispose closure
+accept	modules/island/plugins/cli-manifest-validation.ts	_0i	hasCustomInferenceConfig	has custom inference config | inferenceProvider set or bootstrapUrl enabled
+accept	modules/island/plugins/cli-manifest-validation.ts	vvt	promoteEphemeralFirstPartyBoot	promote ephemeral first party boot | promotes ephemeral 1P boot to persisted '1p'
+accept	modules/island/plugins/cli-manifest-validation.ts	VJi	parseExtraHeadersToken	parse extra headers token | verifies & parses CLAUDE_EXTRA_HEADERS_TOKEN
+accept	modules/island/plugins/cli-manifest-validation.ts	jJi	isClaudePreviewOrStagingHost	is claude preview or staging host | preview.claude.ai/.com and .ant.dev hosts
+accept	modules/island/plugins/cli-manifest-validation.ts	wtn	installAnthropicClientHeaders	install anthropic client headers | onBeforeSendHeaders sets anthropic-client-* headers
+accept	modules/island/plugins/cli-manifest-validation.ts	VOt	joinUntilLengthCap	join until length cap | reduce-join with separator, drops entries past length cap
+accept	modules/island/plugins/cli-manifest-validation.ts	qQr	isUnderApplicationsDir	is under applications dir | path starts with known prefixes or /Applications/
+accept	modules/island/plugins/cli-manifest-validation.ts	VQr	collectInstalledAppNames	collect installed app names | ranks/filters installed-app display names (win32/darwin)
+accept	modules/island/plugins/cli-manifest-validation.ts	wLe	capListWithMore	cap list with more | caps list and appends "... and N more"
+accept	modules/island/plugins/cli-manifest-validation.ts	VSi	checkMcpEndpointSecurity	check mcp endpoint security | warns on plain HTTP / shared bearer token
+accept	modules/island/plugins/cli-manifest-validation.ts	VVA	isAccessTokenUnexpired	is access token unexpired | expiresAt>0 && expiresAt-skew>now
+accept	modules/island/plugins/cli-manifest-validation.ts	wrt	isTokenUsable	is token usable | unexpired or has refreshToken
+accept	modules/island/plugins/cli-manifest-validation.ts	V6	isIssuerTokenUnexpired	is issuer token unexpired | expiresAt>0 && expiresAt-skew>now (issuer-keyed token)
+accept	modules/island/plugins/cli-manifest-validation.ts	pHt	parseSentryDsn	parse sentry dsn | parses Sentry DSN string ("Invalid Sentry Dsn")
+accept	modules/island/plugins/cli-manifest-validation.ts	VVe	buildDsnComponents	build dsn components | normalizes DSN protocol/publicKey/host/path/projectId
+accept	modules/island/plugins/cli-manifest-validation.ts	jVe	parseValidDsn	parse valid dsn | parse + validate DSN
+accept	modules/island/plugins/cli-manifest-validation.ts	Yti	buildSentryMinidumpUrl	build sentry minidump url | builds '/api/{id}/minidump/?sentry_key=' endpoint URL
+accept	modules/island/plugins/cli-manifest-validation.ts	VWr	mapWithConcurrency	map with concurrency | runs async mapper with a concurrency limit
+accept	modules/island/plugins/cli-manifest-validation.ts	Wvt	computeRemoteGitDiff	compute remote git diff | git ls-files --others untracked diff ("[remoteGitDiff]")
+accept	modules/island/plugins/cli-manifest-validation.ts	VYe	pingConnectionsOnResume	ping connections on resume | pings/recovers all connections ('power_resume')
+accept	modules/island/plugins/cli-manifest-validation.ts	VZr	isSimulatorDevice	is simulator device | guard for {kind?,udid,name,state,osVersion}
+accept	modules/island/plugins/cli-manifest-validation.ts	Vft	renderCspMetaTag	render csp meta tag | <meta http-equiv="Content-Security-Policy"> tag
+accept	modules/island/plugins/cli-manifest-validation.ts	fhr	renderSvgHtmlDocument	render svg html document | wraps svg markup in a full-bleed html document
+accept	modules/island/plugins/cli-manifest-validation.ts	Vgr	mergePermissionShapes	merge permission shapes | merges permissionsShape() results across keys
+accept	modules/island/plugins/cli-manifest-validation.ts	r6i	runTeachSteps	run teach steps | executes teach-mode steps ("Teach mode is not active")
+accept	modules/island/plugins/cli-manifest-validation.ts	VhA	isPreviewServerInfo	is preview server info | guard for {serverId,name,port,status,startedAt,cwd}
+accept	modules/island/plugins/cli-manifest-validation.ts	Vie	isAnonymousFrameName	is anonymous frame name | '' / '?' / '<anonymous>'
+accept	modules/island/plugins/cli-manifest-validation.ts	yje	functionNamesEquivalent	function names equivalent | compares names allowing optional 'Object.' prefix
+accept	modules/island/plugins/cli-manifest-validation.ts	_s	getOrCreateConnection	get or create connection | cached connection in Bb keyed by oh(A)
+accept	modules/island/plugins/cli-manifest-validation.ts	Vjr	listRemoteDirectoryBfs	list remote directory bfs | BFS SSH directory walk ("[SSH] Failed to list directory")
+accept	modules/island/plugins/cli-manifest-validation.ts	Vjt	collectHostSystemInfo	collect host system info | os arch/memory/cpu host metrics
+accept	modules/island/plugins/cli-manifest-validation.ts	VlA	clampNumberOrDefault	clamp number or default | clamps numeric/string into [e,t] else default
+accept	modules/island/plugins/cli-manifest-validation.ts	aAe	computeExpiresAtFromTtl	compute expires at from ttl | now + clamped ttl-seconds * 1000
+accept	modules/island/plugins/cli-manifest-validation.ts	Vmi	wrapWithSentinel	wrap with sentinel | `${marker}_${A}_${marker}`
+accept	modules/island/plugins/cli-manifest-validation.ts	Voi	isDirectoryEntry	is directory entry | guard for {name,relativePath,fullPath,isDirectory}
+accept	modules/island/plugins/cli-manifest-validation.ts	Vpr	closeEntriesNotIn	close entries not in | closes+deletes R8 entries absent from given set
+accept	modules/island/plugins/cli-manifest-validation.ts	yCA	readVertexAdcCredentials	read vertex adc credentials | $VA.read()
+accept	modules/island/plugins/cli-manifest-validation.ts	VsA	clearVertexAdcCredentials	clear vertex adc credentials | $VA.clear()
+accept	modules/island/plugins/cli-manifest-validation.ts	jVA	refreshVertexAdcToken	refresh vertex adc token | Vertex ADC refresh probe ("Vertex ADC refresh probe failed")
+accept	modules/island/plugins/cli-manifest-validation.ts	Vsr	assertResourceTemplateRef	assert resource template ref | throws unless params.ref.type==='ref/resource'
+accept	modules/island/plugins/cli-manifest-validation.ts	VuA	safeProcessArgv	safe process argv | process.argv or []
+accept	modules/island/plugins/cli-manifest-validation.ts	Vui	parsePatternFilters	parse pattern filters | comma list -> {pattern,exclude} regex entries
+accept	modules/island/plugins/cli-manifest-validation.ts	m5e	compilePatternMatcher	compile pattern matcher | builds include/exclude predicate from patterns
+accept	modules/island/plugins/cli-manifest-validation.ts	t7A	runAuxProcessCapture	run aux process capture | spawns aux process, captures stdout with timeout/maxBuffer
+accept	modules/island/plugins/cli-manifest-validation.ts	Vvt	remoteRealpath	remote realpath | runs remote 'realpath' command
+accept	modules/island/plugins/cli-manifest-validation.ts	YGi	parseCredentialHelperOutput	parse credential helper output | parses credential-helper stdout into token/JSON
+accept	modules/island/plugins/cli-manifest-validation.ts	Vye	parseCredentialHelperJson	parse credential helper json | parses credential-helper JSON token/headers
+accept	modules/island/plugins/cli-manifest-validation.ts	jit	runCredentialHelper	run credential helper | runs helper, returns {outcome,parsed}
+accept	modules/island/plugins/cli-manifest-validation.ts	Vze	isSessionStartShape	is session start shape | guard for {sessionId,model?,userSelected*}
+accept	modules/island/plugins/cli-manifest-validation.ts	foi	isOrchestrationStartMessage	is orchestration start message | guard for {orchestrationRequestId,message,sessionStart}
+accept	modules/island/plugins/cli-manifest-validation.ts	W0	normalizePluginId	normalize plugin id | valid plugin id else '<plugin>@other'
+accept	modules/island/plugins/cli-manifest-validation.ts	jRi	requestCliPluginOAuth	request cli plugin oauth | plugin OAuth with 'lam_cli_plugin_oauth' telemetry
+accept	modules/island/plugins/cli-manifest-validation.ts	j1t	buildMcpToolResultAttributes	build mcp tool result attributes | 'mcp.tool.result.*' telemetry attribute map
+accept	modules/island/plugins/cli-manifest-validation.ts	W1t	extractMcpResultAttributes	extract mcp result attributes | content attributes plus isError flag
+accept	modules/island/plugins/cli-manifest-validation.ts	W4e	suppressTracingInContext	suppress tracing in context | context.setValue(suppress-tracing key, true)
+accept	modules/island/plugins/cli-manifest-validation.ts	lPt	exportWithTracingSuppressed	export with tracing suppressed | exports spans within suppress-tracing context
+accept	modules/island/plugins/cli-manifest-validation.ts	ufe	isNullOrEmpty	is null or empty | A == null || A === ''
+accept	modules/island/plugins/cli-manifest-validation.ts	W5e	hasMissingRequiredUserConfig	has missing required user config | required manifest.user_config fields missing
+accept	modules/island/plugins/cli-manifest-validation.ts	Zje	matchesStringOrRegex	matches string or regex | === string or .match(regex)
+accept	modules/island/plugins/cli-manifest-validation.ts	W6t	matchesAnyPattern	matches any pattern | any Zje match in list
+accept	modules/island/plugins/cli-manifest-validation.ts	W7i	cloneArrayBuffer	clone array buffer | copies an ArrayBuffer via typed-array set
+accept	modules/island/plugins/cli-manifest-validation.ts	W8	toHyphenatedId	to hyphenated id | non-alnum -> '-', undefined when over length cap
+accept	modules/island/plugins/cli-manifest-validation.ts	W8e	buildResourceAttributes	build resource attributes | moA.FromAttributeList(entries)
+accept	modules/island/plugins/cli-manifest-validation.ts	z8e	buildTelemetrySdkResource	build telemetry sdk resource | service name + telemetry SDK lang/name/version attrs
+accept	modules/island/plugins/cli-manifest-validation.ts	W9i	hasOwnProp	has own prop | Object.prototype.hasOwnProperty.call
+accept	modules/island/plugins/cli-manifest-validation.ts	WEA	createNavigationResetStore	create navigation reset store | cache reset on did-start-navigation; returns [get,set,subscribe]
+accept	modules/island/plugins/cli-manifest-validation.ts	WFi	stripUrlHash	strip url hash | returns URL copy with hash removed
+accept	modules/island/plugins/cli-manifest-validation.ts	zFi	resourceUrlMatchesConfigured	resource url matches configured | same-origin + path-prefix containment check
+accept	modules/island/plugins/cli-manifest-validation.ts	oOi	validateProtectedResourceUrl	validate protected resource url | "Protected resource ... does not match" validation
+accept	modules/island/plugins/cli-manifest-validation.ts	WGt	navigateBack	navigate back | navigationHistory.goBack()
+accept	modules/island/plugins/cli-manifest-validation.ts	WHe	extractJsonFromCliOutput	extract json from cli output | finds JSON span in CLI output (MarketplacePluginManagerCLI)
+accept	modules/island/plugins/cli-manifest-validation.ts	xbt	trimToValidJsonSuffix	trim to valid json suffix | strips trailing noise to a parseable JSON string
+accept	modules/island/plugins/cli-manifest-validation.ts	aZr	endsWithValidJson	ends with valid json | trimToValidJsonSuffix(A) !== null
+accept	modules/island/plugins/cli-manifest-validation.ts	WKt	formatIssuePath	format issue path | joins path parts with '.', '<array>' for numeric segments
+accept	modules/island/plugins/cli-manifest-validation.ts	zKt	formatValidationKeyError	format validation key error | "Failed to validate keys: ..." message
+accept	modules/island/plugins/cli-manifest-validation.ts	jLe	portConflictGuidance	port conflict guidance | autoPort port-conflict guidance message
+accept	modules/island/plugins/cli-manifest-validation.ts	WLe	portInUseMessage	port in use message | port-in-use error message
+accept	modules/island/plugins/cli-manifest-validation.ts	spr	allocatePreviewPort	allocate preview port | checks/allocates a preview-server port (o$ PortInUseError)
+accept	modules/island/plugins/cli-manifest-validation.ts	jkA	getAvailablePort	get available port | net.createServer free-port probe
+accept	modules/island/plugins/cli-manifest-validation.ts	jNr	extractLogTags	extract log tags | derives tags from a log message (mcp/1p/bracket prefix)
+accept	modules/island/plugins/cli-manifest-validation.ts	WNr	tagsPassFilter	tags pass filter | include/exclude tag filter
+accept	modules/island/plugins/cli-manifest-validation.ts	zNr	messagePassesTagFilter	message passes tag filter | extractLogTags + tagsPassFilter
+accept	modules/island/plugins/cli-manifest-validation.ts	wTr	isMessageLoggable	is message loggable | env + node-runtime + tag-filter logging gate
+accept	modules/island/plugins/cli-manifest-validation.ts	wNe	resolveModelConfigKey	resolve model config key | fuzzy config-key lookup stripping '[..]'
+accept	modules/island/plugins/cli-manifest-validation.ts	YMA	toKnownEffort	to known effort | value if present in known-effort set, else undefined
+accept	modules/island/plugins/cli-manifest-validation.ts	WOA	getEffortForModel	get effort for model | effortByModel lookup with syntheticAllowedModels fallback
+accept	modules/island/plugins/cli-manifest-validation.ts	WUi	clearAllCaches	clear all caches | pCA.clear() + hCA.clearAll()
+accept	modules/island/plugins/cli-manifest-validation.ts	YaA	isFilteredAppName	is filtered app name | bundleId / keyword app-name exclusion check
+accept	modules/island/plugins/cli-manifest-validation.ts	WWi	hasNonExcludedApp	has non excluded app | some app passes the YaA filter
+accept	modules/island/plugins/cli-manifest-validation.ts	WXr	isFindRequest	is find request | guard for {findNext,forward?}
+accept	modules/island/plugins/cli-manifest-validation.ts	WZr	isSimulatorAppLaunch	is simulator app launch | guard for {udid,appPath,bundleId?,kind?}
+accept	modules/island/plugins/cli-manifest-validation.ts	W_r	extractUrlsFromText	extract urls from text | matchAll URL patterns -> parsed URLs
+accept	modules/island/plugins/cli-manifest-validation.ts	fTA	trimUrlTrailingPunctuation	trim url trailing punctuation | strips trailing punctuation/unbalanced brackets from URL
+accept	modules/island/plugins/cli-manifest-validation.ts	Wf	isTopLevelFrame	is top level frame | senderFrame.parent === null
+accept	modules/island/plugins/cli-manifest-validation.ts	XL	resolveToolAlias	resolve tool alias | xTe alias-map lookup with passthrough
+accept	modules/island/plugins/cli-manifest-validation.ts	Wgr	unescapeRuleParens	unescape rule parens | un-escapes \( \) \\
+accept	modules/island/plugins/cli-manifest-validation.ts	zgr	parseToolRule	parse tool rule | parses tool(rule) -> {toolName, ruleContent}
+accept	modules/island/plugins/cli-manifest-validation.ts	Zgr	indexOfUnescaped	index of unescaped | first unescaped occurrence index
+accept	modules/island/plugins/cli-manifest-validation.ts	Xgr	lastIndexOfUnescaped	last index of unescaped | last unescaped occurrence index
+accept	modules/island/plugins/cli-manifest-validation.ts	Win	filterForwardableEnv	filter forwardable env | drops env keys not in jin allowlist (SshMcpServerManager)
+accept	modules/island/plugins/cli-manifest-validation.ts	Wme	stableStringify	stable stringify | JSON.stringify with sorted object keys
+accept	modules/island/plugins/cli-manifest-validation.ts	ett	diffChangedKeys	diff changed keys | keys differing between two objects (ignores expiresAt)
+accept	modules/island/plugins/cli-manifest-validation.ts	Wmr	buildSummarizeConversationTool	build summarize conversation tool | 'summarize_conversation' tool input schema
+accept	modules/island/plugins/cli-manifest-validation.ts	_1A	isAppWindowHint	is app window hint | guard for {bundleId,displayName,windowId,title}
+accept	modules/island/plugins/cli-manifest-validation.ts	joi	isAttachmentShape	is attachment shape | guard for {file_name,file_size,file_type,extracted_content,origin}
+accept	modules/island/plugins/cli-manifest-validation.ts	Woi	isComposerChipPayload	is composer chip payload | guard for {chipText,attachments?,cuAppHint?}
+accept	modules/island/plugins/cli-manifest-validation.ts	Wp	isObject	is object | A != null && typeof A === 'object'
+accept	modules/island/plugins/cli-manifest-validation.ts	r8e	extractNameTitleVersion	extract name title version | picks name/title/version from an info object
+accept	modules/island/plugins/cli-manifest-validation.ts	sqt	extractInitializeParams	extract initialize params | protocolVersion + clientInfo from request params
+accept	modules/island/plugins/cli-manifest-validation.ts	aqt	extractInitializeResult	extract initialize result | protocolVersion + serverInfo from result
+accept	modules/island/plugins/cli-manifest-validation.ts	Xwi	stripMeasurementPrefix	strip measurement prefix | replace(/^(.*?)-/) drops prefix before first hyphen
+accept	modules/island/plugins/cli-manifest-validation.ts	jsi	isDirEntry	is dir entry | guard for {name,path,isDirectory}
+accept	modules/island/plugins/cli-manifest-validation.ts	Wsi	isDirListing	is dir listing | guard for {entries[],error?}
+accept	modules/island/plugins/cli-manifest-validation.ts	dKi	createExtensionBridgeClient	create extension bridge client | new BKi (chrome-extension-bridge-client)
+accept	modules/island/plugins/cli-manifest-validation.ts	l3i	createSocketPoolClient	create socket pool client | new c3i (socket-pool-client)
+accept	modules/island/plugins/cli-manifest-validation.ts	cgt	selectBridgeClient	select bridge client | chooses bridge by bridgeConfig/getSocketPaths
+accept	modules/island/plugins/cli-manifest-validation.ts	lPA	applyEdit	apply edit | substring splice applying one edit
+accept	modules/island/plugins/cli-manifest-validation.ts	Wur	applyEdits	apply edits | applies sorted edits, throws on "Overlapping edit"
+accept	modules/island/plugins/cli-manifest-validation.ts	tmi	parseNumberSkeleton	parse number skeleton | formatjs number-skeleton tokens -> Intl.NumberFormat options
+accept	modules/island/plugins/cli-manifest-validation.ts	emi	parseNotationSkeleton	parse notation skeleton | eng/scientific concise-notation skeleton parsing
+accept	modules/island/plugins/cli-manifest-validation.ts	Wpe	parseSignificantDigitsSkeleton	parse significant digits skeleton | significant-digit skeleton -> Intl options
+accept	modules/island/plugins/cli-manifest-validation.ts	Wwi	parseDateTimeSkeleton	parse date time skeleton | date/time pattern letters -> Intl.DateTimeFormat options
+accept	modules/island/agent/session-error-classification.ts	X$r	detachAllControllers	detach all controllers | Array.from(Bb.values()) then await e.detach() on each; clears Bb map
+accept	modules/island/agent/session-error-classification.ts	z1t	buildMcpPromptResultAttributes	build mcp prompt result attributes | builds attr map keyed 'mcp.prompt.result', reads A.description/A.messages role/content
+accept	modules/island/agent/session-error-classification.ts	i8e	getOrCreateRequestSpanMap	get or create request span map | CGA.get(A) || (new Map(), CGA.set(A,...)) nested-map accessor
+accept	modules/island/agent/session-error-classification.ts	Z1t	recordPendingMcpRequest	record pending mcp request | i8e(A).set(e,{span,method,startTime:Date.now()})
+accept	modules/island/agent/session-error-classification.ts	X1t	finalizeMcpRequestSpan	finalize mcp request span | looks up pending req, sets span attributes for 'tools/call'/'prompts/get', n.end()
+accept	modules/island/agent/session-error-classification.ts	m$e	parseRetryAfterMs	parse retry after ms | parseInt*1e3 or Date.parse delta; used for 'retry-after' header
+accept	modules/island/agent/session-error-classification.ts	X2t	updateRateLimitsFromHeaders	update rate limits from headers | parses 'x-sentry-rate-limits'/'retry-after', metric_bucket, 429 -> rate limit map
+accept	modules/island/agent/session-error-classification.ts	ouA	listCliNames	list cli names | A.clis object -> Object.keys
+accept	modules/island/agent/session-error-classification.ts	X6A	findConflictingCliName	find conflicting cli name | scans plugins for cli name clash, returns {cliName,owningPluginName}
+accept	modules/island/agent/session-error-classification.ts	X6t	parseDiagLogLevel	parse diag log level | pre[A.toUpperCase()] else warn 'Unknown log level', DiagLogLevel.INFO
+accept	modules/island/agent/session-error-classification.ts	_u	extractHostname	extract hostname | new URL(...).hostname from string, prefixes https:// if no scheme
+accept	modules/island/agent/session-error-classification.ts	X7e	resolveAiPlatformHost	resolve ai platform host | _u(e) ?? '<region>-aiplatform.googleapis.com'
+accept	modules/island/agent/session-error-classification.ts	hSA	extractOidcEndpointHosts	extract oidc endpoint hosts | parse JSON, hostnames of issuer/authorizationUrl/tokenUrl
+accept	modules/island/agent/session-error-classification.ts	Y_	safeStructuredClone	safe structured clone | structuredClone(A,e) wrapped in Rg/Mg telemetry try/finally
+accept	modules/island/agent/session-error-classification.ts	XBt	parseInlineSdkSettings	parse inline sdk settings | parses A.flagInline via Y_/JY/Fz().safeParse; 'SDK inline settings'
+accept	modules/island/agent/session-error-classification.ts	zpt	hasParseMethods	has parse methods | A.parse && A.safeParse are functions
+accept	modules/island/agent/session-error-classification.ts	Zpt	isZodSchema	is zod schema | '_def' in A || '_zod' in A || hasParseMethods(A)
+accept	modules/island/agent/session-error-classification.ts	lYA	isZodRawShape	is zod raw shape | object whose values are zod schemas (Object.values some hasParseMethods)
+accept	modules/island/agent/session-error-classification.ts	XGe	normalizeInputSchema	normalize input schema | rawShape->FU(A) else require zod schema; 'inputSchema must be a Zod schema or raw shape'
+accept	modules/island/agent/session-error-classification.ts	nD	isThenable	is thenable | A.then && typeof A.then=='function'
+accept	modules/island/agent/session-error-classification.ts	XHt	tapMaybePromise	tap maybe promise | if thenable then(onOk,onErr)+finally else run sync callbacks
+accept	modules/island/agent/session-error-classification.ts	XIA	isImageAttachment	is image attachment | validates {base64,mimeType,filename}
+accept	modules/island/agent/session-error-classification.ts	sZe	isBlobAttachment	is blob attachment | validates {name,blobUuid}
+accept	modules/island/agent/session-error-classification.ts	hC	isSshConfig	is ssh config | validates {sshHost,sshPort,sshIdentityFile,remoteCwd}
+accept	modules/island/agent/session-error-classification.ts	Zsi	isSessionStartRequest	is session start request | validates {cwd,message,sessionId,model,mcpServers,permissionMode,...}
+accept	modules/island/agent/session-error-classification.ts	gZe	isMcpServersConfig	is mcp servers config | ZIA.safeParse(A).success; used for mcpServers field
+accept	modules/island/agent/session-error-classification.ts	XJi	parseWindowStateSnapshot	parse window state snapshot | parses {ts,windowVisible,otherAppFullScreen,zOrderAnchorHwnd,navEntries,navIndex}
+accept	modules/island/agent/session-error-classification.ts	lXr	loadManagedBootstrapOidc	load managed bootstrap oidc | managed MDM -> {oidc,bootstrapUrl}, WqA.safeParse(bootstrapOidc)
+accept	modules/island/agent/session-error-classification.ts	XLt	setupCustom3pAuth	setup custom3p auth | kt().triggerBootstrapAuth, '[custom-3p]', Custom3pSetup
+accept	modules/island/agent/session-error-classification.ts	ZOt	sanitizeSpanAttributes	sanitize span attributes | validates otel attr keys/values, 'Invalid attribute key'/diag.warn
+accept	modules/island/agent/session-error-classification.ts	XOt	isNonEmptyString	is non empty string | typeof=='string' && A!==''
+accept	modules/island/agent/session-error-classification.ts	XPA	readTranscriptTail	read transcript tail | ZPA(A,offset) then shift first line
+accept	modules/island/agent/session-error-classification.ts	nmr	readTranscriptWithStrategy	read transcript with strategy | 'Refusing to read non-regular transcript', returns lines+strategy none/preserved/compaction/tail
+accept	modules/island/agent/session-error-classification.ts	eL	coworkSettingsPath	cowork settings path | AA.join(au(A,e),'cowork_settings.json')
+accept	modules/island/agent/session-error-classification.ts	XQt	readCoworkEnabledPlugins	read cowork enabled plugins | reads cowork settings, returns enabledPlugins ?? {}
+accept	modules/island/agent/session-error-classification.ts	XUi	clearMcpCaches	clear mcp caches | mCA.clear(); wCA.clearAll()
+accept	modules/island/agent/session-error-classification.ts	XUr	parseOrStringifyJson	parse or stringify json | try JSON.parse+trim else JSON.stringify; rethrows non-SyntaxError
+accept	modules/island/agent/session-error-classification.ts	ePA	dispatchFullscreenChanged	dispatch fullscreen changed | r6.getDispatcher(Ee.webContents).dispatchFullscreenChanged(A)
+accept	modules/island/agent/session-error-classification.ts	XV	dispatchVisibilityChanged	dispatch visibility changed | r6.getDispatcher(Ee.webContents).dispatchVisibilityChanged(A)
+accept	modules/island/agent/session-error-classification.ts	mtn	wireWindowVisibilityEvents	wire window visibility events | wires enter/leave-full-screen,show,hide,focus,blur -> dispatch fns
+accept	modules/island/agent/session-error-classification.ts	XVr	dynamicRequireUnsupported	dynamic require unsupported | throws 'Could not dynamically require' (rollup commonjs stub)
+accept	modules/island/agent/session-error-classification.ts	XYi	appendListTail	append list tail | linked-list push: new W$A tail node, head/length update (yallist)
+accept	modules/island/agent/session-error-classification.ts	XZi	getProp	get prop | A==null?undefined:A[e]
+accept	modules/island/agent/session-error-classification.ts	Xai	isRestartResult	is restart result | validates {success,restartNeeded,error}
+accept	modules/island/agent/session-error-classification.ts	Xer	getOauthEnvironment	get oauth environment | returns 'prod'; switched on local/staging/prod in otr
+accept	modules/island/agent/session-error-classification.ts	rtr	buildLocalOauthConfig	build local oauth config | CLAUDE_LOCAL_OAUTH_* env, localhost:8000/4000/3000 oauth endpoints
+accept	modules/island/agent/session-error-classification.ts	otr	resolveOauthConfig	resolve oauth config | prod/staging/local config + CLAUDE_CODE_CUSTOM_OAUTH_URL/CLIENT_ID overrides
+accept	modules/island/agent/session-error-classification.ts	Zht	requestPluginSearch	request plugin search | '[pluginSearchBridge]', dispatchOnEvent type 'plugins_search', UUID+timeout
+accept	modules/island/agent/session-error-classification.ts	_wr	searchPlugins	search plugins | Zht with {userIntent,keywords,...}, 'plugin search'
+accept	modules/island/agent/session-error-classification.ts	Xht	listInstalledPlugins	list installed plugins | Zht with listInstalledOnly, 'installed plugin list'
+accept	modules/island/agent/session-error-classification.ts	Xit	parseProxyConfig	parse proxy config | parses PROXY/HTTPS/SOCKS/DIRECT proxy entries -> {kind,url}
+accept	modules/island/agent/session-error-classification.ts	XjA	memoize	memoize | cached fn wrapper, t.cache Map (lodash memoize)
+accept	modules/island/agent/session-error-classification.ts	Xni	isAgentMetadata	is agent metadata | validates {name,description,instructions,origin}
+accept	modules/island/agent/session-error-classification.ts	Xoi	isVmOutputsMapping	is vm outputs mapping | validates {hostPath,vmOutputsPath}
+accept	modules/island/agent/session-error-classification.ts	Xpi	isStatusResult	is status result | validates {ok,errorKind}
+accept	modules/island/agent/session-error-classification.ts	Xpt	callMcpTool	call mcp tool | A.callTool + 'lam_mcp_tool_call_completed' telemetry, timeout/network_error
+accept	modules/island/agent/session-error-classification.ts	XqA	bedrockHost	bedrock host | 'bedrock'(-fips for us-gov).<region>.amazonaws.com
+accept	modules/island/agent/session-error-classification.ts	hme	resolveModelsEndpoint	resolve models endpoint | '/v1/models' by inferenceProvider anthropic/gateway/bedrock
+accept	modules/island/agent/session-error-classification.ts	Xqt	getTextContent	get text content | typeof A=='string'?A:A.text
+accept	modules/island/agent/session-error-classification.ts	eie	replacePartText	replace part text | string->e else {...A,text:e}
+accept	modules/island/agent/session-error-classification.ts	i4t	truncatePartsToTokenBudget	truncate parts to token budget | trims message parts to token budget via QoA/SKA
+accept	modules/island/agent/session-error-classification.ts	Xyr	connectorDisconnectedMessage	connector disconnected message | '... was disconnected. Reconnect it from Settings > Connectors'
+accept	modules/island/agent/session-error-classification.ts	XzA	requestMcpDirectory	request mcp directory | '[mcpDirectoryBridge]' dispatchOnEvent, UUID+timeout
+accept	modules/island/agent/session-error-classification.ts	fwr	searchDirectoryServers	search directory servers | XzA 'directory_servers_search' {keywords}
+accept	modules/island/agent/session-error-classification.ts	hwr	lookupDirectoryServers	lookup directory servers | XzA 'directory_servers_lookup' {uuids}
+accept	modules/island/agent/session-error-classification.ts	pwr	listInstalledDirectoryServers	list installed directory servers | XzA 'directory_servers_list_installed' {keywords}
+accept	modules/island/agent/session-error-classification.ts	Xze	isFileContentPayload	is file content payload | validates {content,mimeType,fileName,encoding}
+accept	modules/island/agent/session-error-classification.ts	xme	parseHostnameFromHost	parse hostname from host | new URL('http://'+host).hostname, tries bracketed form
+accept	modules/island/agent/session-error-classification.ts	fRi	isPubliclyRoutableHost	is publicly routable host | IP/hostname check via Ome.check ipv4/ipv6, rejects private/local
+accept	modules/island/agent/session-error-classification.ts	Y4A	isNonPublicHost	is non public host | !isPubliclyRoutableHost(A)
+accept	modules/island/agent/session-error-classification.ts	Y5i	iterateHeaderEntries	iterate header entries | generator over Headers/entries; 'expected header name to be a string'
+accept	modules/island/agent/session-error-classification.ts	Y5t	normalizeLogArgs	normalize log args | stringify/flatten log args, Buffer->toString
+accept	modules/island/agent/session-error-classification.ts	doe	flattenArray	flatten array | recursively flattens nested arrays
+accept	modules/island/agent/session-error-classification.ts	Y6r	closeAllWindows	close all windows | iterates zS map, e.close() and delete
+accept	modules/island/agent/session-error-classification.ts	Y8e	isNumberPair	is number pair | Array length 2 of numbers
+accept	modules/island/agent/session-error-classification.ts	kie	isComparableValue	is comparable value | number-pair || number || Date
+accept	modules/island/agent/session-error-classification.ts	Y8t	extractHttpSpanInfo	extract http span info | url/http.method from span attributes (ATTR_URL_FULL/SEMATTRS_HTTP_*)
+accept	modules/island/agent/session-error-classification.ts	wjt	spanToHttpBreadcrumb	span to http breadcrumb | otel.kind/SpanKind + http url/query/fragment from span
+accept	modules/island/agent/session-error-classification.ts	YAt	sortCookiesByRelevance	sort cookies by relevance | sorts cookies by domain match then expirationDate
+accept	modules/island/agent/session-error-classification.ts	psA	pickBestCookie	pick best cookie | sortCookiesByRelevance(A,e)[0]
+accept	modules/island/agent/session-error-classification.ts	YE	safeJsonStringify	safe json stringify | JSON.stringify wrapped in Rg/Mg telemetry try/finally
+accept	modules/island/agent/session-error-classification.ts	tIr	writeRedactedOauthFile	write redacted oauth file | strips claudeAiOauth.refreshToken, writeFile mode 384
+accept	modules/island/agent/session-error-classification.ts	tve	writeUserMessageOrStream	write user message or stream | writes {type:'user'} JSON line or A.streamInput(t)
+accept	modules/island/agent/session-error-classification.ts	YF	startQuery	start query | resume/sessionStore handling, listSessions, transport.spawn
+accept	modules/island/agent/session-error-classification.ts	YOA	createCredentialHttpClient	create credential http client | new POA(A, A===null?HJi:W6(A), ...) credential http client
+accept	modules/island/agent/session-error-classification.ts	xOr	createActivityState	create activity state | {activityCallback,refcount,activeReasons,heartbeatTimer,idleTimer,...}
+accept	modules/island/agent/session-error-classification.ts	YOr	getOrCreateActivityState	get or create activity state | KHA.get(e_t()) || createActivityState()
+accept	modules/island/agent/session-error-classification.ts	YWt	joinWithinLengthLimit	join within length limit | reduce join with SoA separator, stops if length>PWt
+accept	modules/island/agent/session-error-classification.ts	Yni	isFileAccessGrant	is file access grant | validates {bundleId,displayName,grantedAt}
+accept	modules/island/agent/session-error-classification.ts	fXt	versionSatisfiesRange	version satisfies range | semver-style satisfies, includePrerelease; diag.error 'Invalid version'
+accept	modules/island/agent/session-error-classification.ts	hXt	isValidVersion	is valid version | IWe.test(A) version regex
+accept	modules/island/agent/session-error-classification.ts	wXt	prereleaseAllowed	prerelease allowed | prerelease only matches if range names it
+accept	modules/island/agent/session-error-classification.ts	yXt	parseVersion	parse version | splits version/prerelease/build into segments
+accept	modules/island/agent/session-error-classification.ts	Yoe	versionMatchesAny	version matches any | '*' or some range satisfied by version
+accept	modules/island/agent/session-error-classification.ts	Yoi	isFeedbackPayload	is feedback payload | validates {feedbackId,cliSessionId,inferenceLogIds,...}
+accept	modules/island/agent/session-error-classification.ts	Ypi	isReachabilityResult	is reachability result | validates {host,reachable,latencyMs,error}
+accept	modules/island/agent/session-error-classification.ts	YrA	classifySessionError	classify session error | maps SDK/CLI error messages+exit codes to category/rawOutput (central classifier)
+accept	modules/island/agent/session-error-classification.ts	z1r	classifyResultErrorCategory	classify result error category | classifySessionError('...returned an error result: '+A); W1r.has filter
+accept	modules/island/agent/session-error-classification.ts	zdA	collectStderrTail	collect stderr tail | joins stderrTail+stderrPartial, slice(-2000)
+accept	modules/island/agent/session-error-classification.ts	iqr	jsonByteLength	json byte length | Buffer.byteLength(JSON.stringify(A))
+accept	modules/island/agent/session-error-classification.ts	Yy	reportMessageCycleOutcome	report message cycle outcome | 'desktop_ccd_message_cycle_outcome' telemetry from pendingCycle
+accept	modules/island/agent/session-error-classification.ts	svA	reportCycleError	report cycle error | unhealthy cycle: system_error/no_response with errorMessage
+accept	modules/island/agent/session-error-classification.ts	sqr	reportStreamEndedNoResult	report stream ended no result | 'SDK stream ended without a result message', stream_ended_no_result
+accept	modules/island/agent/session-error-classification.ts	z4	reportHealthyCycle	report healthy cycle | reportMessageCycleOutcome(A,{health:'healthy'})
+accept	modules/island/agent/session-error-classification.ts	aqr	reportAppQuitCycle	report app quit cycle | unhealthy 'app_quit', appQuitTrigger update/undefined
+accept	modules/island/agent/session-error-classification.ts	gqr	reportCycleTimeout	report cycle timeout | 'CLI unresponsive for Ns', errorCategory 'timeout'
+accept	modules/island/agent/session-error-classification.ts	oh	sshEndpointKey	ssh endpoint key | `${sshHost}:${sshPort ?? 22}`
+accept	modules/island/agent/session-error-classification.ts	Z$r	evictRemoteController	evict remote controller | '[RemoteServerController] Evicting controller', Bb.delete + terminate
+accept	modules/island/agent/session-error-classification.ts	Z1r	reclassifyBenignShutdownCrash	reclassify benign shutdown crash | 'cli_fastfail'+V1r.has -> 'cli_shutdown_crash_benign'
+accept	modules/island/agent/session-error-classification.ts	z2t	rateLimitExpiryFor	rate limit expiry for | A[e] || A.all || 0
+accept	modules/island/agent/session-error-classification.ts	Z2t	isRateLimited	is rate limited | rateLimitExpiryFor(A,e) > now
+accept	modules/island/agent/session-error-classification.ts	Z5i	executeToolUseBlocks	execute tool use blocks | runs assistant tool_use blocks, returns user tool_result content
+accept	modules/island/agent/session-error-classification.ts	Z7i	cloneTypedArray	clone typed array | new A.constructor(buffer,byteOffset,length)
+accept	modules/island/agent/session-error-classification.ts	ZA	isTrustedSenderFrame	is trusted sender frame | validates senderFrame origin (claude.ai/claude.com/app://localhost)
+accept	modules/island/agent/session-error-classification.ts	dsA	scrubObject	scrub object | recursive scrub w/ '[Circular]','[scrub-error]', skipKeys/keyHandlers
+accept	modules/island/agent/session-error-classification.ts	ZAn	describeConfigSource	describe config source | 'none (no MDM profile, GPO...)' / remote+type description
+accept	modules/island/agent/session-error-classification.ts	oen	formatEnterpriseConfigReport	format enterprise config report | 'Source:' + per-key lines + 'Parse errors:'
+accept	modules/island/agent/session-error-classification.ts	iDr	validateToolName	validate tool name | empty/length>128/invalid-char checks -> {isValid,warnings}
+accept	modules/island/agent/session-error-classification.ts	rDr	warnToolNameIssues	warn tool name issues | console.warn 'Tool name validation warning'
+accept	modules/island/agent/session-error-classification.ts	ZGe	validateAndWarnToolName	validate and warn tool name | validateToolName + warnToolNameIssues -> isValid
+accept	modules/island/agent/session-error-classification.ts	ZOA	resolveMaxTurns	resolve max turns | scheduledTaskMaxTurns/maxTurns/Lot default
+accept	modules/island/agent/session-error-classification.ts	ZXt	isWrappedFunction	is wrapped function | __original/__unwrap/__wrapped===true (shimmer)
+accept	modules/island/agent/session-error-classification.ts	ZZr	registerDeviceSimulatorStub	register device simulator stub | setImplementation stub, 'Device simulator is not available in this build'
+accept	modules/island/agent/session-error-classification.ts	jhA	isReachabilityState	is reachability state | validates {reachability,willTryRecover,probeTarget}
+accept	modules/island/agent/session-error-classification.ts	Zai	isReachabilityStatus	is reachability status | zai.has(A)
+accept	modules/island/agent/session-error-classification.ts	xRi	validateOauthProviders	validate oauth providers | 'oauth must be an object keyed by provider name', Kme max providers
+accept	modules/island/agent/session-error-classification.ts	Zet	validateOauthProvider	validate oauth provider | checks clientSecret/authorizationUrl/tokenUrl/envVar/scopes
+accept	modules/island/agent/session-error-classification.ts	Zfr	deriveNameFromPath	derive name from path | last path segment minus ext, ':'-> '-', default 'preview'
+accept	modules/island/agent/session-error-classification.ts	yPA	translateFileUrlPath	translate file url path | rewrites file:// path vm-to-host / host-to-vm
+accept	modules/island/agent/session-error-classification.ts	ZgA	translateFileUrlsDeep	translate file urls deep | recursively translateFileUrlPath over object/array values
+accept	modules/island/agent/session-error-classification.ts	Zjt	detectCloudProvider	detect cloud provider | cloud.provider from VERCEL/AWS/GCP/Azure/... env vars
+accept	modules/island/agent/session-error-classification.ts	Zmr	formatTranscriptForPrompt	format transcript for prompt | '[i] User/Claude: ...' joined, slice 1000
+accept	modules/island/agent/session-error-classification.ts	Zoi	isPathErrorResult	is path error result | validates {path,error}
+accept	modules/island/agent/session-error-classification.ts	jpi	isOidcProvider	is oidc provider | $pi.has(A); used for provider field
+accept	modules/island/agent/session-error-classification.ts	Zpi	isOidcBootstrapConfig	is oidc bootstrap config | validates {enabled,source,provider,bootstrapHost,needsInteractiveAuth}
+accept	modules/island/agent/session-error-classification.ts	cQt	createJsonScanner	create json scanner | JSON/JSONC scanner: setPosition/scan/getToken (jsonc-parser)
+accept	modules/island/agent/session-error-classification.ts	kNA	isSpaceOrTab	is space or tab | A===32 || A===9
+accept	modules/island/agent/session-error-classification.ts	Zq	isLineBreak	is line break | A===10 || A===13
+accept	modules/island/agent/session-error-classification.ts	tG	isDigit	is digit | A>=48 && A<=57
+accept	modules/island/agent/session-error-classification.ts	yHe	isPresentString	is present string | typeof=='string' && length>=1
+accept	modules/island/agent/session-error-classification.ts	uWr	isKnownAddinStatus	is known addin status | CWr.has(A); used for office addin status
+accept	modules/island/agent/session-error-classification.ts	dWr	isKnownOfficeApp	is known office app | BWr.has(A); used for office addin app
+accept	modules/island/agent/session-error-classification.ts	ZrA	isOfficeAddinFile	is office addin file | validates {id,addinId,app,document,browser,status,...}
+accept	modules/island/agent/session-error-classification.ts	rbA	isOfficeAddinState	is office addin state | validates {files,selectedFileId,isFeatureEnabled}
+accept	modules/island/agent/session-error-classification.ts	Zwi	parseNumberSkeleton	parse number skeleton | 'Number skeleton cannot be empty', stem/options (formatjs)
+accept	modules/island/agent/session-error-classification.ts	x6A	setForceDisableHostLoop	set force disable host loop | wr.set(Edt,A); driven by 'Force disable host loop' dev menu
+accept	modules/island/agent/session-error-classification.ts	Zx	stopVm	stop vm | '[stopVM]', aborts startup, L3 Offline, e.stopVM()
+accept	modules/island/agent/session-error-classification.ts	kAn	buildCoworkVmDevMenu	build cowork vm dev menu | 'Cowork VM' submenu: Start/Stop VM, Debug Window
+accept	modules/island/agent/session-error-classification.ts	Zxe	normalizeToPosixPath	normalize to posix path | drive-letter + '\\' -> '/' posix path
+accept	modules/island/agent/session-error-classification.ts	tJr	relativePathCrossPlatform	relative path cross platform | posix.relative, win32 via normalizeToPosixPath
+accept	modules/island/agent/session-error-classification.ts	tjr	pathModuleFor	path module for | picks AA.win32/posix by path style
+accept	modules/island/agent/session-error-classification.ts	_$	isSubpath	is subpath | relative path not '', not '..', not absolute
+accept	modules/island/agent/session-error-classification.ts	ijr	resolveWorktreePath	resolve worktree path | .claude/worktrees path resolution
+accept	modules/island/agent/session-error-classification.ts	rjr	checkWorktreePathSafety	check worktree path safety | 'isolated git worktree' edit-outside block decision
+accept	modules/island/agent/session-error-classification.ts	oQA	sessionSecretsDir	session secrets dir | AA.join(userData,'ccd-session-secrets')
+accept	modules/island/agent/session-error-classification.ts	_2A	createForkSessionSecrets	create fork session secrets | writeSessionSecrets to 'fork-<uuid>', returns {secrets,dispose}
+accept	modules/island/agent/session-error-classification.ts	_3e	shouldRetryStatus	should retry status | statusCode>=500 || <=299
+accept	modules/island/agent/session-error-classification.ts	_4A	isNetworkServiceDead	is network service dead | returns jAt; gates 'network_service_dead' category
+accept	modules/island/agent/session-error-classification.ts	o_i	authErrorMessage	auth error message | 'Unable to start session...' for not_logged_in/server_error/auth_error/network_error
+accept	modules/island/agent/session-error-classification.ts	wu	renameProperty	rename property | A[t]=A[e]; delete A[e]
+accept	modules/island/agent/session-error-classification.ts	_4t	annotateExecuteToolSpan	annotate execute tool span | 'gen_ai.execute_tool' span attrs, gen_ai.tool.name/call.id
+accept	modules/island/agent/session-error-classification.ts	g$	noop	noop | empty function
+accept	modules/island/agent/session-error-classification.ts	_AA	bindLoggerMethod	bind logger method | binds e[level] or noop based on ccA level threshold
+accept	modules/island/agent/session-error-classification.ts	yC	createLogger	create logger | {error,warn,info,debug} from {logger,logLevel}, _Ge cache
+accept	modules/island/agent/session-error-classification.ts	_Bt	stripBom	strip bom | strips leading BOM (U+FEFF)
+accept	modules/island/agent/session-error-classification.ts	vBt	tryParseJson	try parse json | JSON.parse(stripBom(A)) -> {ok,value}
+accept	modules/island/agent/session-error-classification.ts	qY	isWakeSchedulerEnabled	is wake scheduler enabled | $r('2893011886','enabled',...) feature flag
+accept	modules/island/agent/session-error-classification.ts	_Er	isScheduledTasksWakeEnabled	is scheduled tasks wake enabled | isWakeSchedulerEnabled && 'scheduledTasksWakeEnabled' flag
+accept	modules/island/agent/session-error-classification.ts	nCr	getWakeFeatureSupport	get wake feature support | macOS<13 'requires macOS 13.0' -> support status
+accept	modules/island/agent/session-error-classification.ts	n4t	truncateArrayToTokenBudget	truncate array to token budget | drops leading items so token sum <= budget
+accept	modules/island/agent/session-error-classification.ts	_KA	truncateToDefaultTokenBudget	truncate to default token budget | n4t(A, C8e)
+accept	modules/island/agent/session-error-classification.ts	_Q	errorCode	error code | returns A.code string if present
+accept	modules/island/agent/session-error-classification.ts	rXi	isFilesystemErrorCode	is filesystem error code | ENOENT/EACCES/EPERM/ENOTDIR/ELOOP/EROFS
+accept	modules/island/agent/session-error-classification.ts	sXi	atomicWriteFile	atomic write file | write tmp.<rand> then rename, copyFile fallback
+accept	modules/island/agent/session-error-classification.ts	oNA	appendToFileIfExists	append to file if exists | O_APPEND open, false on ENOENT/empty
+accept	modules/island/agent/session-error-classification.ts	_Re	normalizeMcpServersConfig	normalize mcp servers config | unwraps {mcpServers} then xOA to array
+accept	modules/island/agent/session-error-classification.ts	xOA	mcpServersToArray	mcp servers to array | object -> [{name,config,hostFilesystemLocation}]
+accept	modules/island/agent/session-error-classification.ts	pRr	isToolResultMessage	is tool result message | user message whose content has a tool_result
+accept	modules/island/agent/session-error-classification.ts	_YA	extractLastMessageInfo	extract last message info | {last_message_type,last_message_model,last_tool_name}
+accept	modules/island/agent/session-error-classification.ts	_ai	isWorkspacePathPayload	is workspace path payload | validates {workspacePath}
+accept	modules/island/agent/session-error-classification.ts	_dt	registerWakeClaim	register wake claim | '[wake-scheduler] registered claim', P6A.set(A.id,A)
+accept	modules/island/agent/session-error-classification.ts	_ft	countTreeNodes	count tree nodes | recursive child count
+accept	modules/island/agent/session-error-classification.ts	_gi	getWindowsStorePackageId	get windows store package id | parses 'windowsapps' path package id from execPath
+accept	modules/island/agent/session-error-classification.ts	_ni	hasUpdatedAt	has updated at | validates {updatedAt:number}
+accept	modules/island/agent/session-error-classification.ts	_ot	wrapFetchNormalizeOauthError	wrap fetch normalize oauth error | fetch wrapper mapping oauth grant errors to invalid_grant
+accept	modules/island/agent/session-error-classification.ts	r8A	createMcpTransport	create mcp transport | sse(Jrt) or http(Krt) transport with _ot fetch wrapper
+accept	modules/island/agent/session-error-classification.ts	_pt	encodeUriPathSegment	encode uri path segment | encodeURIComponent of disallowed URI chars
+accept	modules/island/agent/session-error-classification.ts	_rt	isGcpTokenValid	is gcp token valid | gcp.expiresAt - gFi > now
+accept	modules/island/agent/session-error-classification.ts	_xt	unrefTimer	unref timer | A.unref() unless number
+accept	modules/island/agent/session-error-classification.ts	a2i	disposeHost	dispose host | awaits my then disposeHost()
+accept	modules/island/agent/session-error-classification.ts	a4	buildServerInfo	build server info | {serverId,name,port,status,startedAt,cwd}
+accept	modules/island/agent/session-error-classification.ts	wSi	coerceBoolean	coerce boolean | bool/number/'true'/'false'/'1'/'0' -> boolean|undefined
+accept	modules/island/agent/session-error-classification.ts	mSi	escapeInvalidBackslashes	escape invalid backslashes | escapes lone backslashes for JSON
+accept	modules/island/agent/session-error-classification.ts	a4A	parseEnterpriseConfigValue	parse enterprise config value | 'Enterprise config ...' zod parse w/ failClosedValue fallback
+accept	modules/island/agent/session-error-classification.ts	a4t	getToolCallSpan	get tool call span | MKA.get(A) tool-call-id -> span
+accept	modules/island/agent/session-error-classification.ts	g4t	deleteToolCallSpan	delete tool call span | MKA.delete(A)
+accept	modules/island/agent/session-error-classification.ts	iei	isToolErrorPart	is tool error part | type==='tool-error' with toolName/toolCallId/error
+accept	modules/island/agent/session-error-classification.ts	rei	reportToolErrorsToSentry	report tool errors to sentry | captures tool-error content to sentry, vercel.ai.tool.* tags
+accept	modules/island/agent/session-error-classification.ts	sQt	getOrgScopedTokenCapKey	get org scoped token cap key | orgUuidOverride + TQ() instrumentation id -> token-cap key
+accept	modules/island/agent/session-error-classification.ts	YgA	accumulateTokenUsage	accumulate token usage | '[TokenCap]' window input/output token accumulation
+accept	modules/island/agent/session-error-classification.ts	Yit	toJsonLine	to json line | JSON.stringify(A)+"\n"
+accept	modules/island/sessions/local-session-manager.ts	TI	LocalSessionManager	local session manager | class sets this.managerName = "LocalSessionManager"; file path sessions/local-session-manager.ts; manages this.sessions map, start/stop/teardown/pause/warm session lifecycle
+accept	modules/island/agent/tool-permissions.ts	PAr	createStickyBetasState	create sticky betas state | used as `stickyBetas: PAr()`; returns {sent:new Set(), rejected:new Set()}
+accept	modules/island/agent/tool-permissions.ts	HAr	createInitialSessionState	create initial session state | returns large session-state object (sessionId, startTime, totalCostUSD, modelUsage…)
+accept	modules/island/agent/tool-permissions.ts	vke	normalizePathNfc	normalize path nfc | `process.platform==='darwin' ? A.normalize('NFC') : A`
+accept	modules/island/agent/tool-permissions.ts	HG	getAuthBearerToken	get auth bearer token | returns `A.bearer ?? headers.Authorization`
+accept	modules/island/agent/tool-permissions.ts	HGi	buildBedrockAwsEnv	build bedrock aws env | sets AWS_PROFILE/AWS_REGION/AWS_CONFIG_FILE from inferenceBedrock* fields
+accept	modules/island/agent/tool-permissions.ts	zit	runHelperSetupTest	run helper setup test | sets CLAUDE_HELPER_MANUAL_RUN, CLAUDE_HELPER_CONTEXT='setup-test', runs manifest validation
+accept	modules/island/agent/tool-permissions.ts	HH	defineDataProperty	define data property | Object.defineProperty with configurable/enumerable/writable
+accept	modules/island/agent/tool-permissions.ts	t_t	clearIdleTimer	clear idle timer | `clearTimeout(A.idleTimer); A.idleTimer=null`
+accept	modules/island/agent/tool-permissions.ts	qOr	stopHeartbeatTimers	stop heartbeat timers | clears activityCallback + heartbeatTimer + idle timer
+accept	modules/island/agent/tool-permissions.ts	px	isReservedEnvVar	is reserved env var | tested as "conflicts with a reserved environment variable"
+accept	modules/island/agent/tool-permissions.ts	HRi	validateEnvDeclarations	validate env declarations | "must be an object keyed by env identifier"; validates envVar snake_case keys
+accept	modules/island/agent/tool-permissions.ts	HSA	applyPatternEscapeStrategy	apply pattern escape strategy | `e.patternStrategy==='escape' ? mLi(A) : A`
+accept	modules/island/agent/tool-permissions.ts	mLi	escapePatternChars	escape pattern chars | prefixes '\\' for chars not in safe-set
+accept	modules/island/agent/tool-permissions.ts	HSr	renderJsonScriptTag	render json script tag | emits `<script type="application/json" id=...>`
+accept	modules/island/agent/tool-permissions.ts	dTA	injectJsonScriptIntoHtml	inject json script into html | inserts JSON script tag after <!DOCTYPE> in HTML
+accept	modules/island/agent/tool-permissions.ts	oer	pluralize	pluralize | `A===1 ? singular : plural`
+accept	modules/island/agent/tool-permissions.ts	YTe	isInvalidTypeIssue	is invalid type issue | `A.code==='invalid_type'`
+accept	modules/island/agent/tool-permissions.ts	HTe	isInvalidValueIssue	is invalid value issue | `A.code==='invalid_value'`
+accept	modules/island/agent/tool-permissions.ts	Icr	isUnrecognizedKeysIssue	is unrecognized keys issue | `A.code==='unrecognized_keys'`
+accept	modules/island/agent/tool-permissions.ts	JTe	isTooSmallIssue	is too small issue | `A.code==='too_small'`
+accept	modules/island/agent/tool-permissions.ts	KTe	extractReceivedType	extract received type | `A.match(/received (\w+)/)`
+accept	modules/island/agent/tool-permissions.ts	Oz	formatValidationIssues	format validation issues | maps issues[] to {file,path,message,expected,invalidValue,suggestion}
+accept	modules/island/agent/tool-permissions.ts	cz	coworkPluginsBaseDir	cowork plugins base dir | base dir joined with 'rpm' / 'remote_cowork_plugins'
+accept	modules/island/agent/tool-permissions.ts	HU	rpmStorageDir	rpm storage dir | `join(cz(...), 'rpm')`
+accept	modules/island/agent/tool-permissions.ts	iJi	remoteCoworkPluginsDir	remote cowork plugins dir | `join(cz(...), 'remote_cowork_plugins')`
+accept	modules/island/agent/tool-permissions.ts	OVr	extractVerificationSection	extract verification section | regex `## Verification|Test Plan|Testing` section of markdown
+accept	modules/island/agent/tool-permissions.ts	HVr	createPreviewVerificationHooks	create preview verification hooks | returns PostToolUse/Stop hooks for browser-preview verification_workflow
+accept	modules/island/agent/tool-permissions.ts	HVt	isSentryBrowserBundle	is sentry browser bundle | `typeof __SENTRY_BROWSER_BUNDLE__`
+accept	modules/island/agent/tool-permissions.ts	JVt	isNodeEnvironment	is node environment | `!isSentryBrowserBundle() && toString===[object process]`
+accept	modules/island/agent/tool-permissions.ts	HWt	serializeBaggageHeader	serialize baggage header | getAllEntries → `key=value` baggage strings with metadata
+accept	modules/island/agent/tool-permissions.ts	mXt	normalizeSemverRange	normalize semver range | trim → replaceCaret/Tilde/XRange pipeline
+accept	modules/island/agent/tool-permissions.ts	TC	isWildcardVersionPart	is wildcard version part | `!A || A.toLowerCase()==='x' || A==='*'`
+accept	modules/island/agent/tool-permissions.ts	HXt	replaceCaretRanges	replace caret ranges | caret expansion with leading-zero special-casing (`>=… <…-0`)
+accept	modules/island/agent/tool-permissions.ts	YXt	replaceTildeRanges	replace tilde ranges | tilde expansion bumping minor (`>=x.y.z <x.y+1.0-0`)
+accept	modules/island/agent/tool-permissions.ts	JXt	replaceXRangeComparators	replace xrange comparators | expands `=`/`>`/`<`/`<=` operators + X-ranges
+accept	modules/island/agent/tool-permissions.ts	aoA	isStringValue	is string value | `IIA(A,'String')`
+accept	modules/island/agent/tool-permissions.ts	HYt	buildDomElementPath	build dom element path | walks parentNode chain joined by ' > '
+accept	modules/island/agent/tool-permissions.ts	JYt	domElementToString	dom element to string | tagName + #id/.class/[attr] + dataset.sentryComponent
+accept	modules/island/agent/tool-permissions.ts	H_i	isBrokenPipeError	is broken pipe error | `A instanceof Error && (code===… || 'EPIPE')`
+accept	modules/island/agent/tool-permissions.ts	pX	callRpcWithPipeRetry	call rpc with pipe retry | "Retrying idempotent RPC after pipe closed"
+accept	modules/island/agent/tool-permissions.ts	Hai	isSkippedFailedNamesResult	is skipped failed names result | validates {skippedNames[], failedNames[], at:number}
+accept	modules/island/agent/tool-permissions.ts	Hcr	isPlainObject	is plain object | getPrototypeOf + constructor + funcToString (lodash isPlainObject)
+accept	modules/island/agent/tool-permissions.ts	Yei	parseHostAddressPort	parse host address port | splits host into {address,port}, handles [IPv6]
+accept	modules/island/agent/tool-permissions.ts	Hei	setFirestoreSpanAttributes	set firestore span attributes | sets ATTR_DB_* / firebase.firestore.* span attributes
+accept	modules/island/agent/tool-permissions.ts	Het	resolvePermissionDecision	resolve permission decision | 'blocked' | 'ask' | 'allow' from input list
+accept	modules/island/agent/tool-permissions.ts	Mkt	getToolPermissionMap	get tool permission map | `_kt(); return dQ`; permission lookup used as `i[a] ?? 'ask'`
+accept	modules/island/agent/tool-permissions.ts	l2e	buildCommandPermissions	build command permissions | groups commands into {op,keys,permission,description}
+accept	modules/island/agent/tool-permissions.ts	xfr	hashStringToHue	hash string to hue | djb2 (seed 5381) → `% 360` hue
+accept	modules/island/agent/tool-permissions.ts	n4	errorToolResult	error tool result | `{content:[{type:'text',text:A}], isError:true}`
+accept	modules/island/agent/tool-permissions.ts	Hfr	createHaloToolServer	create halo tool server | returns {serverName, tools, handleToolCall, isEnabled} (macOS halo)
+accept	modules/island/agent/tool-permissions.ts	aQt	readJsonFileOrNull	read json file or null | readFile + JSON.parse, catch → null
+accept	modules/island/agent/tool-permissions.ts	HgA	isTokenWindowOverCap	is token window over cap | compares used input+output tokens vs inferenceMaxTokensPerWindow
+accept	modules/island/agent/tool-permissions.ts	Hhr	getShellPathWorkerPath	get shell path worker path | path to '.vite/build/shell-path-worker/shellPathWorker.js'
+accept	modules/island/agent/tool-permissions.ts	Vhr	extractShellEnvironment	extract shell environment | forks 'Claude Desktop Shell Environment Extractor' utilityProcess
+accept	modules/island/agent/tool-permissions.ts	Hje	parseTraceParent	parse trace parent | extracts traceId/spanId/traceFlags (W3C traceparent)
+accept	modules/island/agent/tool-permissions.ts	Hjt	addMemoryUsageContext	add memory usage context | fills app_memory(rss)/free_memory/device.free_memory
+accept	modules/island/agent/tool-permissions.ts	Hl	isBuiltinMcpServer	is builtin mcp server | `A.server !== undefined` (→ url 'Built-in')
+accept	modules/island/agent/tool-permissions.ts	SMA	describeMcpServerConfig	describe mcp server config | summarizes server as {url,transport,command,args,envKeys}
+accept	modules/island/agent/tool-permissions.ts	WBt	readMdmSettings	read mdm settings | `A.mdm()` → {settings,errors}
+accept	modules/island/agent/tool-permissions.ts	ZBt	readParentManagedSettings	read parent managed settings | parses 'parent managed settings'
+accept	modules/island/agent/tool-permissions.ts	Hlr	detectManagedSettingsSource	detect managed settings source | returns 'helper'|'remote'|'plist'|'hklm'|'file'|'parent'|'hkcu'
+accept	modules/island/agent/tool-permissions.ts	J4A	findSubarrayIndex	find subarray index | returns start index of subsequence e within A
+accept	modules/island/agent/tool-permissions.ts	Hme	isFlagArgument	is flag argument | `startsWith('-') && !includes('=')`
+accept	modules/island/agent/tool-permissions.ts	MRi	argMatchesFlag	arg matches flag | `A===e || A.startsWith(e+'=')` (+short flag form)
+accept	modules/island/agent/tool-permissions.ts	NRi	argvMatchesFlagRule	argv matches flag rule | checks if argv matches any parsed flag spec around '--'
+accept	modules/island/agent/tool-permissions.ts	Hmr	executeAssistantToolCalls	execute assistant tool calls | runs assistant tool_use blocks → tool_result content
+accept	modules/island/agent/tool-permissions.ts	Hni	isAppBundleInfo	is app bundle info | validates {bundleId:string, displayName:string}
+accept	modules/island/agent/tool-permissions.ts	Hoe	endSpanAfter	end span after | ends span A around value/promise e
+accept	modules/island/agent/tool-permissions.ts	n7t	isPromiseLike	is promise like | `typeof A.then === 'function'`
+accept	modules/island/agent/tool-permissions.ts	Hpi	isMcpServerSummary	is mcp server summary | validates {name,transport,urlDisplay,headerKeys,oauthNote,issues}
+accept	modules/island/agent/tool-permissions.ts	Jpi	isPluginComponentStatus	is plugin component status | validates {kind,found,missing[],note}
+accept	modules/island/agent/tool-permissions.ts	Kpi	isPluginStatusRecord	is plugin status record | validates plugin {manifestStatus,components[],mcpServers[]}
+accept	modules/island/agent/tool-permissions.ts	qpi	isPluginDirStatus	is plugin dir status | validates {sourcePath,dirStatus,entryCount,plugins[]}
+accept	modules/island/agent/tool-permissions.ts	taA	normalizeHeaders	normalize headers | Headers/array/object → plain object
+accept	modules/island/agent/tool-permissions.ts	Hrt	wrapFetchWithDefaults	wrap fetch with defaults | returns fetch wrapper merging default headers/options
+accept	modules/island/agent/tool-permissions.ts	Hsi	isInstalledExtensionInfo	is installed extension info | validates {type,name,installed:boolean,iconDataUrl}
+accept	modules/island/agent/tool-permissions.ts	HtA	isFolderPermissionValue	is folder permission value | `hoi.has(A)` membership check for folder permission
+accept	modules/island/agent/tool-permissions.ts	poi	isFolderAccessPermissions	is folder access permissions | validates {desktop,documents,downloads}
+accept	modules/island/agent/tool-permissions.ts	ote	getExceptionFrames	get exception frames | collects exception.values[].stacktrace.frames
+accept	modules/island/agent/tool-permissions.ts	fKt	isDuplicateEvent	is duplicate event | `hKt(A,e) || pKt(A,e)` (Sentry dedupe)
+accept	modules/island/agent/tool-permissions.ts	hKt	hasSameMessageAndStack	has same message and stack | same message + stacktrace + fingerprint
+accept	modules/island/agent/tool-permissions.ts	pKt	hasSameExceptionTypeValue	has same exception type value | same exception type/value + stack + fingerprint
+accept	modules/island/agent/tool-permissions.ts	O$e	hasSameStackFrames	has same stack frames | compares frames by filename/lineno/colno/function
+accept	modules/island/agent/tool-permissions.ts	x$e	hasSameFingerprint	has same fingerprint | compares fingerprint arrays via join
+accept	modules/island/agent/tool-permissions.ts	Hte	getFirstExceptionValue	get first exception value | `A.exception.values[0]`
+accept	modules/island/agent/tool-permissions.ts	HuA	ensureError	ensure error | `A instanceof Error ? A : Error(String(A))`
+accept	modules/island/agent/tool-permissions.ts	RBt	reportUnhandledError	report unhandled error | logs error unless CLAUDE_CODE_USE_*/DISABLE_ERROR_REPORTING
+accept	modules/island/agent/tool-permissions.ts	h2A	bracketIpv6Host	bracket ipv6 host | wraps `[host]` when host contains ':'
+accept	modules/island/agent/tool-permissions.ts	HvA	formatHostEndpointKey	format host endpoint key | `${A}@${host}:${port}`
+accept	modules/island/agent/tool-permissions.ts	zXe	memoizedVariadicCall	memoized variadic call | cache.get(serializer(args)) else apply+set
+accept	modules/island/agent/tool-permissions.ts	ZXe	bindMemoizeStrategy	bind memoize strategy | `t.bind(e, A, i, r)` for memoize
+accept	modules/island/agent/tool-permissions.ts	Ywi	createMemoizedFunction	create memoized function | selects single-arg vs variadic memoize strategy
+accept	modules/island/agent/tool-permissions.ts	Hwi	createVariadicMemoizedFunction	create variadic memoized function | binds variadic memoize strategy
+accept	modules/island/agent/tool-permissions.ts	I2A	gitDiffHeader	git diff header | `diff --git a/.. b/..` (+ new file mode 100644)
+accept	modules/island/agent/tool-permissions.ts	Hy	createAddedFileDiff	create added file diff | `{status:'added', additions:0, patch}`
+accept	modules/island/agent/tool-permissions.ts	w6	isAnthropicModelName	is anthropic model name | matches claude/Anthropic model name regex
+accept	modules/island/agent/tool-permissions.ts	Pyi	validateFoundryModelName	validate foundry model name | "Foundry deployment name referencing an Anthropic model"
+accept	modules/island/agent/tool-permissions.ts	Yyi	validateAnthropicModelId	validate anthropic model id | "expected an Anthropic model ID"
+accept	modules/island/agent/tool-permissions.ts	Hyi	validateGatewayModelRoute	validate gateway model route | "gateway model route referencing an Anthropic model"
+accept	modules/island/agent/tool-permissions.ts	Hzr	closeWindowWebContents	close window web contents | `cg.webContents.close()` if not destroyed
+accept	modules/island/agent/tool-permissions.ts	TjA	isDebugLogEnabled	is debug log enabled | `$r(rL,'debugLogEnabled',false,…)`
+accept	modules/island/agent/tool-permissions.ts	I0r	enqueueDebugLogWrite	enqueue debug log write | "[CoworkArtifacts] Debug log queue full"; tail/depth promise queue
+accept	modules/island/agent/tool-permissions.ts	b8	appendCoworkDebugLog	append cowork debug log | rotates/appends artifact debug log
+accept	modules/island/agent/tool-permissions.ts	I6t	formatHighResTimestamp	format high res timestamp | ISO timestamp with sub-millisecond precision
+accept	modules/island/agent/tool-permissions.ts	Os	getCurrentAccountUuid	get current account uuid | `accountUuid ?? default` unless logged out
+accept	modules/island/agent/tool-permissions.ts	__i	waitForAccountUuid	wait for account uuid | "[account] …waiting for IPC"; resolves accountUuid
+accept	modules/island/agent/tool-permissions.ts	I7A	getMarketplaceAccountOrg	get marketplace account org | "No active account/org for marketplace operations"
+accept	modules/island/agent/tool-permissions.ts	I7e	isWhitespaceOrControlCode	is whitespace or control code | tests whitespace/control char-code ranges (9-13,32,133,…)
+accept	modules/island/agent/tool-permissions.ts	I7r	ensureLogsEndpointPath	ensure logs endpoint path | appends '/v1/logs' to URL
+accept	modules/island/agent/tool-permissions.ts	I7t	toSpanKind	to span kind | 'client'→SpanKind.CLIENT else INTERNAL
+accept	modules/island/agent/tool-permissions.ts	c8t	baseGetTag	base get tag | lodash baseGetTag (Symbol.toStringTag dispatch)
+accept	modules/island/agent/tool-permissions.ts	l8t	getRawTag	get raw tag | lodash getRawTag (toStringTag save/restore)
+accept	modules/island/agent/tool-permissions.ts	I8t	objectToString	object to string | `Object.prototype.toString.call(A)`
+accept	modules/island/agent/tool-permissions.ts	I9r	runAdaptivePoller	run adaptive poller | isReady-driven setTimeout runTick loop
+accept	modules/island/agent/tool-permissions.ts	IAt	normalizeLegacyAliases	normalize legacy aliases | maps legacyAlias fields to canonical keys
+accept	modules/island/agent/tool-permissions.ts	c4A	sanitizeConfigKeys	sanitize config keys | builds validated config over allowedKeys
+accept	modules/island/agent/tool-permissions.ts	IRi	parseBootstrapConfig	parse bootstrap config | "bootstrap intake warning"/"bootstrap key failed validation"
+accept	modules/island/agent/tool-permissions.ts	uRi	removeNonMatchingOrigins	remove non matching origins | deletes keys whose URL origin != expected
+accept	modules/island/agent/tool-permissions.ts	IC	applySchemaPattern	apply schema pattern | merges regex pattern into JSON-schema allOf/pattern
+accept	modules/island/agent/tool-permissions.ts	hye	makeRegexFlagIndependent	make regex flag independent | rewrites regex to flag-independent source; warns on failure
+accept	modules/island/agent/tool-permissions.ts	IDi	isJwtToken	is jwt token | checks typ:'JWT'/alg after base64 header decode
+accept	modules/island/agent/tool-permissions.ts	IDr	applyCredentialMetadata	apply credential metadata | copies credentialEpoch/issuedCredentialIdentity/expiresAt
+accept	modules/island/agent/tool-permissions.ts	IJt	findFirstErrorProperty	find first error property | returns first own property that is an Error
+accept	modules/island/agent/tool-permissions.ts	uJt	buildErrorFromUnknown	build error from unknown | Sentry-style error extraction from unknown value
+accept	modules/island/agent/tool-permissions.ts	Rit	addSchemaErrorMessage	add schema error message | sets schema.errorMessage[key] when errorMessages enabled
+accept	modules/island/agent/tool-permissions.ts	ks	setSchemaProperty	set schema property | `A[e]=t` + addSchemaErrorMessage
+accept	modules/island/agent/tool-permissions.ts	ILi	bigintToJsonSchema	bigint to json schema | `{type:'integer',format:'int64'}` + min/max checks
+accept	modules/island/agent/tool-permissions.ts	NLi	numberToJsonSchema	number to json schema | `{type:'number'}` + int/min/max/multipleOf checks
+accept	modules/island/agent/tool-permissions.ts	xFi	sha256Base64Url	sha256 base64 url | SHA-256 digest → base64url (PKCE)
+accept	modules/island/agent/tool-permissions.ts	PFi	generatePkcePair	generate pkce pair | returns {code_verifier, code_challenge}
+accept	modules/island/agent/tool-permissions.ts	IOi	buildAuthorizationUrl	build authorization url | builds OAuth authorize URL (response_type/code_challenge)
+accept	modules/island/agent/tool-permissions.ts	IOr	resolveHttpAdapter	resolve http adapter | "There is no suitable adapter to dispatch the request" (axios getAdapter)
+accept	modules/island/agent/tool-permissions.ts	QAt	expandToolDependencies	expand tool dependencies | adds dependent tools from dAt mapping into set
+accept	modules/island/agent/tool-permissions.ts	l4A	getDisabledBuiltinTools	get disabled builtin tools | disabledBuiltinTools (+ WebSearch on bedrock)
+accept	modules/island/agent/tool-permissions.ts	hAt	isChatCodeExecutionEnabled	is chat code execution enabled | chatCodeExecutionEnabled && Bash not disabled
+accept	modules/island/agent/tool-permissions.ts	wAt	getApprovalRequiredTools	get approval required tools | builtinToolPolicy==='ask' tools
+accept	modules/island/agent/tool-permissions.ts	IPA	applyAdminToolPolicy	apply admin tool policy | "tool(s) disabled via admin policy" → disallowedTools
+accept	modules/island/agent/tool-permissions.ts	tBr	addApprovalHookForTools	add approval hook for tools | "Organization policy requires approval"; PreToolUse ask hook
+accept	modules/island/agent/tool-permissions.ts	hzr	parseSessionPathSegment	parse session path segment | extracts id from '/sessions/<id>/...'
+accept	modules/island/agent/tool-permissions.ts	IQA	validateVmPathAccess	validate vm path access | "validateVMPathAccess"; INVALID_SESSION/PATH_TRAVERSAL guards
+accept	modules/island/agent/tool-permissions.ts	Tzr	promoteScratchpadFile	promote scratchpad file | "promoteScratchpadFile"; copies VM scratchpad file to outputs
+accept	modules/island/agent/tool-permissions.ts	TNA	validateWebUrl	validate web url | returns {ok,cardUrl,host} or {ok:false,reason:'non-web'/'unparseable'}
+accept	modules/island/agent/tool-permissions.ts	Zve	buildBrowserDenyResult	build browser deny result | "[canUseTool:CIC] … → deny"; behavior:'deny'
+accept	modules/island/agent/tool-permissions.ts	IQt	evaluateBrowserToolPermission	evaluate browser tool permission | canUseTool for browser/Chrome tools ([canUseTool:CIC])
+accept	modules/island/agent/tool-permissions.ts	IXA	loadEncryptedEnvValues	load encrypted env values | safeStorage.decryptString stored env entries
+accept	modules/island/agent/tool-permissions.ts	ZHA	deletePluginEnvValues	delete plugin env values | removes stored env values for account/org/plugin
+accept	modules/island/agent/tool-permissions.ts	K_	validateAbsolutePath	validate absolute path | rejects UNC / non-absolute paths
+accept	modules/island/agent/tool-permissions.ts	I_r	dispatchStartSession	dispatch start session | "[DispatchTools] start_session"; code/cowork runner
+accept	modules/island/agent/tool-permissions.ts	Ic	logRemoteDevice	log remote device | `D.info('[remote-tools-device] …')`
+accept	modules/island/agent/tool-permissions.ts	nKr	createDeviceInfoToolServer	create device info tool server | get_device_info tool (platform/arch/versions)
+accept	modules/island/agent/tool-permissions.ts	IcA	markSelectedFiles	mark selected files | sets entry.isSelected based on per-app selection
+accept	modules/island/agent/tool-permissions.ts	Ypt	buildFileSelectionState	build file selection state | `{files, selectedFileId, isFeatureEnabled}`
+accept	modules/island/agent/tool-permissions.ts	Ien	formatEgressProbeResults	format egress probe results | formats egressProbe reachability lines
+accept	modules/island/agent/tool-permissions.ts	Ier	compilePatternRules	compile pattern rules | maps to {id,confidence,re:RegExp(source,flags)}
+accept	modules/island/agent/tool-permissions.ts	Igr	resolvePlatformDataDir	resolve platform data dir | platform app-data dir with suffix (darwin/win32/linux)
+accept	modules/island/agent/tool-permissions.ts	qrA	createSessionBackend	create session backend | ssh backend if sshConfig else local backend
+accept	modules/island/agent/tool-permissions.ts	Ijr	buildSessionRecord	build session record | hydrates full session object incl backend
+accept	modules/island/agent/tool-permissions.ts	RXA	ensureRemoteManagedSettings	ensure remote managed settings | loadRemoteManagedSettings with retries
+accept	modules/island/agent/tool-permissions.ts	Jjt	getOperatingSystemInfo	get operating system info | OS info by platform (darwin/linux/default)
+accept	modules/island/agent/tool-permissions.ts	Ip	extractFirstGroup	extract first group | `A.exec(e)?.[1]`
+accept	modules/island/agent/tool-permissions.ts	Wjt	getMacOsInfo	get mac os info | parses sw_vers ProductName/ProductVersion/BuildVersion
+accept	modules/island/agent/tool-permissions.ts	lqr	computePhaseDurations	compute phase durations | `${phase}_ms` deltas across mark list
+accept	modules/island/agent/tool-permissions.ts	Iqr	logSessionStartTiming	log session start timing | "[CCD start-timing]" + desktop_ccd_session_start_timing event
+accept	modules/island/agent/tool-permissions.ts	rqt	getMcpProtocolVersion	get mcp protocol version | `Mv.get(A)?.protocolVersion`
+accept	modules/island/agent/tool-permissions.ts	lqt	extractClientAddressPort	extract client address port | pulls remoteAddress/remotePort from request
+accept	modules/island/agent/tool-permissions.ts	Iqt	detectMcpTransport	detect mcp transport | derives mcp/network transport from constructor name
+accept	modules/island/agent/tool-permissions.ts	n8e	buildMcpSpanAttributes	build mcp span attributes | assembles MCP span attributes (transport/address/port)
+accept	modules/island/agent/tool-permissions.ts	IrA	removeFromTrackingMaps	remove from tracking maps | `Y3.delete(A); tcA.delete(A)`
+accept	modules/island/agent/tool-permissions.ts	_QA	persistOrbitDeploys	persist orbit deploys | "[orbitDeploys] write failed"; writes deploys file
+accept	modules/island/agent/tool-permissions.ts	grn	upsertDeploy	upsert deploy | sets deploys[id]={url,pinned}
+accept	modules/island/agent/tool-permissions.ts	crn	removeDeploy	remove deploy | deletes deploys[id]
+accept	modules/island/agent/tool-permissions.ts	lrn	removeDeploysBySubdomain	remove deploys by subdomain | deletes deploys whose hostname subdomain matches
+accept	modules/island/agent/tool-permissions.ts	Irn	setDeployPinned	set deploy pinned | updates deploy.pinned
+accept	modules/island/agent/tool-permissions.ts	Isi	isLogLineEntry	is log line entry | validates {line,stream,timestamp}
+accept	modules/island/agent/tool-permissions.ts	Iti	parseIsoDateReviver	parse iso date reviver | revives ISO date strings (JSON reviver)
+accept	modules/island/agent/tool-permissions.ts	hD	readBoundedJsonResponse	read bounded json response | reads body with byte limit then JSON.parse
+accept	modules/island/agent/tool-permissions.ts	z$	postJsonRequest	post json request | POST JSON; throws on non-ok (x-amzn-errortype)
+accept	modules/island/agent/tool-permissions.ts	Iur	fetchSsoPluginIndex	fetch sso plugin index | fetches SSO plugin index.json; validates entries
+accept	modules/island/agent/tool-permissions.ts	gdA	emitTelemetryEvent	emit telemetry event | logs to sink or queues eventQueue
+accept	modules/island/agent/tool-permissions.ts	Iv	recordFeatureSuccess	record feature success | `gdA('tengu_feature_ok', …)`
+accept	modules/island/agent/tool-permissions.ts	LSt	recordFeatureError	record feature error | `gdA('tengu_feature_bad', {error_code})`
+accept	modules/island/agent/tool-permissions.ts	n_	recordFeatureFailure	record feature failure | `gdA('tengu_feature_sad', {error_code})`
+accept	modules/island/auth/oidc.ts	cOe	cachedRedactionPatterns	cached redaction patterns | module-level cache assigned by fTr() of compiled redaction regexes (cOe ??= fTr())
+accept	modules/island/auth/oidc.ts	fTr	compileRedactionPatterns	compile redaction patterns | maps LDt to {id, confidence, re:new RegExp(source, flags+'g')}
+accept	modules/island/auth/oidc.ts	hTr	redactSecrets	redact secrets | replaces each compiled pattern match with '[REDACTED]'
+accept	modules/island/auth/oidc.ts	fVt	extractResponseUsageMetadata	extract response usage metadata | reads responseId, modelVersion, usageMetadata.promptTokenCount/candidatesTokenCount/totalTokenCount
+accept	modules/island/auth/oidc.ts	hVt	collectResponseToolCallsAndText	collect response tool calls and text | pushes functionCalls, candidates finishReason, content parts text and toolCalls
+accept	modules/island/auth/oidc.ts	pVt	extractResponseMetadataAndToolCalls	extract response metadata and tool calls | guards on QVt then calls fVt + hVt
+accept	modules/island/auth/oidc.ts	fai	isStringBooleanRecord	is string boolean record | every key string and every value boolean
+accept	modules/island/auth/oidc.ts	uZe	hasValidToolsRecord	has valid tools record | checks A.tools is a string→boolean record via fai
+accept	modules/island/auth/oidc.ts	fgt	getAllowedModels	get allowed models | reads pI().syntheticAllowedModels and allowedModels
+accept	modules/island/auth/oidc.ts	fi	isTrustedSenderFrame	is trusted sender frame | validates senderFrame.url origin against claude.ai/claude.com (+ .ant.dev dev override)
+accept	modules/island/auth/oidc.ts	fii	collectRendererCallStack	collect renderer call stack | frame.collectJavaScriptCallStack(); requires Electron >= 34
+accept	modules/island/auth/oidc.ts	hii	makeCallStackCollector	make call stack collector | returns closure that runs fii then invokes callback with stack
+accept	modules/island/auth/oidc.ts	fmr	cancelStream	cancel stream | cancels async iterator return() or reader.cancel()/releaseLock
+accept	modules/island/auth/oidc.ts	fnn	isBotAuthor	is bot author | userType==='Bot' || Qnn.has(authorAssociation)
+accept	modules/island/auth/oidc.ts	fpt	parseApiResponse	parse api response | parses stream/json/text response, logs via yC(A).debug
+accept	modules/island/auth/oidc.ts	hpt	attachRequestId	attach request id | defineProperty _request_id from headers 'request-id'
+accept	modules/island/auth/oidc.ts	qVA	credentialCacheKey	credential cache key | `${tenantId}|${clientId}`
+accept	modules/island/auth/oidc.ts	frt	readCredential	read credential | reads mCA cache then wCA store by qVA key
+accept	modules/island/auth/oidc.ts	hrt	writeCredential	write credential | writes mCA cache and wCA store by qVA key
+accept	modules/island/auth/oidc.ts	prt	deleteCredential	delete credential | deletes mCA cache and wCA store by qVA key
+accept	modules/island/auth/oidc.ts	fyr	shouldCompactMessages	should compact messages | checks q3(), not streaming, debounce window, messagesForCompaction
+accept	modules/island/auth/oidc.ts	q3	isLouderPenguinEnabled	is louder penguin enabled | Ci('louderPenguinEnabled')===true && Ci('quietPenguinEnabled')!==true
+accept	modules/island/auth/oidc.ts	fzA	shortestUniquePathSuffix	shortest unique path suffix | extends path suffix with separators until not in reserved set
+accept	modules/island/auth/oidc.ts	uT	buildUniquePathSuffixMap	build unique path suffix map | builds Map of input path to disambiguated suffix via fzA
+accept	modules/island/auth/oidc.ts	g1r	formatRelativeTime	format relative time | 'X days/hours/minutes ago' from seconds
+accept	modules/island/auth/oidc.ts	i3t	mapGetOrInsertDefault	map get or insert default | returns existing map value or sets and returns default
+accept	modules/island/auth/oidc.ts	r3t	isIgnoredFrameFilename	is ignored frame filename | startsWith node:/data: or ends .min.js/.min.cjs/.min.mjs
+accept	modules/island/auth/oidc.ts	n3t	isFrameLineColOutOfRange	is frame line col out of range | lineno>t3t or colno>e3t
+accept	modules/island/auth/oidc.ts	o3t	areContextLinesCached	are context lines cached | checks NGA cache has all lines in range
+accept	modules/island/auth/oidc.ts	g3t	addSourceContextToEvent	add source context to event | resolves and attaches source context lines to exception frames
+accept	modules/island/auth/oidc.ts	gNA	extractErrorMessage	extract error message | reads .message or first .issues[].message, else JSON.stringify
+accept	modules/island/auth/oidc.ts	gO	countRunningSessions	count running sessions | reduce summing countRunningSessions()
+accept	modules/island/auth/oidc.ts	vur	buildGlobalDefaultModels	build global default models | maps rQt ids to {id, model, source:'global_default'}
+accept	modules/island/auth/oidc.ts	gPA	buildClientBootstrapConfig	build client bootstrap config | assembles account, locale, statsig, growthbook, model_selector_config, system_prompts
+accept	modules/island/auth/oidc.ts	gQr	schedulePluginPrewarmSync	schedule plugin prewarm sync | growthbook gate triggers GC.syncPlugins() prewarm once
+accept	modules/island/auth/oidc.ts	gVe	parseTraceParent	parse trace parent | parses traceparent into traceId, spanId, traceFlags
+accept	modules/island/auth/oidc.ts	gVt	buildAnthropicSpanAttributes	build anthropic span attributes | sets 'anthropic' span attrs: model, temperature, top_p, top_k, max_tokens, tools
+accept	modules/island/auth/oidc.ts	gfr	normalizeExecutableName	normalize executable name | toLowerCase, strip .exe, trim
+accept	modules/island/auth/oidc.ts	ier	writeToStream	write to stream | writes to stream unless destroyed
+accept	modules/island/auth/oidc.ts	rer	writeToStderr	write to stderr | ier(process.stderr, A)
+accept	modules/island/auth/oidc.ts	gg	writeLogLine	write log line | formats ISO timestamp + level and writes to stderr or log file
+accept	modules/island/auth/oidc.ts	gmr	isEmptyObject	is empty object | returns false on first own key
+accept	modules/island/auth/oidc.ts	gnn	isPathInside	is path inside | relative path stays within base dir
+accept	modules/island/auth/oidc.ts	gpr	formatMissingLaunchJsonMessage	format missing launch json message | 'No .claude/launch.json found' instructions
+accept	modules/island/auth/oidc.ts	iqt	getMcpClientInfo	get mcp client info | Mv.get(A).clientInfo
+accept	modules/island/auth/oidc.ts	gqt	buildMcpClientAttributes	build mcp client attributes | mcp.client.name/title/version attributes
+accept	modules/island/auth/oidc.ts	gst	matchSyncProviderName	match sync provider name | matches name prefix against nJi else 'Unknown'
+accept	modules/island/auth/oidc.ts	sJi	enumerateCloudSyncRoots	enumerate cloud sync roots | reads registry for Box/GoogleDrive/OneDrive sync root paths
+accept	modules/island/auth/oidc.ts	z_r	collectWebSearchResultUrls	collect web search result urls | ingestWebSearchResultForProvenance: adds normalized result URLs to set
+accept	modules/island/auth/oidc.ts	gv	normalizeUrl	normalize url | requires http/https, strips hash and trailing slash
+accept	modules/island/auth/oidc.ts	gvt	matchesAllowedModel	matches allowed model | startsWith 'claude-' or matches list via eQ normalization
+accept	modules/island/auth/oidc.ts	h3A	sanitizeSessionId	sanitize session id | returns A if qer regex matches else null
+accept	modules/island/auth/oidc.ts	zer	setSessionTitle	set session title | writes 'custom-title' record with customTitle/sessionId
+accept	modules/island/auth/oidc.ts	h8t	mergeSchemaUrl	merge schema url | merges two resource schemaUrls, warns on conflict
+accept	modules/island/auth/oidc.ts	hFt	sortLeasablePool	sort leasable pool | sorts by pooledAt, unleased, lastActivityAt
+accept	modules/island/auth/oidc.ts	hLt	zipFiles	zip files | builds zip via AsyncZipDeflate/Zip
+accept	modules/island/auth/oidc.ts	hPe	chromePermissionRank	chrome permission rank | r1r[mode] permission ordering
+accept	modules/island/auth/oidc.ts	n1r	mergeChromePermissions	merge chrome permissions | merges chromePermissionMode and chromeAllowedDomains
+accept	modules/island/auth/oidc.ts	hQi	isIpAddress	is ip address | tests v4 (cQi) / v6 (IQi) regex
+accept	modules/island/auth/oidc.ts	ozA	findAccessiblePath	find accessible path | returns first path passing VB across roots
+accept	modules/island/auth/oidc.ts	hQt	buildSkillFrontmatter	build skill frontmatter | name/description/model YAML frontmatter + body
+accept	modules/island/auth/oidc.ts	wQt	writeSkillTaskFile	write skill task file | writes SKILL.md task file with path-traversal guard
+accept	modules/island/auth/oidc.ts	jS	isNonEmptyString	is non empty string | string of length >= 1
+accept	modules/island/auth/oidc.ts	hSr	isWindowState	is window state | guard: id, isFocused/isVisible/isMaximized/isMinimized/isFullscreen, bounds, title
+accept	modules/island/auth/oidc.ts	rvt	getMutexForKey	get mutex for key | get-or-create async mutex (dh) in rHe map
+accept	modules/island/auth/oidc.ts	hU	teardownThirdPartyCredential	teardown third party credential | 3p mode runExclusive teardown of qXA(A) credential
+accept	modules/island/auth/oidc.ts	hWe	getPrismaInstrumentationHelper	get prisma instrumentation helper | globalThis.PRISMA_INSTRUMENTATION.helper
+accept	modules/island/auth/oidc.ts	h_i	fetchOAuthProfile	fetch oauth profile | GET /api/oauth/profile, maps organization_type to subscription tier
+accept	modules/island/auth/oidc.ts	kSA	fetchSubscriptionTier	fetch subscription tier | if scope includes user:profile call fetchOAuthProfile
+accept	modules/island/auth/oidc.ts	hmi	isXmlNameChar	is xml name char | XML Name char code ranges
+accept	modules/island/auth/oidc.ts	hwi	isModelProbeResult	is model probe result | guard with probedModel/discoveredModel/modelCount/failedStep fields
+accept	modules/island/auth/oidc.ts	wAA	toPosixPath	to posix path | replaces path.sep with '/'
+accept	modules/island/auth/oidc.ts	hzA	toVmPath	to vm path | maps host path into /sessions VM mount path
+accept	modules/island/auth/oidc.ts	i0i	isBlankOrInvalidOrgId	is blank or invalid org id | empty, in e0i set, or fails t0i regex
+accept	modules/island/auth/oidc.ts	yAt	resolveDeploymentOrgId	resolve deployment org id | returns o0i(A) or trimmed deploymentOrganizationUuid
+accept	modules/island/auth/oidc.ts	i5i	requireGlobalFetch	require global fetch | returns global fetch or throws (Anthropic client needs fetch)
+accept	modules/island/auth/oidc.ts	w_i	isNetworkError	is network error | matches ECONNRESET/ECONNREFUSED/ETIMEDOUT/Failed to fetch
+accept	modules/island/auth/oidc.ts	tFA	fetchWithPoolReset	fetch with pool reset | net.fetch; on network error closes all connections and retries
+accept	modules/island/auth/oidc.ts	iFA	fetchWithServerErrorRetry	fetch with server error retry | retries on status>=500 with exponential backoff
+accept	modules/island/auth/oidc.ts	tKt	extractForwardedIp	extract forwarded ip | scans Forwarded/X-Forwarded-* headers for a valid IP
+accept	modules/island/auth/oidc.ts	iKt	parseForwardedFor	parse forwarded for | extracts 'for=' value from Forwarded header
+accept	modules/island/auth/oidc.ts	rKt	isIpAddressString	is ip address string | IPv4/IPv6 regex test
+accept	modules/island/auth/oidc.ts	iMi	isSameOrSubdomain	is same or subdomain | hosts equal or one is suffix of the other
+accept	modules/island/auth/oidc.ts	ttt	resolveOidcEndpoints	resolve oidc endpoints | bootstrapOidc OIDC .well-known discovery of authorization/token endpoints
+accept	modules/island/auth/oidc.ts	iVA	isNullish	is nullish | A == null
+accept	modules/island/auth/oidc.ts	tXr	checkClientIdFormat	check client id format | validates clientId against X5r returning ok/err step
+accept	modules/island/auth/oidc.ts	iXr	probeBuiltinMcpServer	probe builtin mcp server | runs builtin mcp-probe steps and aggregates ok/err
+accept	modules/island/auth/oidc.ts	iYe	parseGithubRepoSlug	parse github repo slug | extracts owner/repo from github.com URL
+accept	modules/island/auth/oidc.ts	iai	isFileStatus	is file status | guard: path string, status string
+accept	modules/island/auth/oidc.ts	rai	isFileChangeSummary	is file change summary | guard: files[], additions, deletions
+accept	modules/island/auth/oidc.ts	ien	getThirdPartyConfigStatus	get third party config status | reads provider config returning status/provider/mcpServerCount
+accept	modules/island/auth/oidc.ts	m_i	resolveSessionTokenExpiry	resolve session token expiry | expires_in seconds for user:sessions:claude_code scope
+accept	modules/island/auth/oidc.ts	iet	postOAuthToken	post oauth token | POST /v1/oauth/token with expires_in, retries without it on 400
+accept	modules/island/auth/oidc.ts	ret	refreshOAuthToken	refresh oauth token | refresh_token grant; classifies network/server/auth errors
+accept	modules/island/auth/oidc.ts	igi	isStringNumberRecord	is string number record | every key string and value number
+accept	modules/island/auth/oidc.ts	rgi	isStringRecord	is string record | every key and value string
+accept	modules/island/auth/oidc.ts	ngi	isCoworkSettings	is cowork settings | guard for cowork/subagent settings (memoryGB, mcpToolTimeoutMs, useCoworkOauth...)
+accept	modules/island/auth/oidc.ts	iiA	extractIdOrName	extract id or name | returns string, or object.id, or object.name
+accept	modules/island/auth/oidc.ts	ijt	getSpanHttpUrl	get span http url | reads HTTP url attribute or trace state from span
+accept	modules/island/auth/oidc.ts	tnn	loadReactDevTools	load react dev tools | tries installer then fallback to load React DevTools
+accept	modules/island/auth/oidc.ts	inn	installReactDevToolsViaInstaller	install react dev tools via installer | electron-devtools-installer REACT_DEVELOPER_TOOLS
+accept	modules/island/auth/oidc.ts	ioi	isSpaceAssignment	is space assignment | guard: type, spaceId, clusterKey, name, description
+accept	modules/island/auth/oidc.ts	roi	isSessionAssignment	is session assignment | guard: sessionId + ioi(assignment)
+accept	modules/island/auth/oidc.ts	ipr	pathExists	path exists | fs.promises.access true/false
+accept	modules/island/auth/oidc.ts	isi	isDirectoriesResult	is directories result | guard: directories[] of strings, optional error
+accept	modules/island/auth/oidc.ts	itA	timeoutFromExitCode	timeout from exit code | exitCode 143 without '{' output maps to An.TIMEOUT
+accept	modules/island/auth/oidc.ts	iwt	latestActivityTime	latest activity time | max of lastHiddenTime/lastActivityTime/lastResultTime
+accept	modules/island/auth/oidc.ts	txr	relabelBlockedSummaryAsNeedInput	relabel blocked summary as need input | post_turn_summary status_category blocked -> need_input
+accept	modules/island/auth/oidc.ts	ixr	hasStatusCategory	has status category | guard: status_category string present
+accept	modules/island/auth/oidc.ts	j$r	isRpcCallError	is rpc call error | Error name 'RPCCallError' with code $$r
+accept	modules/island/auth/oidc.ts	j4	isBadRequestStatus	is bad request status | status 400, 413, or 422
+accept	modules/island/auth/oidc.ts	j6t	withTimeout	with timeout | Promise.race against setTimeout reject
+accept	modules/island/auth/oidc.ts	jEr	getCoworkAvailabilityStatus	get cowork availability status | maps Y6A state to unavailable/unsupported reasons
+accept	modules/island/auth/oidc.ts	jOA	getMaxThinkingTokens	get max thinking tokens | pI().maxThinkingTokens ?? R8A
+accept	modules/island/auth/oidc.ts	z4e	parseBaggageEntry	parse baggage entry | parses one baggage key=value;metadata entry
+accept	modules/island/auth/oidc.ts	jOt	parseBaggage	parse baggage | parses baggage header into key/value map
+accept	modules/island/auth/oidc.ts	jPe	getUserAgent	get user agent | `Claude-Desktop/${app.getVersion()}`
+accept	modules/island/auth/oidc.ts	jSr	buildLocalPreviewUrl	build local preview url | `${sv}://local/${A}/...html`
+accept	modules/island/auth/oidc.ts	jUA	supportsDiscovery	supports discovery | checks s4A provider/model supportsDiscovery flag
+accept	modules/island/auth/oidc.ts	jWi	splitGraphemes	split graphemes | Intl.Segmenter grapheme segmentation with fallback
+accept	modules/island/auth/oidc.ts	jZr	isErrorWithCode	is error with code | guard: code string, message string
+accept	modules/island/auth/oidc.ts	jbr	getDiagnosticsFilePath	get diagnostics file path | process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
+accept	modules/island/auth/oidc.ts	joA	isPathPrefix	is path prefix | A equals e or starts with `${e}/`
+accept	modules/island/auth/oidc.ts	jli	isUnderAnyPath	is under any path | some S9e entry is a path prefix of A
+accept	modules/island/auth/oidc.ts	jmr	getStructuredPromptConfig	get structured prompt config | feature-flag prompt config (system/user template, tool/summary/entities descriptions)
+accept	modules/island/auth/oidc.ts	xBt	isWsl	is wsl | detects WSL via env or /proc/version
+accept	modules/island/auth/oidc.ts	pcr	getManagedPreferencePaths	get managed preference paths | macOS managed preference plist paths
+accept	modules/island/auth/oidc.ts	jq	execFileToString	exec file to string | execFile resolving {stdout, code}
+accept	modules/island/auth/oidc.ts	wcr	readManagedConfig	read managed config | reads macOS plist / Windows+WSL registry managed config
+accept	modules/island/auth/oidc.ts	jui	releaseRef	release ref | decrements isA ref count, deletes at zero
+accept	modules/island/auth/oidc.ts	jxi	verifyCertificateChain	verify certificate chain | verifies cert chain via security/powershell/openssl
+accept	modules/island/auth/oidc.ts	k8A	toWindowsDrivePath	to windows drive path | maps leading drive letter to `X:\`
+accept	modules/island/auth/oidc.ts	kAt	getManagedKeys	get managed keys | lR().managedKeys
+accept	modules/island/auth/oidc.ts	kJt	debounce	debounce | leading/trailing debounce with maxWait
+accept	modules/island/auth/oidc.ts	kOr	unique	unique | [...new Set(A)]
+accept	modules/island/auth/oidc.ts	kTe	buildCompletionResult	build completion result | completion {values:slice(0,100), total, hasMore}
+accept	modules/island/auth/oidc.ts	kVA	collectEnvVars	collect env vars | collects QGi env vars excluding '()' prefixed
+accept	modules/island/auth/oidc.ts	kZi	isObjectLike	is object like | non-null and typeof object or function
+accept	modules/island/auth/oidc.ts	lCr	classifyVmError	classify vm error | maps VM error patterns to VM_LOGON_RIGHT_DENIED/HYPERVISOR_* codes
+accept	modules/island/auth/oidc.ts	wE	withConsoleRestored	with console restored | swaps in instrumented console then restores originals
+accept	modules/island/auth/oidc.ts	kei	buildFlagAuditorIntegration	build flag auditor integration | sentry-flag-auditor flag-used integration
+accept	modules/island/auth/oidc.ts	kj	isRect	is rect | guard: x, y, width, height numbers
+accept	modules/island/auth/oidc.ts	ycA	isTextBlock	is text block | guard: type==='text' with text string
+accept	modules/island/auth/oidc.ts	kkt	summarizeAssistantTurns	summarize assistant turns | counts assistant turns and latest text/tool name
+accept	modules/island/auth/oidc.ts	xzr	clampBoundsToContent	clamp bounds to content | clamps rect width/height to content size
+accept	modules/island/auth/oidc.ts	klA	setOverlayBounds	set overlay bounds | applies zoom-scaled bounds to overlay
+accept	modules/island/auth/oidc.ts	kpe	isModelCheckResult	is model check result | guard with state/source/provider/endpoint/probedModel/checkedAt
+accept	modules/island/auth/oidc.ts	kpi	isSystemInfo	is system info | guard: app_version, os_version, cpu_model, platform, arch, total_memory
+accept	modules/island/auth/oidc.ts	ktn	getApiKey	get api key | awaits SUt then T6().apiKey
+accept	modules/island/auth/oidc.ts	qGe	toOfficeApp	to office app | maps excel/powerpoint/word to VC enum
+accept	modules/island/auth/oidc.ts	l$	syncConnectedFilesState	sync connected files state | pushes connected files state to store
+accept	modules/island/auth/oidc.ts	pyr	handleAddinStateEvent	handle addin state event | office addin connected/disconnected/status/selection events
+accept	modules/island/auth/oidc.ts	l2t	applyDebugIdsToFrames	apply debug ids to frames | sets frame.debug_id from filename map
+accept	modules/island/auth/oidc.ts	l4r	selectLargeChangedFiles	select large changed files | picks largest changed files within budget
+accept	modules/island/auth/oidc.ts	l6r	formatKeyCombo	format key combo | splits and orders modifier keys into a combo string
+accept	modules/island/auth/oidc.ts	l7e	compileRegExp	compile reg exp | new RegExp(A, e)
+accept	modules/island/auth/oidc.ts	l7r	toOtlpAttributes	to otlp attributes | converts object to OTLP key/value attribute list
+accept	modules/island/auth/oidc.ts	sk	throwForHttpStatus	throw for http status | throws typed errors for 401/403/404/409/429
+accept	modules/island/auth/oidc.ts	ser	sliceBefore	slice before | slice up to first occurrence of delimiter
+accept	modules/island/auth/oidc.ts	lcr	lookupErrorTip	lookup error tip | finds gcr tip matching a zod issue
+accept	modules/island/auth/oidc.ts	len	formatAccountStatus	format account status | formats provider/login/credential status lines
+accept	modules/island/auth/oidc.ts	lgt	getMcpToolTimeout	get mcp tool timeout | per-tool mcpToolTimeoutOverridesMs else default
+accept	modules/island/auth/oidc.ts	lk	isTrustedClaudeOriginFrame	is trusted claude origin frame | senderFrame origin in claude.ai/claude.com allowlist
+accept	modules/island/auth/oidc.ts	xVA	validateSsoMetadata	validate sso metadata | validates gateway SSO metadata via zod schema
+accept	modules/island/auth/oidc.ts	lrt	beginSsoDeviceFlow	begin sso device flow | builds SSO metadata and starts device authorization flow
+accept	modules/island/auth/oidc.ts	lvA	getIntFromMap	get int from map | parseInt of map value or undefined
+accept	modules/island/auth/oidc.ts	lwt	getExtensionsInstallationsPath	get extensions installations path | userData/extensions-installations.json
+accept	modules/island/auth/oidc.ts	lxr	parseSseFrames	parse sse frames | parses SSE event/id/data frames from buffer
+accept	modules/island/auth/oidc.ts	m3i	isAutoDownloadEnabled	is auto download enabled | pI().autoDownloadInBackground
+accept	modules/island/auth/oidc.ts	p5r	escapeRegistryValue	escape registry value | escapes newlines/backslashes/quotes for registry value
+accept	modules/island/auth/oidc.ts	w5r	formatRegistryEntry	format registry entry | formats a registry value line (dword/string)
+accept	modules/island/auth/oidc.ts	m5r	buildRegistryFile	build registry file | builds Windows .reg file content
+accept	modules/island/auth/oidc.ts	mGi	recordProcessExit	record process exit | tracks process exit reasons and codes
+accept	modules/island/auth/oidc.ts	mLe	matchAumid	match aumid | fuzzy-matches an app user model id
+accept	modules/island/auth/oidc.ts	mMi	atomicWriteFile	atomic write file | rename with EXDEV fallback to write+unlink
+accept	modules/island/auth/oidc.ts	mPe	isHandlerNotRegisteredError	is handler not registered error | message includes 'handler not registered'/'unknown method'
+accept	modules/island/auth/oidc.ts	yGt	showTeachOverlay	show teach overlay | sends 'cu-teach:show' with adjusted anchor
+accept	modules/island/auth/oidc.ts	wRi	resolvePermission	resolve permission | returns allow/ask permission decision
+accept	modules/island/auth/oidc.ts	mRi	resolvePermissions	resolve permissions | reduces per-target permission decisions
+accept	modules/island/auth/oidc.ts	mSA	matchesExactlyOne	matches exactly one | true only if exactly one wSA guard matches
+accept	modules/island/auth/oidc.ts	mdt	dispatchZoomFactorChanged	dispatch zoom factor changed | dispatches zoom factor change to webContents
+accept	modules/island/auth/oidc.ts	meA	hasTerminal	has terminal | 'terminal' in A
+accept	modules/island/auth/oidc.ts	wei	appendCallback	append callback | appends callback to existing value/array
+accept	modules/island/auth/oidc.ts	mei	wrapWithCallback	wrap with callback | Proxy injecting a callback into options.callbacks
+accept	modules/island/auth/oidc.ts	vp	fromVmPath	from vm path | maps /sessions VM path back to host filesystem path
+accept	modules/island/auth/sso.ts	a8e	joinWithSpace	join with space | `e ? `${A} ${e}` : A` — joins two strings with a space when both present
+accept	modules/island/auth/sso.ts	g8e	messageSpanAttributes	message span attributes | switch over 'request'/'notification-incoming'/'notification-outgoing' building span op/source attrs
+accept	modules/island/auth/sso.ts	dqt	buildRequestSpanOptions	build request span options | returns {name, op, forceTransaction:!0, attributes} for an MCP request span
+accept	modules/island/auth/sso.ts	aAr	isKey	is key | lodash isKey: tests value is a valid property key (number/symbol/boolean/null, regex, in Object(e))
+accept	modules/island/auth/sso.ts	aDe	isTokenUnexpired	is token unexpired | `A.expiresAt - FUi > Date.now()` — token still valid after a skew buffer
+accept	modules/island/auth/sso.ts	aEr	captureVzFootprint	capture vz footprint | pgrep com.apple.Virtualization + /usr/bin/footprint; '[vmDiagnostics] Failed to capture VZ footprint'
+accept	modules/island/auth/sso.ts	aFi	revokeGoogleToken	revoke google token | POST refresh_token revoke; warns '[custom-3p] Google token revoke returned non-2xx'
+accept	modules/island/auth/sso.ts	aFr	defineAccessorMethods	define accessor methods | defines get/set/has + Capitalized name properties via Object.defineProperty
+accept	modules/island/auth/sso.ts	aKA	applyScopeDataToEvent	apply scope data to event | merges fingerprint/span/breadcrumbs/sdkProcessingMetadata onto a Sentry event
+accept	modules/island/auth/sso.ts	i2t	applyContextDataToEvent	apply context data to event | merges extra/tags/user/contexts/level/transactionName onto event
+accept	modules/island/auth/sso.ts	r2t	mergeBreadcrumbs	merge breadcrumbs | concatenates A.breadcrumbs with e
+accept	modules/island/auth/sso.ts	n2t	mergeSdkProcessingMetadata	merge sdk processing metadata | spreads e into A.sdkProcessingMetadata
+accept	modules/island/auth/sso.ts	s2t	mergeFingerprint	merge fingerprint | normalizes+concats A.fingerprint array
+accept	modules/island/auth/sso.ts	aKi	resolvePlatformPath	resolve platform path | returns first supported platform path; throws `Unsupported platform: ${process.platform}`
+accept	modules/island/auth/sso.ts	sOi	wellKnownPath	well known path | builds a `/.well-known/${A}` URL path with optional prepended pathname
+accept	modules/island/auth/sso.ts	aOi	shouldRetryWellKnownAtRoot	should retry well known at root | true when no response or 4xx and path !== '/'
+accept	modules/island/auth/sso.ts	gOi	discoverWellKnownMetadata	discover well known metadata | OAuth/OIDC .well-known metadata discovery with root fallback
+accept	modules/island/auth/sso.ts	sSi	invariant	invariant | `if (!A) throw new t(e)` assertion
+accept	modules/island/auth/sso.ts	aSi	assertIntlContext	assert intl context | invariant with '[React Intl] Could not find required `intl` object' message
+accept	modules/island/auth/sso.ts	xfA	charCodeOrInt	char code or int | `isNaN(A) ? A.charCodeAt(0) : parseInt(A,10)` (brace-expansion numeric)
+accept	modules/island/auth/sso.ts	sZt	wrapInBraces	wrap in braces | `'{' + A + '}'`
+accept	modules/island/auth/sso.ts	aZt	hasLeadingZero	has leading zero | `/^-?0\d/.test(A)` (brace-expansion isPadded)
+accept	modules/island/auth/sso.ts	gZt	lte	lte | `A <= e`
+accept	modules/island/auth/sso.ts	cZt	gte	gte | `A >= e`
+accept	modules/island/auth/sso.ts	fV	expandBraces	expand braces | brace-expansion expand(): balanced {}, ranges a..z / 1..9, comma lists, recursion
+accept	modules/island/auth/sso.ts	aen	describeMcpServerConnectivity	describe mcp server connectivity | builds notes/issues from transport http/sse/stdio, headerKeys, oauthNote
+accept	modules/island/auth/sso.ts	jJe	formatMcpServerLine	format mcp server line | formats a server status line; detects 'name collides with server from'
+accept	modules/island/auth/sso.ts	gen	formatPluginManifestStatus	format plugin manifest status | formats plugin.json status: missing/unreadable/invalid/ok with version+components
+accept	modules/island/auth/sso.ts	cen	formatPluginDiagnostics	format plugin diagnostics | builds multi-line mdm + org-plugins diagnostic report
+accept	modules/island/auth/sso.ts	eP	deepMapStrings	deep map strings | recursively maps string leaves in nested arrays/objects (skips base64)
+accept	modules/island/auth/sso.ts	mPA	findMatchingParen	find matching paren | scans for the matching close paren index tracking depth
+accept	modules/island/auth/sso.ts	aft	rewriteComputerUrls	rewrite computer urls | rewrites `computer://` links/markdown in text
+accept	modules/island/auth/sso.ts	ogr	detectFileEncoding	detect file encoding | reads 4096 bytes, returns 'utf16le' (FF FE) or 'utf8' (EF BB BF / default)
+accept	modules/island/auth/sso.ts	sgr	detectLineEndings	detect line endings | counts CRLF vs LF, returns 'CRLF' or 'LF'
+accept	modules/island/auth/sso.ts	agr	readTextFileWithMetadata	read text file with metadata | reads file via symlink, returns {content, encoding, lineEndings}
+accept	modules/island/auth/sso.ts	ajr	validatePermissionModeForSync	validate permission mode for sync | '[ToolPermissionBroker]' permissionMode not in IPC enum — skip sync
+accept	modules/island/auth/sso.ts	gni	isAuthAction	is auth action | guard: object with string label and valid kind
+accept	modules/island/auth/sso.ts	cni	isMcpAuthPromptConfig	is mcp auth prompt config | guard over markdown/mcpServer/openMcpSettingsButton/credentialAuthKind/authAction
+accept	modules/island/auth/sso.ts	arn	getDeploys	get deploys | `{ ...(await GZ()).deploys }`
+accept	modules/island/auth/sso.ts	asi	isStatusReasonResult	is status reason result | guard: {status, reason?:string}
+accept	modules/island/auth/sso.ts	ati	isMajorVersion25Plus	is major version25 plus | `E6e.major >= 25`
+accept	modules/island/auth/sso.ts	gti	registerProtocolHandler	register protocol handler | registers via handle()/registerStringProtocol passing {windowId,url,body}
+accept	modules/island/auth/sso.ts	atr	buildKeychainServiceName	build keychain service name | 'Claude Code'+OAUTH_FILE_SUFFIX(+sha256 of config dir)
+accept	modules/island/auth/sso.ts	ctr	keychainAccountName	keychain account name | returns USER/userInfo().username or 'claude-code-user'
+accept	modules/island/auth/sso.ts	iIr	readKeychainPassword	read keychain password | darwin `security find-generic-password -w`
+accept	modules/island/auth/sso.ts	uMi	isInvalidWindowsSegment	is invalid windows segment | rejects reserved/invalid Windows path segments ('..', ':', trailing '. ')
+accept	modules/island/auth/sso.ts	att	resolveSafeRelativePath	resolve safe relative path | validates+normalizes a relative path (throws on traversal); returns {full,rel,dirSegments,leaf}
+accept	modules/island/auth/sso.ts	avA	readRemoteSettingsFile	read remote settings file | reads JSON settings; '[SettingsResolver]' strips remote defaultMode auto/bypass
+accept	modules/island/auth/sso.ts	xqr	resolveSettingsTiers	resolve settings tiers | reads User/Project/ProjectLocal settings.json tiers
+accept	modules/island/auth/sso.ts	awi	isConfigResult	is config result | guard: {ok:boolean, config?, error?:string}
+accept	modules/island/auth/sso.ts	awr	valuesDiffer	values differ | `!ND.isDeepStrictEqual(A,e)` with null handling
+accept	modules/island/auth/sso.ts	b$e	parameterizeTemplate	parameterize template | Sentry parameterize: sets __sentry_template_string__/__sentry_template_values__
+accept	modules/island/auth/sso.ts	b4t	joinDotKey	join dot key | `A ? `${A}.${e}` : e`
+accept	modules/island/auth/sso.ts	f8e	wrapWithTracingProxy	wrap with tracing proxy | Proxy wrapping object methods, instrumenting traced ones (v4t/W4t)
+accept	modules/island/auth/sso.ts	z4t	wrapObjectWithTracing	wrap object with tracing | `f8e(A, '', e)`
+accept	modules/island/auth/sso.ts	b7e	buildTimeRegexSource	build time regex source | builds HH:MM(:SS) time regex source with precision
+accept	modules/island/auth/sso.ts	gDi	buildTimeRegex	build time regex | `new RegExp(`^${b7e(A)}$`)`
+accept	modules/island/auth/sso.ts	cDi	buildDateTimeRegex	build date time regex | date 'T' time regex with Z/offset
+accept	modules/island/auth/sso.ts	b7i	isArrayLike	is array like | `A != null && isLength(A.length) && !isFunction(A)`
+accept	modules/island/auth/sso.ts	b8t	samplingDecisionLabel	sampling decision label | maps RECORD_AND_SAMPLED/RECORD/NOT_RECORD to 'RECORD_AND_SAMPLE'/'RECORD_ONLY'/'DROP'
+accept	modules/island/auth/sso.ts	b9i	mapCacheClear	map cache clear | lodash: size=0, __data__={hash,map,string}
+accept	modules/island/auth/sso.ts	bDA	isSupportBundleState	is support bundle state | guard over stage/stepLabel/referenceId/sizeBytes/canSend/showSendUi/savedPath
+accept	modules/island/auth/sso.ts	kwi	isSupportBundleStage	is support bundle stage | `Nwi.has(A)` used as bDA.stage guard
+accept	modules/island/auth/sso.ts	bJe	settleOrTimeout	settle or timeout | `Promise.race([A.catch, setTimeout(AJA)])`
+accept	modules/island/auth/sso.ts	bKi	flattenZodError	flatten zod error | flattens A.issues into {formErrors, fieldErrors}
+accept	modules/island/auth/sso.ts	j5r	testMcpServerConnection	test mcp server connection | 'Connection test for ...' / 'OAuth not configured'; runs oauth + RLt
+accept	modules/island/auth/sso.ts	bLt	runConnectionTest	run connection test | dispatches connection test (kLt/TLt/vLt/j5r)
+accept	modules/island/auth/sso.ts	bMi	budgetExhaustedMessage	budget exhausted message | 'budget-exhausted: ... consecutive ... total this run — auto-respawn stops until Connect'
+accept	modules/island/auth/sso.ts	bPe	yieldToEventLoop	yield to event loop | `new Promise(setImmediate)`
+accept	modules/island/auth/sso.ts	vSr	isTextContent	is text content | guard: {type:string, text:string}
+accept	modules/island/auth/sso.ts	bSr	isToolCallResult	is tool call result | guard: {content:TextContent[], structuredContent?, isError?:boolean}
+accept	modules/island/auth/sso.ts	bTt	classifyRateLimit	classify rate limit | 'secondary rate limit|abuse detection' -> 'secondary', 'rate limit' -> 'primary'
+accept	modules/island/auth/sso.ts	b_	pathToRecursiveGlob	path to recursive glob | converts a path to `/path/**` glob (handles win32 drive/UNC)
+accept	modules/island/auth/sso.ts	h8A	editReadPermissionRules	edit read permission rules | maps paths to `Edit(...)`/`Read(...)` permission strings
+accept	modules/island/auth/sso.ts	p8A	readPermissionRules	read permission rules | maps paths to `Read(...)` permission strings
+accept	modules/island/auth/sso.ts	uRr	buildPermissionAllowlist	build permission allowlist | assembles Edit/Read/Write permission allowlist from path inputs
+accept	modules/island/auth/sso.ts	bat	createTransformCheck	create transform check | `new PVi({type:'transform', transform:A})` (zod transform)
+accept	modules/island/auth/sso.ts	bbA	isTopLevelFrameSender	is top level frame sender | `A.senderFrame?.parent === null`
+accept	modules/island/auth/sso.ts	bd	isTopLevelFrameSender2	is top level frame sender2 | `A.senderFrame?.parent === null` (duplicate guard)
+accept	modules/island/auth/sso.ts	bdt	handleVmHeartbeatFailure	handle vm heartbeat failure | '[Heartbeat] VM unresponsive...'; emits 'lam_vm_heartbeat_failure' and restarts
+accept	modules/island/auth/sso.ts	beA	iterateNonEmptyLines	iterate non empty lines | async generator yielding non-empty newline-split lines, yields to loop periodically
+accept	modules/island/auth/sso.ts	biA	isAdditionalDirectoriesClaudeMdEnabled	is additional directories claude md enabled | `pI()?.enableAdditionalDirectoriesClaudeMd ?? !1`
+accept	modules/island/auth/sso.ts	bie	guardResourceAttributePromises	guard resource attribute promises | catches 'promise rejection for resource attribute' on attribute promises
+accept	modules/island/auth/sso.ts	bjA	memoryBalloonOverrides	memory balloon overrides | `pI()?.memoryBalloon?.overrides`
+accept	modules/island/auth/sso.ts	bpi	isApprovalCycleStatus	is approval cycle status | guard over status/requiresSetup/approvedThisCycle/supported
+accept	modules/island/auth/sso.ts	bte	onByteThresholdExceeded	on byte threshold exceeded | debounced byte-count watcher firing at 8e5 bytes
+accept	modules/island/auth/sso.ts	bve	findMatchingLogLine	find matching log line | scans lines bottom-up for $Cr substrings, slices first 500 chars
+accept	modules/island/auth/sso.ts	byr	broadcastDesktopContext	broadcast desktop context | sends 'desktop_context_push' (trigger 'conversation_changed') over paired sockets
+accept	modules/island/auth/sso.ts	bzr	buildPreviewUrl	build preview url | `${NlA}://preview/${encoded path}`
+accept	modules/island/auth/sso.ts	s0r	stringifyAndTruncate	stringify and truncate | serializes value, truncates with `…[+${n}ch]`
+accept	modules/island/auth/sso.ts	c0r	truncateObjectValues	truncate object values | truncates string entries of an object via s0r
+accept	modules/island/auth/sso.ts	gat	buildTimeOfDayRegexSource	build time of day regex source | builds HH:MM(:SS) regex source variant with precision -1/0
+accept	modules/island/auth/sso.ts	g1i	buildTimeOfDayRegex	build time of day regex | `new RegExp(`^${gat(A)}$`)`
+accept	modules/island/auth/sso.ts	c1i	buildDateTimeOfDayRegex	build date time of day regex | datetime regex from gat with Z/offset
+accept	modules/island/auth/sso.ts	c4i	stringEndsWithCheck	string ends with check | zod check format:'ends_with' with suffix
+accept	modules/island/auth/sso.ts	c7t	hasDispatchEngineSpans	has dispatch engine spans | `'dispatchEngineSpans' in A`
+accept	modules/island/auth/sso.ts	c9i	hashGet	hash get | lodash hashGet: __data__[A], s9i sentinel -> undefined
+accept	modules/island/auth/sso.ts	cAe	exchangeGcpStsToken	exchange gcp sts token | OAuth token-exchange grant; throws 'GCP STS token exchange failed'
+accept	modules/island/auth/sso.ts	cE	promiseWithTimeout	promise with timeout | Promise.race that rejects with Error(t) after e ms (unref'd)
+accept	modules/island/auth/sso.ts	t8r	sanitizeFilename	sanitize filename | replaces non `[a-zA-Z0-9._-]` with '_', defaults to 'file'
+accept	modules/island/auth/sso.ts	i8r	sftpReaddir	sftp readdir | sftp readdir wrapped with timeout 'sftpReaddir: timed out'
+accept	modules/island/auth/sso.ts	r8r	sftpMkdirp	sftp mkdirp | sftp recursive mkdir 'sftpMkdirp: timed out'
+accept	modules/island/auth/sso.ts	n8r	sftpWriteFile	sftp write file | sftp writeFile 'sftpWriteFile: timed out'
+accept	modules/island/auth/sso.ts	o8r	uploadRemoteAttachments	upload remote attachments | 'remoteAttachments:' — uploads capped attachments over sftp
+accept	modules/island/auth/sso.ts	cFr	isAbsoluteUrl	is absolute url | `/^([a-z][a-z\d+\-.]*:)?\/\//i.test(A)`
+accept	modules/island/auth/sso.ts	lFr	joinUrlPath	join url path | joins base and path with single slash
+accept	modules/island/auth/sso.ts	y9A	resolveRelativeUrl	resolve relative url | joins base if path is relative (cFr/lFr)
+accept	modules/island/auth/sso.ts	cGe	tryParseJsonResponse	try parse json response | `await A.json()` catch -> null
+accept	modules/island/auth/sso.ts	cHe	validateLocalPermissionMode	validate local permission mode | '[LocalSessionManager]' permissionMode not in IPC enum — skip sync
+accept	modules/island/auth/sso.ts	sIr	setSessionTitle	set session title | routes to cIr (sessionStore) or zer
+accept	modules/island/auth/sso.ts	cIr	appendCustomTitle	append custom title | appends 'custom-title' event; 'Invalid sessionId'/'title must be non-empty'
+accept	modules/island/auth/sso.ts	uRe	normalizePathKey	normalize path key | normalize + forward-slash + lowercase + strip trailing slash
+accept	modules/island/auth/sso.ts	cJi	isPathWithin	is path within | `t === i || t.startsWith(i + '/')` over normalized paths
+accept	modules/island/auth/sso.ts	eKt	parseCookieString	parse cookie string | parses `k=v;` pairs with quote/percent decoding
+accept	modules/island/auth/sso.ts	gKt	addRequestDataToEvent	add request data to event | sets Sentry event.request and user.ip_address
+accept	modules/island/auth/sso.ts	cKt	extractRequestData	extract request data | extracts headers/method/url/cookies/query_string per options
+accept	modules/island/auth/sso.ts	ntt	readDisabledMap	read disabled map | reads stored map, keeps only 'disabled' entries
+accept	modules/island/auth/sso.ts	ott	setDisabledState	set disabled state | sets/deletes 'disabled' entry in store map
+accept	modules/island/auth/sso.ts	cMi	markEnabled	mark enabled | `ott(A, 'enabled')`
+accept	modules/island/auth/sso.ts	cPe	mergeWithMetadata	merge with metadata | shallow merge, deep-merging external_metadata/internal_metadata
+accept	modules/island/auth/sso.ts	cPt	parseDiagLogLevel	parse diag log level | parses diag log level string; warns 'Unknown log level' -> INFO
+accept	modules/island/auth/sso.ts	cX	applyTimeZoneToFormats	apply time zone to formats | maps format entries adding {timeZone:e}
+accept	modules/island/auth/sso.ts	iwe	mergeFormatConfigs	merge format configs | merges two format config maps key-by-key
+accept	modules/island/auth/sso.ts	rwe	mergeIntlFormats	merge intl formats | merges intl date/time formats with E7e.formats defaults
+accept	modules/island/auth/sso.ts	cXr	classifyOAuthError	classify oauth error | maps errors to ERR_* codes (PKCE/MINT/SAFE_STORAGE/NETWORK/...)
+accept	modules/island/auth/sso.ts	gai	isStatusCheck	is status check | guard: {name, state, bucket} strings
+accept	modules/island/auth/sso.ts	cai	isPullRequestStatus	is pull request status | guard over success/checks/prState/mergeable/reviewDecision/autoMergeEnabled
+accept	modules/island/auth/sso.ts	wBA	isChicagoFlagEnabled	is chicago flag enabled | `cdt() ? !0 : $r(KY,'enabled',...)`
+accept	modules/island/auth/sso.ts	ib	isChicagoEnabled	is chicago enabled | platform-gated wBA() && Ci('chicagoEnabled')
+accept	modules/island/auth/sso.ts	ldt	isChicagoEnabledForPlatform	is chicago enabled for platform | override-aware chicago feature check
+accept	modules/island/auth/sso.ts	chr	getLaunchPreviewSession	get launch preview session | gets/creates electron session partition 'launch-preview-...'
+accept	modules/island/auth/sso.ts	lhr	watchSessionActivity	watch session activity | throttled (1s) webRequest.onCompleted activity callback
+accept	modules/island/auth/sso.ts	cmr	hasOwn	has own | `Object.prototype.hasOwnProperty.call(A,e)`
+accept	modules/island/auth/sso.ts	lnr	isOptionalSchema	is optional schema | zod optional check: type==='optional'/isOptional()/'ZodOptional'
+accept	modules/island/auth/sso.ts	igr	describeSchemaFields	describe schema fields | extracts {name,description,required} per zod shape field
+accept	modules/island/auth/sso.ts	coi	isMediaContentBlock	is media content block | guard: {type, text?, data?, media_type?}
+accept	modules/island/auth/sso.ts	jze	isToolResultPayload	is tool result payload | guard: {tool_name:string, content:MediaContentBlock[]}
+accept	modules/island/auth/sso.ts	cqt	mcpServerInfoAttributes	mcp server info attributes | builds span attrs from serverInfo name/title/version
+accept	modules/island/auth/sso.ts	hUi	fetchSsoDiscovery	fetch sso discovery | 'gateway SSO discovery failed' — fetches discovery doc
+accept	modules/island/auth/sso.ts	crt	startSsoDeviceGrant	start sso device grant | '[custom-3p:sso] starting gateway SSO device-code grant'
+accept	modules/island/auth/sso.ts	ctt	readUpToMaxBytes	read up to max bytes | reads a file handle into a growing buffer; throws 'File grew past maxBytes'
+accept	modules/island/auth/sso.ts	czA	parseFrontmatter	parse frontmatter | splits `---\n...\n---` into {frontmatter.raw, body}
+accept	modules/island/auth/sso.ts	obe	readSkillFrontmatter	read skill frontmatter | reads SKILL.md frontmatter (name/description/argument-hint/user-invocable)
+accept	modules/island/auth/sso.ts	edr	readCommandFrontmatter	read command frontmatter | reads legacy command file frontmatter (description/argument-hint/content)
+accept	modules/island/auth/sso.ts	d4i	createCustomCheck	create custom check | zod {type:'custom', check:'custom', fn}
+accept	modules/island/auth/sso.ts	e$i	createCustomRefine	create custom refine | `d4i(Uat, A ?? (()=>!0), e)`
+accept	modules/island/auth/sso.ts	d9i	hashSet	hash set | lodash hashSet: size+=, __data__[A]=value, return this
+accept	modules/island/auth/sso.ts	dAr	arrayMap	array map | lodash arrayMap loop
+accept	modules/island/auth/sso.ts	dCA	deleteCachedPath	delete cached path | `uCA.delete(A)`
+accept	modules/island/auth/sso.ts	sDe	getBedrockSsoRoleCredentials	get bedrock sso role credentials | 'Bedrock SSO GetRoleCredentials' — returns AWS creds
+accept	modules/island/auth/sso.ts	dD	getApiToken	get api token | `kt().getApiToken(A)`
+accept	modules/island/auth/sso.ts	gh	getApiTokenOrNull	get api token or null | returns dD token or null
+accept	modules/island/auth/sso.ts	vJr	getApiHostAndBearer	get api host and bearer | `{apiHost, bearer: await gh(...)}`
+accept	modules/island/auth/sso.ts	dEr	generateProcessName	generate process name | random `${w1}-${w2}-${suffix}`; 'Could not generate unique process name'
+accept	modules/island/auth/sso.ts	u8e	joinDotKey2	join dot key2 | `A ? `${A}.${e}` : e` (duplicate dotted-key join)
+accept	modules/island/auth/sso.ts	mVt	isTracedMethodName	is traced method name | `gie.includes(name)` for full or last segment
+accept	modules/island/auth/sso.ts	dGA	wrapMethodsWithTracingProxy	wrap methods with tracing proxy | Proxy instrumenting traced methods (Iie wrap)
+accept	modules/island/auth/sso.ts	dHe	formatIssueKey	format issue key | `${A.type}:${A.status}` or `${A.type}:${detail.slice(0,100)}`
+accept	modules/island/auth/sso.ts	dTe	selectPluralForm	select plural form | plural-form selector by n%10/n%100 (11-19 special)
+accept	modules/island/auth/sso.ts	dTi	lowercaseCheck	lowercase check | zod string check format:'lowercase'
+accept	modules/island/auth/sso.ts	dXi	cacheHas	cache has | `this.__data__.has(A)`
+accept	modules/island/auth/sso.ts	pai	isAttemptInfo	is attempt info | guard: {attempt:number, maxAttempts:number}
+accept	modules/island/auth/sso.ts	da	isPluginInstallRequest	is plugin install request | guard over mode/workspacePath/settingsLevel/pluginSource/forceInstall/telemetryAttempt
+accept	modules/island/auth/sso.ts	dbA	isDeviceStreamInfo	is device stream info | guard over udid/deviceName/streamUrl/streamMode/pointWidth/pointHeight
+accept	modules/island/auth/sso.ts	den	buildDiagnosticZipName	build diagnostic zip name | `claude-diagnostic-${id8}-${date}.zip`
+accept	modules/island/auth/sso.ts	fen	registerSupportBundleHandler	register support bundle handler | '[support-bundle]' state machine: Packaging/Export/Send/Cancel/Reveal
+accept	modules/island/auth/sso.ts	dgt	resolveEffort	resolve effort | `pI()?.effort` if in set else 'medium'
+accept	modules/island/auth/sso.ts	dlr	baseSet	base set | lodash baseSet (guards __proto__/constructor/prototype)
+accept	modules/island/auth/sso.ts	dmt	buildMemoryGuidelines	build memory guidelines | builds 'persistent, file-based memory system' guideline text
+accept	modules/island/auth/sso.ts	dri	isIpAddress	is ip address | IPv4/IPv6 test via ari/cri ('v4'/'v6')
+accept	modules/island/auth/sso.ts	dte	logIgnoredSpan	log ignored span | 'Ignoring span ... because it matches `ignoreSpans`'
+accept	modules/island/auth/sso.ts	sGA	shouldIgnoreSpan	should ignore span | matches span description/op against ignoreSpans list
+accept	modules/island/auth/sso.ts	vHt	isStringOrRegExp	is string or reg exp | `typeof A=='string' || A instanceof RegExp`
+accept	modules/island/auth/sso.ts	e6t	parseBooleanEnv	parse boolean env | parses env var 'true'/'false'; warns 'Unknown value'
+accept	modules/island/auth/sso.ts	qUA	bedrockRuntimeHost	bedrock runtime host | `bedrock-runtime[-fips].${region}.amazonaws.com`
+accept	modules/island/auth/sso.ts	eAt	buildBedrockHostAllowlist	build bedrock host allowlist | bedrock + sts.amazonaws.com host allowlist
+accept	modules/island/auth/sso.ts	eJi	probeMsixFile	probe msix file | '[MSIX] Sync fallback probe' accessSync check
+accept	modules/island/auth/sso.ts	eJr	isWslPath	is wsl path | `/^[\\/]{2}wsl(\$|\.localhost)[\\/]/i`
+accept	modules/island/auth/sso.ts	iJr	isUncOrNetworkPath	is unc or network path | UNC/DavWWWRoot/@SSL/IP network path test (win32)
+accept	modules/island/auth/sso.ts	rJr	isUnsafeWindowsPath	is unsafe windows path | reserved names CON/PRN/AUX/NUL, device paths, traversal
+accept	modules/island/auth/sso.ts	eOi	applyClientAuth	apply client auth | dispatches client_secret_basic/client_secret_post/none
+accept	modules/island/auth/sso.ts	tOi	applyClientSecretBasic	apply client secret basic | Authorization: Basic base64(id:secret)
+accept	modules/island/auth/sso.ts	iOi	applyClientSecretPost	apply client secret post | sets client_id/client_secret in body
+accept	modules/island/auth/sso.ts	rOi	applyClientIdOnly	apply client id only | sets client_id only (auth method 'none')
+accept	modules/island/auth/sso.ts	eTA	accountOrSpaceLabel	account or space label | `A === s$ ? 'account' : 'space'`
+accept	modules/island/auth/sso.ts	eWt	createWinstonSentryTransport	create winston sentry transport | winston transport forwarding logs to Sentry ('auto.log.winston')
+accept	modules/island/auth/sso.ts	tWt	isObject	is object | `typeof A=='object' && A != null`
+accept	modules/island/auth/sso.ts	egi	isOperationResult	is operation result | guard: {success:boolean, error?:string}
+accept	modules/island/auth/sso.ts	eni	isCenterOptions	is center options | guard: {center?:boolean}
+accept	modules/island/auth/sso.ts	eqr	isExecutionErrorResult	is execution error result | subtype 'error_during_execution' with errors prefixed by c2A
+accept	modules/island/auth/sso.ts	oqr	reportCycleHealth	report cycle health | '[CCD CycleHealth]' records healthy/unhealthy turn outcome
+accept	modules/island/auth/sso.ts	tFt	sftpEnsureDir	sftp ensure dir | sftp recursive mkdir (tolerates code 4)
+accept	modules/island/auth/sso.ts	ern	sftpFastPut	sftp fast put | `A.fastPut(e, t, {mode:384})`
+accept	modules/island/auth/sso.ts	trn	syncRemotePlugin	sync remote plugin | '[RemotePluginSync]' tar+upload+extract plugin sync
+accept	modules/island/auth/sso.ts	ert	areCredentialsValid	are credentials valid | access token unexpired, or refreshable before clientExpiresAt
+accept	modules/island/auth/sso.ts	etA	classifyInstallError	classify install error | maps marketplace/install error text to An.* enum
+accept	modules/island/auth/sso.ts	etn	findOrCreateSpace	find or create space | finds space containing folder else createSpace + addFolderToSpace
+accept	modules/island/auth/sso.ts	rwi	isStringKeyedObject	is string keyed object | object whose keys are all strings
+accept	modules/island/auth/sso.ts	vDA	isConfigSyncStatus	is config sync status | guard over configured/url/origin/health/lastSyncAt/suppliedKeys
+accept	modules/island/auth/sso.ts	f2r	shellQuoteArgs	shell quote args | single-quotes shell args (Q2r safe pattern)
+accept	modules/island/auth/sso.ts	h2r	promptPluginPermission	prompt plugin permission | 'bad plugin/cli/op for prompt'; runs permission handler, returns decision
+accept	modules/island/auth/sso.ts	f3	normalizePathUnicode	normalize path unicode | NFC-normalizes on darwin
+accept	modules/island/auth/sso.ts	jer	realpathNormalized	realpath normalized | `f3(await gi.realpath(A))` with fallback
+accept	modules/island/auth/sso.ts	f4i	buildRefinementCheck	build refinement check | zod custom check exposing addIssue
+accept	modules/island/auth/sso.ts	h4i	createCustomCheckNode	create custom check node | `new iB({check:'custom'})` with _zod.check
+accept	modules/island/auth/sso.ts	f7i	isTypedArray	is typed array | lodash baseIsTypedArray (Ha tag map)
+accept	modules/island/auth/sso.ts	f7r	escapeHtml	escape html | replaces & < > " with entities
+accept	modules/island/auth/sso.ts	h7r	buildFullscreenHintHtml	build fullscreen hint html | data: HTML pill 'To exit full screen, press {esc}'
+accept	modules/island/auth/sso.ts	vJe	showFullscreenHintOverlay	show fullscreen hint overlay | overlay BrowserWindow on 'enter-html-full-screen'
+accept	modules/island/auth/sso.ts	f8r	isSshConfig	is ssh config | guard: {id, name, sshHost} strings
+accept	modules/island/auth/sso.ts	p8r	resolveSshConfigs	resolve ssh configs | collects sshConfigs across settings tiers (managed flag)
+accept	modules/island/auth/sso.ts	f8t	validateSchemaUrl	validate schema url | 'Schema URL must be string or undefined' OTel guard
+accept	modules/island/auth/sso.ts	f9i	listCacheClear	list cache clear | lodash: __data__=[], size=0
+accept	modules/island/auth/sso.ts	ySi	validateInferenceConfig	validate inference config | normalizes inference config, emits deprecation/ambiguity warnings
+accept	modules/island/auth/sso.ts	fAt	isChatTabEnabled	is chat tab enabled | `fsA && A.chatTabEnabled === !0`
+accept	modules/island/auth/sso.ts	fFt	assessLeaseEligibility	assess lease eligibility | worktree lease eligibility (recent/remote/pinned/running)
+accept	modules/island/auth/sso.ts	fJi	readPluginManifestFromZip	read plugin manifest from zip | reads '.claude-plugin/plugin.json' from a zip buffer
+accept	modules/island/auth/sso.ts	fLt	thirdPartyConfigEntries	third party config entries | flattens scope:'3p' config flags to stringified entries
+accept	modules/island/auth/sso.ts	h5r	buildMdmConfigProfile	build mdm config profile | macOS configuration profile plist ('Claude Desktop Third-Party Inference')
+accept	modules/island/auth/sso.ts	fQi	looksLikeJwt	looks like jwt | validates JWT shape: header typ 'JWT' + alg
+accept	modules/island/auth/sso.ts	uQr	toSkillSummary	to skill summary | maps skill record to {skillId,name,description,creatorType,...}
+accept	modules/island/auth/sso.ts	tft	fetchOrgSkills	fetch org skills | GET /skills/list-skills; 'Cannot fetch skills: no active organization'
+accept	modules/island/auth/sso.ts	fQr	fetchEnabledSkills	fetch enabled skills | `(await tft()).filter(enabled)`
+accept	modules/island/session/session-manager.ts	IF	LocalAgentModeSessionManager	local agent mode session manager | this.managerName='LocalAgentModeSessionManager'; log prefixes [LocalAgentModeSessionManager] and [LAM]

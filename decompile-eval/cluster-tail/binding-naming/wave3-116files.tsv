@@ -1,0 +1,174 @@
+accept	modules/island/plugins/local-plugin-marketplace-manager.ts	nur	LocalPluginMarketplaceManager	local plugin marketplace manager | manages marketplace.json/plugin.json under .claude-plugin; install/register/unregister plugins, getLocalUploadMarketplaceName
+accept	modules/island/cowork/ccr-worker-client.ts	dKr	CCRClient	ccrclient | error strings "CCRClient: Expected http(s) URL", "CCRClient: closed during initialize"; worker heartbeat/state PUT /worker
+accept	modules/island/transcript-mirror-batcher.ts	Uer	TranscriptMirrorBatcher	transcript mirror batcher | log prefix "[TranscriptMirrorBatcher] flush failed"; batches SessionStore.append() entries by filePath
+accept	modules/island/mcp/retry-send-queue.ts	WOr	RetrySendQueue	retry send queue | enqueue+drain, sendWithRetry loops until config.send true, retryDelay exp backoff with baseDelayMs/maxDelayMs/jitterMs
+accept	modules/island/telemetry/span-counter-metrics.ts	T8t	SpanCounterMetrics	span counter metrics | createCounter "The number of created spans.", createUpDownCounter "currently live spans."; startSpan add/remove
+accept	modules/island/util/deferred-promise.ts	z6t	DeferredPromise	deferred promise | captures _resolve/_reject of a Promise, exposes promise getter + resolve()/reject() (deferred idiom)
+accept	modules/island/instrumentation/instrumentation-module.ts	A7t	InstrumentationModule	instrumentation module | fields name/supportedVersions/patch/unpatch/files (OTel-style instrumentation module definition)
+accept	modules/island/mcp/streamable-http-error.ts	TL	StreamableHttpError	streamable http error | extends Error with message "Streamable HTTP error: ${t}", carries code
+accept	modules/island/async/timeout-error.ts	yQt	TimeoutError	timeout error | extends Error, sets this.name = 'TimeoutError'
+accept	modules/island/session/warm-lifecycle-manager.ts	uYA	WarmLifecycleManager	warm lifecycle manager | log tag `[WarmLifecycle:${t}]`; manages per-session idle timeouts + warm-up lifecycle
+accept	modules/island/cowork/auto-archive-engine.ts	ann	AutoArchiveEngine	auto archive engine | log prefix '[AutoArchiveEngine]'; sweep()/checkAndArchive() auto-archives sessions on PR close (ccAutoArchiveOnPrClose)
+accept	modules/island/state/key-value-state-map.ts	PIA	KeyValueStateMap	key value state map | immutable Map wrapper (_internalState) with set/unset/get/serialize/_parse/_clone over key=value delimited string
+accept	modules/island/util/priority-queue.ts	FBr	PriorityQueue	priority queue | enqueue(run,{priority})/dequeue()/size; binary-search insert ordered by priority
+accept	modules/island/util/lru-cache.ts	clA	LruCache	lru cache | Map-backed cache with maxSize; get() reinserts (recency), set() evicts oldest key when over maxSize
+accept	modules/island/http/merge-headers.ts	ei	mergeHeaders	merge headers | merges iterable of Headers into one; null value deletes, tracks nulls set; returns {values, nulls}
+accept	modules/island/mcp/builtin-disconnect-error.ts	k8	BuiltinMcpUserDisconnectedError	builtin mcp user disconnected error | Error subclass, this.name = 'BuiltinMcpUserDisconnectedError'
+accept	modules/island/net/sse-error.ts	wOi	SseError	sse error | Error subclass, message `SSE error: ${t}`, carries code + event
+accept	modules/island/auth/loopback-pkce-error.ts	UU	LoopbackPkceError	loopback pkce error | Error subclass, this.name = 'LoopbackPkceError', carries code + status
+accept	modules/island/mcp/socket-pool-client.ts	c3i	SocketPoolClient	socket pool client | Maintains Map of socket clients + tabRoutes; logs "Socket pool: N connected", "Adding socket to pool"; routes callTool across pooled MCP sockets
+accept	modules/island/telemetry/sentry-span-batch-exporter.ts	fjt	SpanBatchExporter	span batch exporter | export()/flush() buckets finished spans in _finishedSpanBuckets, _debouncedFlush; logs "SpanExporter dropped/exported N spans"
+accept	modules/island/mcp/remote-stdio-transport.ts	Vin	RemoteStdioTransport	remote stdio transport | throws "RemoteStdioTransport already started/not started"; log prefix [RemoteStdioTransport:serverName]; spawnAuxProcess stdin/stdout/stderr transport
+accept	modules/island/mcp/serialized-send-queue.ts	uKr	SerializedSendQueue	serialized send queue | single inflight + pending coalesce, enqueue/drain/sendWithRetry with exponential backoff jitter (baseDelayMs, maxDelayMs, jitterMs)
+accept	modules/island/aggregate-barrel.ts	kw	loadAggregateBarrel	load aggregate barrel | once-guarded function doing __exportStar/__createBinding over opentelemetry barrels into exports object
+accept	modules/island/aggregate-barrel.ts	YR	aggregateBarrelExports	aggregate barrel exports | exports object populated by __exportStar of opentelemetry barrels
+accept	modules/island/aggregate-barrel.ts	pee	aggregateBarrelInitialized	aggregate barrel initialized | once-init guard flag (set to 1) for the barrel loader
+accept	modules/island/util/generation-token.ts	oCA	GenerationCounter	generation counter | gen counter; invalidate() increments gen, current() returns gen, capture() closes over gen to detect staleness
+accept	modules/island/instrumentation/instrumentation-id-cache.ts	TQ	getCachedInstallId	get cached install id | returns cached id from getOrCreateInstallId(); caches only when result.cacheable is true
+accept	modules/island/instrumentation/instrumentation-id-cache.ts	SSA	cachedInstallId	cached install id | holds memoized install id from getOrCreateInstallId()
+accept	modules/island/net/socket-connection-error.ts	Lu	SocketConnectionError	socket connection error | Error subclass, this.name = 'SocketConnectionError'
+accept	modules/island/auth/credential-needs-interactive-error.ts	BaA	CredentialNeedsInteractiveError	credential needs interactive error | Error subclass with kind+reason, this.name = 'CredentialNeedsInteractiveError'
+accept	modules/island/github/gh-rest-client.ts	oVr	GhRestClient	gh rest client | methods rest/restPaginate/graphql, spawnGh(['auth','token','--hostname']), GitHub REST/GraphQL fetch, '[GhRestClient]' log prefix
+accept	modules/island/telemetry/desktop-event-exporter.ts	E7r	DesktopEventExporter	desktop event exporter | logDesktopEvent, buildPayload {resourceLogs/scopeLogs/logRecords}, 'OTLP event export failed', flush queue to logsUrl
+accept	modules/island/net/http2-session-cache.ts	KFr	Http2SessionCache	http2 session cache | getSession over x4e.connect (http2), sessions map keyed by authority, sessionTimeout reuse
+accept	modules/island/cowork/trace-context-propagator.ts	T6t	TraceContextPropagator	trace context propagator | inject/extract/fields, de.trace.getSpanContext, traceId/spanId/traceFlags/traceState serialize
+accept	modules/island/util/dedupe-ring-buffer.ts	Cxe	DedupeRingBuffer	dedupe ring buffer | ring array + Set with capacity/writeIdx, add/has/clear, Set used to dedupe entries
+accept	modules/island/feature/windows-roaming-paths.ts	ost	getWindowsRoamingPaths	get windows roaming paths | returns virtualRoaming/physicalRoaming under AppData\Roaming, gated on zl() and USERPROFILE
+accept	modules/island/feature/windows-roaming-paths.ts	DMA	cachedRoamingPaths	cached roaming paths | memoized result holding virtualRoaming/physicalRoaming paths
+accept	modules/island/feature/windows-roaming-paths.ts	lRe	roamingPathsResolved	roaming paths resolved | boolean guard set true after first resolution to return cached value
+accept	modules/island/workspace/workspace-trust-error.ts	KrA	WorkspaceTrustError	workspace trust error | extends Error, this.name='WorkspaceTrustError', carries cwd
+accept	modules/island/memory/rest-sync-unavailable-error.ts	Ey	RestSyncUnavailableError	rest sync unavailable error | extends Error, 'memory sync unavailable', this.name='RestSyncUnavailableError', status/body
+accept	modules/island/auth/aws-sso-error.ts	HVA	AwsSsoError	aws sso error | extends Error, message 'AWS SSO ${errorType}', errorType/status fields
+accept	modules/island/cowork/vm-disk-janitor.ts	I1r	VMDiskJanitor	vmdisk janitor | all log lines prefixed [VMDiskJanitor]; prunes/cleans VM session caches & dirs on low disk
+accept	modules/island/cowork/auto-fix-engine.ts	pnn	AutoFixEngine	auto fix engine | all log lines prefixed [AutoFixEngine]; sweeps sessions, checks PR checks/comments, wakes sessions
+accept	modules/island/batch-queue.ts	gPe	BatchQueue	batch queue | enqueue/flush/drain with maxBatchSize, maxQueueSize, backpressureResolvers, retryDelay
+accept	modules/island/plugins/hook-trie.ts	jXt	HookTrie	hook trie | wraps _trie node, insert()/search() split moduleName into trie path, stores hooks
+accept	modules/island/stream/line-decoder.ts	yz	LineDecoder	line decoder | decode(bytes)/flush(); accumulates Uint8Array, splits on newline handling carriage
+accept	modules/island/streaming/sse-line-decoder.ts	_mr	SSEDecoder	ssedecoder | decode() parses 'event'/'data' fields, joins data with \n, returns {event,data,raw}
+accept	modules/island/agent-sdk/debug-log-file.ts	Slt	initSdkDebugLogFile	init sdk debug log file | gated by DEBUG_CLAUDE_AGENT_SDK; writes "SDK debug logs:" and creates sdk-<uuid>.txt dir
+accept	modules/island/agent-sdk/debug-log-file.ts	jL	sdkDebugLogReadyPromise	sdk debug log ready promise | cached promise of mkdir for the debug dir; returned/memoized by init
+accept	modules/island/agent-sdk/debug-log-file.ts	zT	sdkDebugLogFilePath	sdk debug log file path | module var holding Ge.join(dir, `sdk-<uuid>.txt`) debug log path
+accept	modules/island/tools/tool-call-timeout-error.ts	jst	ToolCallTimeoutError	tool call timeout error | Error subclass, this.name = 'ToolCallTimeoutError'
+accept	modules/island/mcp/needs-interactive-auth-error.ts	SY	NeedsInteractiveAuthError	needs interactive auth error | Error subclass, name='NeedsInteractiveAuthError', stores serverName, "OAuth needs interactive authorization"
+accept	modules/island/install-id.ts	Uo	getInstallId	get install id | returns cached randomUUID (file install-id.ts); lazily memoizes
+accept	modules/island/install-id.ts	qiA	cachedInstallId	cached install id | module var caching the randomUUID returned by getInstallId
+accept	modules/island/cowork/teleport-to-cloud.ts	MHe	TeleportToCloudService	teleport to cloud service | [TeleportToCloud] log prefix; teleportToCloud()/checkReadiness() create cloud sessions via /v1/sessions
+accept	modules/island/search/fuzzy-path-index.ts	D1r	FuzzyPathIndex	fuzzy path index | indexes paths with charBits/lowerPaths; search() computes fuzzScore + match positions over file paths
+accept	modules/island/telemetry/instrumentation-base.ts	$Xt	InstrumentationBase	instrumentation base | OpenTelemetry: instrumentationName/Version, _tracer/_meter/_logger/_diag, _wrap/_massWrap, getModuleDefinitions()
+accept	modules/island/http/header-list-parser.ts	hYt	loadHeaderListParser	load header list parser | lazy CJS getter returning parser g() that splits comma/semicolon key=value header fields; "Unexpected character at index"
+accept	modules/island/http/header-list-parser.ts	Ate	headerListParserLoaded	header list parser loaded | init guard flag (set to 1) for the lazy module shim
+accept	modules/island/http/header-list-parser.ts	rfA	headerListParserExport	header list parser export | cached module export holding the parser function
+accept	modules/island/stream/line-decoder-2.ts	eZ	LineDecoder	line decoder | decode()/flush() buffers Uint8Array bytes, splits on \n handling carriage return
+accept	modules/island/streaming/sse-event-decoder.ts	T5i	SSEDecoder	ssedecoder | parses server-sent-event lines into {event,data,raw}; handles 'event'/'data' fields and ':' comments
+accept	modules/island/telemetry-id-generator.ts	R8t	RandomIdGenerator	random id generator | exposes generateTraceId / generateSpanId (OpenTelemetry id generator)
+accept	modules/island/storage/safe-storage-error.ts	fD	SafeStorageUnavailableError	safe storage unavailable error | Error subclass, name 'SafeStorageUnavailableError', message "safeStorage is unavailable"
+accept	modules/island/github/gh-rate-limit-error.ts	C2A	GhRateLimitError	gh rate limit error | Error subclass, name 'GhRateLimitError', holds kind ('primary')
+accept	modules/island/feature/notification-bootstrap.ts	DlA	getChromeBridgeConfig	get chrome bridge config | lazy getter caching buildChromeBridgeConfig() (d3r) result
+accept	modules/island/feature/notification-bootstrap.ts	AbA	cachedChromeBridgeConfig	cached chrome bridge config | memoized singleton holding the built chrome bridge config
+accept	modules/island/dev-server/launch-config-loader.ts	G0	LaunchConfigLoader	launch config loader | parses .claude/launch.json into server configs; getConfig/fromClaudeConfig/parseLaunchJson/gatherProjectInfo/buildCommand
+accept	modules/island/git-bash/local-trust-strategy-2.ts	NdA	AxiosHeaders	axios headers | get [Symbol.toStringTag]() returns 'AxiosHeaders'; set/get/has/delete/normalize header methods (vendor axios)
+accept	modules/island/fs/node-file-system.ts	aXi	NodeFileSystem	node file system | read/write/mkdir/stat/list/append wrapping fs (gi.readFile/writeFile/mkdir/unlink/readdir)
+accept	modules/island/auth/google-cloud-credentials.ts	wFi	GoogleCloudCredentials	google cloud credentials | label='Google Cloud credentials'; writes Vertex creds, sets GOOGLE_APPLICATION_CREDENTIALS env
+accept	modules/island/mcp/server-factory-and-zod-string-regexes.ts	tKr	createMcpToolServer	create mcp tool server | builds Server (name 'cowork-device-dispatch'), registers ListTools/CallTool request handlers over tool list
+accept	modules/island/mcp/server-factory-and-zod-string-regexes.ts	tNi	lowerAlphanumericPattern	lower alphanumeric pattern | literal /^[0-9a-z]+$/
+accept	modules/island/mcp/server-factory-and-zod-string-regexes.ts	tVA	lazyValue	lazy value | returns object with getter 'value' that calls A() once then defineProperty caches result
+accept	modules/island/mcp/server-factory-and-zod-string-regexes.ts	uNi	ipv6CidrPattern	ipv6 cidr pattern | literal IPv6 address + /prefix CIDR regex
+accept	modules/island/mcp/server-factory-and-zod-string-regexes.ts	wNi	buildStringLengthPattern	build string length pattern | returns RegExp ^[\s\S]{min,max}$ from minimum/maximum
+accept	modules/island/mcp/server-factory-and-zod-string-regexes.ts	yNi	numberPattern	number pattern | literal /^-?\d+(?:\.\d+)?/i signed decimal
+accept	modules/island/mcp/callback-transport.ts	ber	CallbackTransport	callback transport | MCP transport: sendMcpMessage callback, onclose/onerror/onmessage, start/send/close, 'Transport is closed'
+accept	modules/island/mcp/ccr-client-init-error.ts	XTA	CcrClientInitError	ccr client init error | extends Error 'CCRClient init failed: ...'; reason + httpStatus fields
+accept	modules/island/ssh/ssh-policy-error.ts	LYe	SshPolicyError	ssh policy error | extends Error, this.name='SshPolicyError'; SSH disabled/host-not-allowed by managed settings
+accept	modules/island/fs/local-file-access-error.ts	Vr	LocalFileAccessError	local file access error | extends Error, this.name='LocalFileAccessError'; message '[code] msg', stores code
+accept	modules/island/telemetry/noop-event-emitter.ts	cWe	NoopEventEmitter	noop event emitter | emit() is a no-op (empty body)
+accept	modules/island/app/window-session-controller.ts	qit	UtilityProcessMcpServerTransport	utility process mcp server transport | spawns nodeHost.js mcp-runtime via Electron utilityProcess.fork, JSON-RPC over MessageChannelMain, send/close/onmessage transport iface, sentry tags mcp.serverName
+accept	modules/island/app/window-session-controller.ts	hGi	transportIdCounter	transport id counter | module-level var incremented as this.transportId = hGi++
+accept	modules/island/telemetry/batch-uploader-queue.ts	ZTA	BatchSendQueue	batch send queue | enqueue/flush/drain/takeBatch with backpressure, config.send(batch), maxQueueSize/maxBatchSize/maxBatchBytes, droppedBatches, retry on RetryAfterError
+accept	modules/island/mcp/server-logger.ts	qpr	McpServerLogger	mcp server logger | winston createLogger, logPath from name, info/error/warn/logStatusChange, toast 'MCP ${name}' and 'mcp_server_error'
+accept	modules/island/telemetry/multi-span-processor.ts	U8t	MultiSpanProcessor	multi span processor | OTel: _spanProcessors fanout of forceFlush/onStart/onEnding/onEnd/shutdown, error 'MultiSpanProcessor: forceFlush failed'
+accept	modules/island/streaming/sse-transform-stream.ts	mOi	SseTransformStream	sse transform stream | extends TransformStream, feed() with onEvent/onError/onRetry/onComment SSE handlers
+accept	modules/island/git-bash/local-trust-strategy.ts	T4r	LocalTrustStrategy	local trust strategy | this.kind='local', trustKey/preflight (Git Bash via CLAUDE_CODE_GIT_BASH_PATH)/supportsLaunchTools/adjustSdkOptions
+accept	modules/island/rate-limit/retry-after-error.ts	f$	RetryAfterError	retry after error | extends Error with retryAfterMs field
+accept	modules/island/sessions/sessions-api-fatal-error.ts	U0	SessionsApiFatalError	sessions api fatal error | extends Error, this.name='SessionsApiFatalError', status field
+accept	modules/island/extension/no-extension-connected-error.ts	$st	NoExtensionConnectedError	no extension connected error | extends Error, this.name='NoExtensionConnectedError'
+accept	modules/island/messages/content-blocks.ts	OGe	jsonBufferKey	json buffer key | string constant value '__json_buf'
+accept	modules/island/messages/content-blocks.ts	xGe	isToolUseBlock	is tool use block | returns A.type==='tool_use' || A.type==='server_tool_use'
+accept	modules/island/mcp/ssh-mcp-server-manager.ts	IAe	SshMcpServerManager	ssh mcp server manager | log prefix "[SshMcpServerManager]"; manages SSH MCP proxy server connections (createProxyServers/createConnection)
+accept	modules/island/mcp/ssh-mcp-server-manager.ts	bG	sharedInstance	shared instance | module-level singleton returned by static getSharedInstance()
+accept	modules/island/cowork/memory-sync-client.ts	Owr	CoworkMemorySyncClient	cowork memory sync client | log prefix "[CoworkMemorySync]"; X-Client-Platform: cowork-desktop; pull/push memory entries over REST
+accept	modules/island/storage/telemetry-wired-stack-pool.ts	lH	throwTypeError	throw type error | (A) => { throw TypeError(A); }
+accept	modules/island/storage/telemetry-wired-stack-pool.ts	vQA	checkPrivateAccess	check private access | (A,e,t) => e.has(A) || throw 'Cannot ' + t; esbuild access-check helper
+accept	modules/island/storage/telemetry-wired-stack-pool.ts	iT	Stack	stack | error "instantiate Stack using Stack.create(n)"; heap/length with push/pop
+accept	modules/island/storage/telemetry-wired-stack-pool.ts	rT	Stack2	stack2 | error "instantiate Stack using Stack.create(n)"; second heap/length push/pop variant
+accept	modules/island/streaming/async-iterator-queue.ts	T8	AsyncIteratorQueue	async iterator queue | enqueue/remove/done with queue+resolvers and [Symbol.asyncIterator]
+accept	modules/island/extensions/extension-downloader.ts	Snn	initExtensionDownloader	init extension downloader | lazy CJS init exposing getPath/downloadFile/changePermissions for extensions dir
+accept	modules/island/extensions/extension-downloader.ts	UKe	downloaderInitialized	downloader initialized | once-guard flag for the lazy init (UKe || (UKe = 1, ...))
+accept	modules/island/extensions/extension-downloader.ts	jbA	extensionDownloaderModule	extension downloader module | CJS exports object populated by the init function
+accept	modules/island/validation/ajv-schema-validator.ts	n3i	AjvSchemaValidator	ajv schema validator | wraps _ajv; getValidator compiles schema and returns valid/data/errorMessage result
+accept	modules/island/hook-tree-node.ts	Poe	HookTreeNode	hook tree node | holds hooks[] and children Map (tree node)
+accept	modules/island/safe-fs/safe-fs-error.ts	rY	SafeFsError	safe fs error | extends Error; this.name = 'SafeFsError'; carries code
+accept	modules/island/extension-disconnected-error.ts	HOA	ExtensionDisconnectedMidCallError	extension disconnected mid call error | extends Error; this.name = 'ExtensionDisconnectedMidCallError'
+accept	modules/island/content/tool-use-block-guard.ts	vGe	jsonBufferKey	json buffer key | const = '__json_buf'
+accept	modules/island/content/tool-use-block-guard.ts	bGe	isToolUseBlock	is tool use block | returns true for type tool_use/server_tool_use/mcp_tool_use
+accept	modules/island/worktree/worktree-pool.ts	wFt	WorktreePool	worktree pool | all log lines prefixed [WorktreePool]; tryAcquire/releaseOrRemove/sweep/reap of pooled git worktrees
+accept	modules/island/mcp/stdio-transport.ts	Hit	StdioClientTransport	stdio client transport | throws "StdioClientTransport already started!"; spawns child process, pipes stdio, readBuffer.readMessage
+accept	modules/island/fs/bounded-file-handle.ts	BMi	BoundedFileHandle	bounded file handle | wraps a fs file handle; readFile throws "File is N bytes; maxBytes is T"; stat/read/write/streams + Symbol.asyncDispose
+accept	modules/island/net/streaming-response-promise.ts	VBA	ApiResponsePromise	api response promise | extends Promise wrapping responsePromise+parseResponse; withResponse returns {data,response,request_id: headers.get('request-id')}
+accept	modules/island/cowork/intent-warmer.ts	dzr	CoworkIntentWarmer	cowork intent warmer | log prefix [CoworkIntentWarmer]; register/signalIntent/maybeWarm warmers Map with ttlMs throttling
+accept	modules/island/cowork/user-files-path.ts	J2i	resolveCoworkUserFilesPath	resolve cowork user files path | returns coworkUserFilesPath, persists via ah('coworkUserFilesPath',..); warn prefix [resolveCoworkUserFilesPath]
+accept	modules/island/cowork/user-files-path.ts	YV	cachedCoworkUserFilesPath	cached cowork user files path | module-level memo: `if (YV) return YV` ... `YV = n` caches resolved path
+accept	modules/island/telemetry/session-metric.ts	xoA	getSessionMetric	get session metric | lazily builds metric with 'session' name and returns the singleton E9
+accept	modules/island/telemetry/session-metric.ts	E9	sessionMetricInstance	session metric instance | memoized `new B1A(u1A(), 'session', undefined)` singleton returned by getSessionMetric
+accept	modules/island/telemetry/session-metric.ts	qy	sessionMetricLoadPromise	session metric load promise | promise of E9.get().then(A => A && KW(A)) loading the persisted session metric
+accept	modules/island/rpc/rpc-call-error.ts	W$r	RpcCallError	rpc call error | extends Error; this.name='RPCCallError'; carries code and data fields
+accept	modules/island/dev-server/port-in-use-error.ts	o$	PortInUseError	port in use error | extends Error; this.name='PortInUseError'; carries port and source fields
+accept	modules/island/errors/error-base.ts	Vk	BaseError	base error | empty subclass of Error used as a base error type
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	gRe	agentMemoryPath	agent memory path | AA.join(..., 'agent', 'memory') builds the agent memory dir path
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	hRr	stripImageToolResults	strip image tool results | filters items with type==='image' out of A.tool_use_result when type==='user'
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	name	dispatchMcpServerName	dispatch mcp server name | const 'dispatch' passed as the MCP server name in createDispatchMcpServer
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	h_r	createDispatchMcpServer	create dispatch mcp server | Jw({name:'dispatch', version, tools}) builds the dispatch MCP server
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	i1r	copyPermissionOverrides	copy permission overrides | copies chromePermissionMode/chromeAllowedDomains/cuAllowedApps/cuGrantFlags/approvedToolNames
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	iBr	buildBrowserPermissionSuggestion	build browser permission suggestion | builds {toolName:`browser:${toolType}`, input, suggestions:[addRules allow]}
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	iuA	dispatchWelcomeMessage	dispatch welcome message | greeting string referencing the Dispatch tab and example asks
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	l8A	buildWelcomeMessages	build welcome messages | returns [welcome, ...optional 'choose a name for me' prompt]
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	jot	localSessionsFileName	local sessions file name | const 'local-sessions.json'
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	ly	agentDirSegment	agent dir segment | const 'agent' used as a path segment in agentMemoryPath
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	kOA	buildCoworkSessionTags	build cowork session tags | ['cowork-local', +'cowork-dispatch-child', +'cowork-scheduled']
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	o1r	applyUnsupervisedChromePermissions	apply unsupervised chrome permissions | toggles chromePermissionMode via chromePermsBeforeUnsupervised for auto/bypassPermissions
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	o8A	listSessionsToolName	list sessions tool name | const 'list_sessions'
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	omr	filterTranscriptMessages	filter transcript messages | parses JSONL entries, finds compact_boundary/preservedSegment, drops pre-boundary/compactSummary
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	pPe	collectUnconditionalAllowToolNames	collect unconditional allow tool names | gathers toolNames from addRules allow rules whose ruleContent==null
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	rBr	summarizePermissionResult	summarize permission result | returns {allowed, always, allSites} from behavior/updatedPermissions/_allowAllSites
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	s1r	mergeComputerUsePermissions	merge computer use permissions | merges cuAllowedApps by bundleId and ORs cuGrantFlags clipboardRead/Write/systemKeyCombos
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	s3	scheduledSessionType	scheduled session type | const 'scheduled' compared in buildCoworkSessionTags
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	s8A	startCodeTaskToolName	start code task tool name | const 'start_code_task'
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	sF	isAgentNamingEnabled	is agent naming enabled | isFeatureFlagOn(flagId); callers throw 'Agent naming is disabled' / set dispatch_agent_name
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	tTt	agentNamingFeatureFlagId	agent naming feature flag id | const '3558849738' feature-flag id passed to isAgentNamingEnabled
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	vx	sessionInfoToolName	session info tool name | const 'session_info'
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	yG	sessionIdPattern	session id pattern | /^[a-zA-Z0-9_-]+$/ tested against sessionId/cliSessionId before use
+accept	modules/island/agent/dispatch-sessions-and-permissions.ts	yPe	maxMessageBufferEntries	max message buffer entries | 500; messageBuffer trimmed via slice(-yPe) when length exceeds yPe+100
+accept	modules/island/cli/cli-governor.ts	F4r	CliGovernor	cli governor | '[CliGovernor]' log prefix; manages concurrency slots/cap, eviction, memory pressure
+accept	modules/island/audit/audit-log-hmac-signer.ts	D0r	AuditLogHmacSigner	audit log hmac signer | sign()/verify() maintain a _audit_hmac chain via prevHmac over JSON entries
+accept	modules/island/auth/cached-token-provider.ts	C5i	CachedTokenProvider	cached token provider | caches token by expiresAt with refresh/backgroundRefresh/invalidate
+accept	modules/island/http/multipart-form-data-part.ts	yFr	MultipartFormDataPart	multipart form data part | emits 'Content-Disposition: form-data' header + Content-Type, encode() generator
+accept	modules/island/storage/safe-storage-failure-tracker.ts	uFi	SafeStorageFailureTracker	safe storage failure tracker | tracks _lastFailure with errorKind 'ERR_SAFE_STORAGE'
+accept	modules/island/native/computer-use-loader.ts	dAA	cachedComputerUseNamespace	cached computer use namespace | memoized claude-swift computerUse namespace
+accept	modules/island/native/computer-use-loader.ts	vE	loadComputerUse	load computer use | imports @ant/claude-swift, returns .computerUse, errors if computer_use.node not built
+accept	modules/island/preview/preview-error.ts	PBA	PreviewError	preview error | Error subclass with this.name='PreviewError' and a code
+accept	modules/island/crypto/transient-decrypt-error.ts	sz	TransientDecryptError	transient decrypt error | Error subclass, message 'transient decrypt failure', name 'TransientDecryptError'
+accept	modules/island/limits/size-and-allow-predicate.ts	UYi	oneMegabyteBytes	one megabyte bytes | 1024*1024; used as default maxMetaEntrySize in tar
+accept	modules/island/limits/size-and-allow-predicate.ts	OYi	allowAllPredicate	allow all predicate | () => true; used as the default accept-all tar filter
+accept	modules/island/remote-tools-device-bridge.ts	w8t	Span	span | OpenTelemetry span impl: _spanContext, SpanStatusCode, _spanProcessor, addEvent/addLink/recordException, endTime/_duration
+accept	modules/island/plugins/manifest-loader.ts	Rrt	CredentialHelperResolver	credential helper resolver | label='credential helper'; resolve() returns bearer/headers; expiryHint mentions "credential helper's token was rejected by the inference provider"
+accept	modules/island/cache/ttl-promise-cache.ts	F0	TtlPromiseCache	ttl promise cache | ttlMs + cache Map + pending Map; isFresh by timestamp<ttlMs; get(key,factory) dedups inflight promises
+accept	modules/island/device/hardware-buddy-bridge.ts	yrn	isHardwareBuddyEnabled	is hardware buddy enabled | () => Ci('hardwareBuddyEnabled') feature-flag read
+accept	modules/island/device/hardware-buddy-bridge.ts	zlA	isDeviceConnected	is device connected | returns j_ connection state; used as connected: zlA()
+accept	modules/island/device/hardware-buddy-bridge.ts	SW	dispatchDeviceTx	dispatch device tx | guards webContents then hJA.dispatchTx(A); failure path 'device: BLE write failed'
+accept	modules/island/device/hardware-buddy-bridge.ts	B0	sendDeviceWithAck	send device with ack | Promise with per-key pending map, 'device: ... ack timeout'/'superseded'/'BLE write failed'
+accept	modules/island/device/hardware-buddy-bridge.ts	qrn	getDeviceStatus	get device status | returns { connected, error, paired }
+accept	modules/island/account/active-org-resolver.ts	NL	cachedActiveOrgUuid	cached active org uuid | module cache for resolved org, set from 'lastActiveOrg' cookie / orgUuidOverride
+accept	modules/island/account/active-org-resolver.ts	Xi	resolveActiveOrgUuid	resolve active org uuid | reads orgUuidOverride then 'lastActiveOrg' cookie, parses via DsA, memoizes
+accept	modules/island/account/active-org-resolver.ts	Mme	cookieListenerRegistered	cookie listener registered | one-shot guard before registering cookies.on('changed') listener
+accept	modules/island/mcp/newline-message-buffer.ts	Pit	NewlineMessageBuffer	newline message buffer | append(Buffer); readMessage splits on "\n", strips trailing \r, parses line; clear()
+accept	modules/island/mcp/builtin-mcp-spawn-failed-error.ts	qpt	BuiltinMcpSpawnFailedError	builtin mcp spawn failed error | Error subclass, this.name='BuiltinMcpSpawnFailedError', keeps rawCause
+accept	modules/island/permissions/tcc-repick-pending-error.ts	Hkt	TccRepickPendingError	tcc repick pending error | Error subclass, this.name='TccRepickPendingError', code ?? 'EPERM'
+accept	modules/island/auth/unauthorized-error.ts	GB	UnauthorizedError	unauthorized error | Error subclass, super(e ?? 'Unauthorized')
