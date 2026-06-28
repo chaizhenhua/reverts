@@ -1,0 +1,34 @@
+@anthropic-ai/sdk		accepted
+@opentelemetry/api	1.9.0	accepted
+@opentelemetry/context-async-hooks		accepted
+@opentelemetry/core		accepted
+@opentelemetry/instrumentation		accepted
+@opentelemetry/instrumentation-graphql		accepted
+@opentelemetry/instrumentation-http		accepted
+@opentelemetry/instrumentation-kafkajs		accepted
+@opentelemetry/instrumentation-mongodb		accepted
+@opentelemetry/instrumentation-mongoose		accepted
+@opentelemetry/instrumentation-mysql		accepted
+@opentelemetry/instrumentation-pg		accepted
+@opentelemetry/instrumentation-redis		accepted
+@opentelemetry/instrumentation-undici		accepted
+@opentelemetry/sdk-trace-base	2.2.0	accepted
+@opentelemetry/semantic-conventions		accepted
+@sentry/core	10.27.0	accepted
+@sentry/electron	7.4.0	accepted
+@sentry/node	10.27.0	accepted
+ajv		accepted
+cross-spawn		accepted
+debug	4.4.3	accepted
+execa		accepted
+fs-extra		accepted
+get-stream		accepted
+import-in-the-middle	2.0.6	accepted
+lodash		accepted
+pako		accepted
+require-in-the-middle	8.0.1	accepted
+rxjs		accepted
+semver	7.8.4	accepted
+shimmer	1.2.1	accepted
+winston		accepted
+xmldom		accepted
