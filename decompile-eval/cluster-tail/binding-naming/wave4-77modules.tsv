@@ -1,0 +1,77 @@
+accept	495	vendor/lru-cache	LRUCache class; LRU_CACHE_IGNORE_AC_WARNING / LRU_CACHE_UNBOUNDED env warnings; ttl/maxSize/fetch internals
+accept	433	vendor/anthropic-ai-sdk/beta-tool-runner	BetaToolRunner; client.beta.messages.create/stream; x-stainless-helper header; Anthropic compactionControl deprecation
+accept	480	vendor/execa	execa _parse; stripFinalNewline/preferLocal/localDir/maxBuffer/windowsHide/cleanup options
+accept	413	vendor/anthropic-ai-sdk/headers	Symbol.for('brand.privateNullableHeaders'); Headers append/delete merge helper (stainless sdk)
+accept	395	auth/oauth-constants	urn:ietf:params:oauth:grant-type:jwt-bearer; refresh_token; /v1/oauth/token; oauth-2025-04-20; oidc-federation-2026-04-01; OAuthError(statusCode/body/requestId)
+accept	488	runtime/services-init	init barrel wiring execa(_St), core runtime SI, AsyncLocalStorage(XY), lu
+accept	347	vendor/lodash/eq	eq(a,b)=a===b||a!==a&&b!==b (lodash SameValueZero comparator)
+accept	492	runtime/instrumented-builtins-init	init wiring traced JSON.parse(oB) + traced fs/process wrappers(_R)
+accept	357	vendor/lodash/base-get-tag	Object.prototype.toString + hasOwnProperty + Symbol.toStringTag (lodash baseGetTag support)
+accept	381	vendor/lodash/map-cache	lodash internal map/hash-cache chain (transitively via isKeyable)
+accept	401	vendor/anthropic-ai-sdk/errors-init	init wrapper wiring anthropic-sdk error classes (ZE: APIError base br extends Error)
+accept	490	runtime/event-emitter-init	init wrapper wiring pub-sub event emitter (subscribe/emit, Kw S4)
+accept	374	vendor/lodash/hash	__lodash_hash_undefined__ constant (lodash Hash internal)
+accept	454	fs/traced-node-fs	first-party node fs adapter object (cwd/existsSync/stat/readFile…) wrapping Hr+gi with Vg/$g span tracing and kg`fs.*` log templates
+accept	406	vendor/anthropic-ai-sdk/streaming	Stream class: fromSSEResponse/fromReadableStream/tee/toReadableStream, SSE events content_block_delta/message_start/agent.thinking
+accept	410	vendor/anthropic-ai-sdk/uploads	createForm multipart FormData builder, File-upload global check, Blob/Response handling (addFormValue $YA)
+accept	390	config/include-exclude-filter	parses comma list with '!' negation into {include,exclude,isExclusive}
+accept	484	diagnostics/hard-fail-state	lazy aE(()=>process.argv.includes('--hard-fail')) + state arrays RrA/RSt, limit 100
+accept	360	vendor/lodash/is-object	HMr(A): typeof object||function -> lodash isObject
+accept	359	vendor/lodash/base-get-tag-2	'[object Null]'/'[object Undefined]' + Symbol.toStringTag -> lodash baseGetTag
+accept	348	vendor/lodash/assoc-index-of	oZ=yMr: loops eq(A[t][0],e) -> lodash assocIndexOf
+accept	372	vendor/lodash/hash-get	'__lodash_hash_undefined__' + uyt=lNr (t===INr?undefined) -> lodash hashGet
+accept	382	vendor/lodash/map-cache-set	yyt=kNr: getMapData(this,A).set(A,e) -> lodash mapCacheSet
+accept	402	vendor/anthropic-ai-sdk/oauth-init	init thunk calling aZ (OAuth module: /v1/oauth/token, grant-type:jwt-bearer, oauth-2025-04-20)
+accept	491	runtime/event-queue-init	init thunk calling cdA which sets PDt=STr() state {eventQueue:[],sink:null}
+accept	405	vendor/anthropic-ai-sdk/line-decoder	eW.NEWLINE_CHARS=Set('\n','\r'), eW.NEWLINE_REGEXP -> SSE LineDecoder static setup
+accept	459	vendor/cross-spawn	cross-spawn internals: hookChildProcess/verifyENOENT/notFoundError, which+shebang+path-key submodules, ENOENT/comspec/windowsVerbatimArguments
+accept	400	vendor/anthropic-ai-sdk/config-loader	Anthropic SDK config/credentials/profile loader: ANTHROPIC_* env, oidc_federation/user_oauth, X-Stainless-OS, ~/.config/anthropic
+accept	396	vendor/anthropic-ai-sdk/read-env	Stainless SDK readEnv: cross-runtime globalThis.process.env / globalThis.Deno.env reader, trims, returns undefined (consumed by 400 config-loader)
+accept	365	vendor/lodash/base-is-native	lodash _baseIsNative: reIsNative regex built from Function.prototype.toString.call(hasOwnProperty), reRegExpChar, reIsHostCtor
+accept	366	vendor/lodash/get-value	lodash _getValue: A == null ? undefined : A[e]
+accept	349	vendor/lodash/array-splice	lodash internal: Array.prototype.splice binding (listCache delete helper)
+accept	376	vendor/lodash/internal-init	lodash composite init-wrapper aggregating internal helpers (fNr/hNr/oNr/vMr)
+accept	384	vendor/lodash/memoize	lodash memoize: 'Expected a function' message, fn.Cache = MapCache assignment
+accept	358	vendor/lodash/object-to-string	lodash _objectToString: Object.prototype.toString binding
+accept	387	state/app-config-signals	first-party Claude session config + signal emitters: renderTarget:'ink', workspace:'local', canDrive, transcriptSource:'local-jsonl', subscribe/emit/clear factory
+accept	393	util/validators	first-party validation/parse utils: assertPositiveInteger (throws br), uri-scheme regex ^[a-z][a-z0-9+.-]*:, safe JSON.parse, sleep, version 0.94.0
+accept	444	util/errors-init	first-party init-wrapper for error-class module (wraps ZE)
+accept	493	util/buffer-constants	first-party numeric constants: 65536/4096 sizes, char-code constants (10/32/35/94), hex regex ^[0-9a-f]+$
+accept	457	security/secret-detection-patterns	credential regex set: anthropic-api-key sk-ant, aws/github/slack/stripe tokens, [REDACTED] masking
+accept	489	fs/binary-file-extensions	Set of binary file extensions (.png/.exe/.wasm/.node/.sqlite) + 8192-byte threshold
+accept	389	runtime/disposable-registry	register/drain WeakSet of disposers, Symbol.asyncDispose/Symbol.dispose
+accept	375	vendor/lodash-hash	lodash Hash ctor: prototype clear/delete/get/has/set over this.__data__
+accept	494	git/repo-state-init	instantiates git repo-state watcher (gitDir/commonDir/repoBranches/repoWatchers) + Map cache (1000)
+accept	371	vendor/lodash-hash-delete	lodash hashDelete: delete this.__data__[key], this.size adjust
+accept	496	runtime/diagnostics-init	init aggregator: debug-log-level (SI), slow-operation/JSON (oB), lru-cache (hLr)
+accept	350	vendor/lodash-list-cache-get	lodash listCacheGet: assocIndexOf over this.__data__, returns entry[1]
+accept	378	vendor/lodash-get-map-data	lodash getMapData: __data__ string/hash/map via isKeyable
+accept	388	runtime/async-local-storage	new AsyncLocalStorage()
+accept	452	vendor/anthropic-sdk-init	init thunk -> Anthropic SDK (bl.Anthropic, api.anthropic.com, HUMAN_PROMPT/AI_PROMPT, Messages/Completions/Models/Beta)
+accept	364	vendor/lodash-to-source	lodash funcProto/funcToString + toSource (Function.prototype.toString)
+accept	456	runtime/well-formed-string	String.prototype.isWellFormed/toWellFormed feature bind
+accept	498	git/git-operations	git CLI ops: findGitRoot/getBranch/getDefaultBranch/getRemoteUrl/hasUnpushedCommits/getIsClean/getChangedFiles via gitExe rev-parse/status
+accept	458	logging/debug-config	CLAUDE_CODE_DEBUG_LOG_LEVEL, verbose/debug/info/warn/error level map, --debug/--debug-file/--debug-to-stderr flags, debug-log 'latest' symlink
+accept	472	vendor/get-stream/array-buffer	get-stream collector: gSt={init,convertChunk:{string,buffer,arrayBuffer,dataView,typedArray,others},getSize,truncateChunk,addChunk,getFinalChunk,finalize}, resizable ArrayBuffer
+accept	383	vendor/lodash/map-cache-2	lodash MapCache: QG.prototype.clear/delete/get/has/set wired from mapCache* methods
+accept	363	vendor/lodash/mask-src-key	lodash coreJsData maskSrcKey: /[^.]+$/ on keys.IE_PROTO -> 'Symbol(src)_1.'+uid
+accept	377	vendor/lodash/is-keyable	lodash isKeyable: typeof string/number/symbol/boolean & __proto__ guard, null check
+accept	391	config/config-dir	CLAUDE_CONFIG_DIR ?? ~/.claude NFC-normalized; CLAUDE_CODE_SUPERVISED flag
+accept	351	vendor/lodash/list-cache-has	lodash listCacheHas: re-export of MMr = assocIndexOf(__data__,key) > -1
+accept	379	vendor/lodash/map-cache-delete	lodash mapCacheDelete: re-export of DNr = getMapData(this,key).delete(key)
+accept	394	vendor/anthropic-ai-sdk/errors-init-2	esbuild __esm init thunk for ZE (Anthropic SDK APIError class hierarchy, status 400/401/403/404/409/422/429/500)
+accept	473	vendor/get-stream/buffer	get-stream buffer collector: hOe = globalThis.Buffer.from(A), wraps array-buffer collector (cSt)
+accept	370	vendor/lodash/hash-clear	lodash hashClear: re-export of sNr = this.__data__ = nativeCreate(null), size=0
+accept	455	runtime/noop-stub	empty no-op function QTr(){} (init placeholder, invoked by logging init)
+accept	245	vendor/execa-2	debuglog('execa'), input/inputFile options, $ template-expression stdio handling, inlined merge-stream PassThrough
+accept	392	vendor/anthropic-ai-sdk/error	APIError hierarchy: status 400/401/403/404/409/422/429/500, makeMessage, request-id, APIConnectionTimeoutError/APIUserAbortError
+accept	453	runtime/instrumented-json-parse	CLAUDE_CODE_SLOW_OPERATION_THRESHOLD_MS env + JSON.parse wrapped in span (kg`JSON.parse(...)` via Vg/$g), Symbol.dispose noop
+accept	497	git/read-config	reads .git/config and config files (Lt.readFileSync), cached getter, plus Bun.which path lookup
+accept	404	vendor/anthropic-ai-sdk/auth-init	esbuild __esm init aggregating SDK config(Wyt)/oauth-error(aZ)/error(Skr,Rkr,Nkr) modules
+accept	346	vendor/lodash/list-cache-clear	_listCacheClear: this.__data__=[], this.size=0
+accept	403	vendor/anthropic-ai-sdk/oauth-config-init	esbuild __esm init aggregating SDK config(Wyt) + oauth-error(aZ)
+accept	352	vendor/lodash/list-cache-set	re-exports kMr = _listCacheSet (this.__data__ push/assign, ++size), via _assocIndexOf
+accept	380	vendor/lodash/map-cache-get	re-exports _Nr = _mapCacheGet: getMapData(this,key).get(key)
+accept	397	vendor/anthropic-ai-sdk/encoding	declares hFe/pFe = bound TextEncoder.encode / TextDecoder.decode; imports SDK error module
+accept	483	config/claude-config-dir-init	esbuild __esm init for SR: CLAUDE_CONFIG_DIR ?? ~/.claude (NFC), CLAUDE_CODE_SUPERVISED
+accept	373	vendor/lodash/hash-has	Object.prototype.hasOwnProperty + dyt=CNr (_hashHas: nP ? e[A]!==undefined : Byt.call(e,A))
