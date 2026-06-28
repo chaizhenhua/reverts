@@ -199,12 +199,23 @@ fn load_modules(
         let original_name = row.get::<_, String>(2)?;
         let semantic_name = row.get::<_, Option<String>>(3)?;
         let module_path_override = row.get::<_, Option<String>>(9)?;
-        let semantic_path = module_path_override
+        let override_path = module_path_override
             .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| module_semantic_path(id, semantic_name.as_deref(), &original_name));
+            .filter(|value| !value.is_empty());
+        // Route an agent/reference override into the canonical
+        // `modules/<id>-<slug>.ext` form. reverts-analyze then recovers the clean
+        // layout path (dropping the `modules/<id>-` prefix) when it is
+        // multi-segment, globally unique, and not an asset owner — the same
+        // safety-guarded mechanism the rest of the module paths already flow
+        // through. Without the prefix the planner can't tell a deliberate
+        // hierarchical override from a raw leaked name, so an extension-less
+        // override (`vendor/lru-cache`) fell back to a per-id directory
+        // (`modules/495-vendor/lru-cache.ts`) that fragments the `vendor/` tree.
+        let semantic_path = match override_path {
+            Some(path) => namespaced_module_path_override(id, path),
+            None => module_semantic_path(id, semantic_name.as_deref(), &original_name),
+        };
         let category = row.get::<_, Option<String>>(4)?;
 
         Ok(ModuleRow {
@@ -594,6 +605,31 @@ fn module_kind_from_category(category: Option<&str>) -> StoredModuleKind {
     }
 }
 
+/// Render an agent/reference `module_path_overrides` value (e.g.
+/// `vendor/lru-cache`, `auth/oauth-constants`, `tools/MCPTool/widget.tsx`) in the
+/// canonical namespaced `modules/<id>-<slug>.ext` form that reverts-analyze's
+/// clean-layout recovery understands. A leading `modules/` root is dropped and a
+/// `.tsx` extension is preserved (JSX files must stay `.tsx`); every other source
+/// extension is normalized to `.ts`. The `<id>-` prefix guarantees uniqueness up
+/// front and is removed downstream only when recovery proves the clean path is
+/// unique and not an asset owner.
+fn namespaced_module_path_override(id: i64, value: &str) -> String {
+    let trimmed = value.trim().trim_matches('/');
+    let rooted = trimmed.strip_prefix("modules/").unwrap_or(trimmed);
+    let (stem, extension) = match rooted.strip_suffix(".tsx") {
+        Some(stem) => (stem, "tsx"),
+        None => {
+            let stem = [".ts", ".jsx", ".mjs", ".cjs", ".js"]
+                .iter()
+                .find_map(|extension| rooted.strip_suffix(extension))
+                .unwrap_or(rooted);
+            (stem, "ts")
+        }
+    };
+    let slug = path_slug(stem);
+    format!("modules/{id}-{slug}.{extension}")
+}
+
 fn module_semantic_path(id: i64, semantic_name: Option<&str>, original_name: &str) -> String {
     let seed = semantic_name
         .map(str::trim)
@@ -759,6 +795,32 @@ mod tests {
         PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, PackageAttributionStatus,
         PackageEmissionMode,
     };
+
+    #[test]
+    fn namespaced_module_path_override_roots_and_preserves_extension() {
+        use super::namespaced_module_path_override;
+        // Extension-less hierarchical override: rooted + `.ts`, id-prefixed for
+        // recovery (analyze later drops the prefix → `modules/vendor/lru-cache.ts`).
+        assert_eq!(
+            namespaced_module_path_override(495, "vendor/lru-cache"),
+            "modules/495-vendor/lru-cache.ts"
+        );
+        // `.tsx` is preserved for JSX modules.
+        assert_eq!(
+            namespaced_module_path_override(10, "tools/MCPTool/widget.tsx"),
+            "modules/10-tools/MCPTool/widget.tsx"
+        );
+        // A redundant non-tsx source extension normalizes to `.ts`.
+        assert_eq!(
+            namespaced_module_path_override(480, "vendor/execa.js"),
+            "modules/480-vendor/execa.ts"
+        );
+        // A leading `modules/` root is dropped, not doubled.
+        assert_eq!(
+            namespaced_module_path_override(7, "modules/auth/oauth-constants.ts"),
+            "modules/7-auth/oauth-constants.ts"
+        );
+    }
 
     #[test]
     fn sqlite_project_loader_builds_valid_bundle_without_live_database() {
@@ -1375,7 +1437,13 @@ mod tests {
             .iter()
             .find(|module| module.id.0 == 11)
             .expect("package module");
-        assert_eq!(app.semantic_path, "tools/MCPTool/classifyForCollapse.tsx");
+        // The override arrives in the canonical namespaced form (preserving the
+        // `.tsx` extension); reverts-analyze later recovers the clean
+        // `tools/MCPTool/classifyForCollapse.tsx` layout path.
+        assert_eq!(
+            app.semantic_path,
+            "modules/10-tools/MCPTool/classifyForCollapse.tsx"
+        );
         assert_eq!(package.semantic_path, "modules/11-lodash/map.ts");
     }
 
