@@ -1,0 +1,173 @@
+accept	state/app-config-signals.ts	Syt	DEFAULT_APP_CONFIG	default app config | default app config: renderTarget 'ink', workspace 'local', transcriptSource 'local-jsonl'
+accept	state/app-config-signals.ts	Kw	initAppConfigSignals	init app config signals | lazy init thunk building default app config and signal emitters (subscribe/emit)
+accept	fs/binary-file-extensions.ts	Vbr	initBinaryFileExtensions	init binary file extensions | nt(() => ...) init thunk building Set of binary file extensions (.png,.zip,.exe,...)
+accept	util/buffer-constants.ts	USt	HEX_PATTERN	hex pattern | regex /^[0-9a-f]+$/ matches lowercase hex pattern digits
+accept	util/buffer-constants.ts	nLr	initHexPattern	init hex pattern | lazy init thunk assigning hex pattern regex /^[0-9a-f]+$/
+accept	config/claude-config-dir-init.ts	Tbr	initClaudeConfigDir	init claude config dir | lazy init thunk calling config-dir SR(); filename claude-config-dir-init
+accept	modules/island/plugins/cli-manifest-validation.ts	Ult	baseToString	base to string | lodash basetostring: converts value to string, handles -0 and symbol
+accept	modules/island/plugins/cli-manifest-validation.ts	Uoi	isNewRootResultShape	is new root result shape | validates new-root result shape: ok boolean, newRoot string, errorCode
+accept	modules/island/plugins/cli-manifest-validation.ts	VFr	applyBeforeRedirects	apply before redirects | axios: applies beforeRedirects.proxy and beforeRedirects.config hooks
+accept	modules/island/plugins/cli-manifest-validation.ts	Vl	convertZodToJsonSchema	convert zod to json schema | recursive converts zod _zod toJSONSchema; metadataRegistry; 'Non-representable type' schema error
+accept	modules/island/plugins/cli-manifest-validation.ts	Vre	maybeMatch	maybe match | returns first regex match or null (balanced-match maybe-match helper)
+accept	modules/island/plugins/cli-manifest-validation.ts	Vzt	findBalancedRange	find balanced range | finds balanced [start,end] index range between open/close tokens
+accept	modules/island/plugins/cli-manifest-validation.ts	W4i	time	time | zod string schema factory with format 'time'
+accept	modules/island/plugins/cli-manifest-validation.ts	WRe	greaterThan	greater than | zod check 'greater_than' (greater than value), inclusive false
+accept	modules/island/plugins/cli-manifest-validation.ts	WUr	parseBracketPath	parse bracket path | parses property path tokens incl. [bracket] notation \w+|[\w*]
+accept	modules/island/plugins/cli-manifest-validation.ts	ZUr	formDataToJson	form data to json | converts FormData entries to nested JSON, __proto__-guarded buildPath
+accept	modules/island/plugins/cli-manifest-validation.ts	fC	schemaHasTransform	schema has transform | checks zod schema has a transform effect, recursing innerType/element
+accept	modules/island/plugins/cli-manifest-validation.ts	kPt	parseVersionComparator	parse version comparator | parses comparator op (==→=), version, versionSegments, prerelease, build; 'Invalid range'
+accept	modules/island/plugins/cli-manifest-validation.ts	l3e	splitTopLevelCommas	split top level commas | splits string on top-level commas, treating {braces} as one group (brace-expansion)
+accept	modules/island/plugins/cli-manifest-validation.ts	o3e	balancedMatch	balanced match | balanced-match: finds {start,end,pre,body,post} for balanced delimiters
+accept	modules/island/plugins/cli-manifest-validation.ts	pLe	matchesAnyExcludePattern	matches any exclude pattern | true if name matches any exclude regex pattern (JQr.some test)
+accept	modules/island/plugins/cli-manifest-validation.ts	sUt	getCachedOrStoredToken	get cached or stored token | returns cached token from map ?? reads stored token by issuer origin key
+accept	modules/island/plugins/cli-manifest-validation.ts	tqt	mergeSessionMetadata	merge session metadata | merges metadata into per-connection map guarded by sessionId
+accept	modules/island/plugins/cli-manifest-validation.ts	uD	isCustomThirdPartyInference	is custom third party inference | hasCustomInferenceConfig and not 1p; '[custom-3p]' custom third-party inference
+accept	modules/island/plugins/cli-manifest-validation.ts	zUr	arrayToObject	array to object | copies array-indexed keys into plain object (axios arrayToObject)
+accept	logging/debug-config.ts	TcA	LOG_LEVELS	log levels | maps log levels verbose/debug/info/warn/error to numeric priorities
+accept	logging/debug-config.ts	ODt	getDebugLogLevel	get debug log level | memoized: reads CLAUDE_CODE_DEBUG_LOG_LEVEL env, defaults to 'debug' log level
+accept	logging/debug-config.ts	vcA	isDebugEnabled	is debug enabled | memoized: true if DEBUG/DEBUG_SDK env or --debug/-d args set debug mode
+accept	logging/debug-config.ts	xDt	getDebugFilter	get debug filter | memoized: parses --debug= argument value into include/exclude debug filter
+accept	logging/debug-config.ts	fHA	isDebugToStderr	is debug to stderr | memoized: true if --debug-to-stderr or -d2e args present for debug stderr
+accept	logging/debug-config.ts	hHA	getDebugFilePath	get debug file path | memoized: resolves --debug-file= / --debug-file arg to debug log file path
+accept	logging/debug-config.ts	i9A	updateLatestDebugLogSymlink	update latest debug log symlink | async: symlinks current debug log file to 'latest'
+accept	logging/debug-config.ts	DTr	MAX_DEBUG_LOG_BYTES	max debug log bytes | 10485760 = 10*1024*1024 bytes, debug log file size constant
+accept	runtime/diagnostics-init.ts	pLr	initDiagnostics	init diagnostics | diagnostics init; wires lru-cache debug-config instrumented-json-parse
+accept	util/errors-init.ts	DDt	initErrorsModule	init errors module | errors-init lazy-init thunk invoking anthropic-ai-sdk error module ZE()
+accept	runtime/event-emitter-init.ts	bSt	initEventEmitter	init event emitter | event emitter init lazy thunk; wires app-config-signals
+accept	runtime/event-queue-init.ts	EdA	initEventQueue	init event queue | event queue init lazy thunk; wires cross-spawn
+accept	diagnostics/hard-fail-state.ts	Gbr	initHardFailState	init hard fail state | hard fail state init; checks process.argv.includes(--hard-fail)
+accept	diagnostics/hard-fail-state.ts	Lbr	MAX_ERROR_LOG_SIZE	max error log size | max error log size 100; RrA.length >= Lbr && RrA.shift()
+accept	diagnostics/hard-fail-state.ts	RrA	errorLog	error log | error log bounded buffer of {error,timestamp}; shift when over limit
+accept	diagnostics/hard-fail-state.ts	RSt	pendingErrors	pending errors | pending errors queued {type:error,error} when reporter is null
+accept	diagnostics/hard-fail-state.ts	_Oe	errorReporter	error reporter | error reporter; _Oe.logError(e) and _Oe===null until initialized
+accept	config/include-exclude-filter.ts	kyt	parseIncludeExcludeFilter	parse include exclude filter | memoized parser splitting comma list; ! prefix -> exclude, returns include/exclude/isExclusive
+accept	config/include-exclude-filter.ts	ZNr	initIncludeExcludeFilter	init include exclude filter | nt(() => ...) init thunk for include-exclude-filter
+accept	runtime/instrumented-builtins-init.ts	cZ	initInstrumentedBuiltins	init instrumented builtins | init instrumented builtins; wires traced-node-fs and instrumented-json-parse
+accept	runtime/noop-stub.ts	QTr	noop	noop | noop stub empty function
+accept	auth/oauth-constants.ts	Ikr	JWT_BEARER_GRANT_TYPE	jwt bearer grant type | 'urn:ietf:params:oauth:grant-type:jwt-bearer' oauth jwt bearer grant type
+accept	auth/oauth-constants.ts	Ekr	REFRESH_TOKEN_GRANT_TYPE	refresh token grant type | 'refresh_token' oauth refresh token grant type string
+accept	auth/oauth-constants.ts	Hyt	OAUTH_TOKEN_ENDPOINT_PATH	oauth token endpoint path | '/v1/oauth/token' oauth token endpoint path
+accept	auth/oauth-constants.ts	_cA	OAUTH_VERSION	oauth version | 'oauth-2025-04-20' oauth version/beta header string
+accept	auth/oauth-constants.ts	Ckr	OIDC_FEDERATION_VERSION	oidc federation version | 'oidc-federation-2026-04-01' oidc federation version string
+accept	auth/oauth-constants.ts	Jyt	OAUTH_ERROR_FIELDS	oauth error fields | Set of 'error','error_description','error_uri' oauth error response fields
+accept	auth/oauth-constants.ts	aZ	initOAuthConstants	init oauth constants | lazy init thunk building oauth error field set and oauth error class
+accept	modules/island/auth/oauth.ts	n4i	createRegexStringCheck	create regex string check | zod string_format regex check, sets pattern; create regex string check
+accept	modules/island/auth/oauth.ts	n9i	deleteHashEntry	delete hash entry | delete key from __data__ hash, decrement size; hash entry delete
+accept	modules/island/auth/oauth.ts	nAr	isSymbol	is symbol | returns true for typeof symbol or symbol tag; is symbol check
+accept	modules/island/auth/oauth.ts	o4i	createLowercaseStringCheck	create lowercase string check | zod string_format lowercase; create lowercase string check
+accept	modules/island/auth/oauth.ts	oF	settleHttpResponse	settle http response | axios settle: validateStatus, 'request failed with status code', resolve/reject http response
+accept	modules/island/auth/oauth.ts	oIA	interopDefaultModule	interop default module | __esModule interop via Reflect.construct on default; interop default module
+accept	modules/island/auth/oauth.ts	oaA	gzipEncode	gzip encode | fflate deflate qb plus crc32 trailer and isize length; gzip encode buffer
+accept	modules/island/auth/oauth.ts	oZr	matchFirstRegexPattern	match first regex pattern | iterates regex/value pairs, returns value on test(A); match first regex pattern
+accept	modules/island/auth/oauth.ts	p9i	sameValueZero	same value zero | A===e or both NaN; same value zero equality handling nan
+accept	modules/island/auth/oauth.ts	pBt	dateStrategyToJsonSchema	date strategy to json schema | date strategy to json schema; format date-time/date
+accept	modules/island/auth/oauth.ts	pKi	floatModuloWithExponent	float modulo with exponent | float modulo handling decimals and exponent; o%s/10^n with exponent
+accept	modules/island/auth/oauth.ts	pTi	createEndsWithStringCheck	create ends with string check | zod string_format ends_with, suffix; create ends with string check
+accept	modules/island/auth/oauth.ts	pxt	subtractHrtimePair	subtract hrtime pair | subtract [sec,nanos] hrtime pairs with borrow; subtract hrtime pair
+accept	modules/island/auth/oauth.ts	q7i	appendArrayInPlace	append array in place | copies elements of e onto end of A; append array in place
+accept	modules/island/auth/oauth.ts	qXi	isValidIndex	is valid index | integer, greater than -1, less than length; valid index check
+accept	modules/island/auth/oauth.ts	qnr	createVoidSchema	create void schema | zod type 'void'; create void schema
+accept	modules/island/auth/oauth.ts	s4i	createUppercaseStringCheck	create uppercase string check | zod string_format uppercase; create uppercase string check
+accept	modules/island/auth/oauth.ts	s9t	registerSpanStartHandler	register span start handler | subscribes on('spanStart') of sentry client; register span start handler
+accept	modules/island/auth/oauth.ts	sI	schemaHasTransform	schema has transform | walks zod def, returns true for 'transform'/pipe; schema has transform
+accept	modules/island/auth/oauth.ts	sTi	createDurationStringCheck	create duration string check | zod string_format duration; create duration string check
+accept	modules/island/auth/oauth.ts	t8t	subtractTimestampPair	subtract timestamp pair | subtract [sec,frac] timestamp pairs with borrow; subtract timestamp pair
+accept	modules/island/auth/oauth.ts	t9t	runWithCallback	run with callback | runs fn, isThenable handling, node callback e(err,result); run with callback
+accept	modules/island/auth/oauth.ts	ttA	isUnknownValue	is unknown value | A === An.UNKNOWN; is unknown value
+accept	modules/island/auth/oauth.ts	uOr	applyWithArgsArray	apply with args array | returns fn doing A.apply(null,e); apply with args array
+accept	modules/island/auth/oauth.ts	uUe	isUserActivationState	is user activation state | type guard checks hasUserActivation boolean; user activation state
+accept	modules/island/auth/oauth.ts	v3e	graphqlInstrumentationConfig	graphql instrumentation config | ignoreResolveSpans, useOperationNameForRootSpan defaults; graphql instrumentation config
+accept	modules/island/auth/oauth.ts	w9i	findPairIndexByKey	find pair index by key | scans A[t][0] equals e returns index; find pair index by key
+accept	modules/island/auth/oauth.ts	wPe	safeParseJson	safe parse json | JSON.parse then zod safeParse, returns data or null; safe parse json
+accept	modules/island/auth/oauth.ts	xHA	mergeDeepCaseless	merge deep caseless | axios caseless recursive merge with __proto__ guard; merge deep caseless
+accept	modules/island/auth/oauth.ts	xMi	floatModulo	float modulo | float modulo via decimal places, n%o/10^r; float modulo
+accept	modules/island/auth/oauth.ts	xTi	createDurationStringSchema	create duration string schema | binds duration string-format builder (OTi); create duration string schema
+accept	modules/island/auth/oauth.ts	xsA	createMinLengthCheck	create min length check | zod check 'min_length' with minimum; create min length check
+accept	modules/island/auth/oauth.ts	y0	sanitizePermissionMode	sanitize permission mode | gates bypassPermissions/skip_all_permission_checks; sanitize permission mode
+accept	modules/island/auth/oauth.ts	yAr	getValueAtPath	get value at path | walks object by path keys (baseGet); get value at path
+accept	modules/island/auth/oauth.ts	yZ	forEachKeyOrIndex	for each key or index | axios forEach: array index or Object.keys callback; for each key or index
+accept	modules/island/auth/oidc.ts	fTi	stringIncludesCheck	string includes check | zod string 'includes' format check builder, includes:A
+accept	modules/island/auth/oidc.ts	fXr	subscribeToChange	subscribe to change | hb.on('change',cb) returns removeListener; subscribe to change events
+accept	modules/island/auth/oidc.ts	flr	pickByPredicate	pick by predicate | iterates paths, gets value, runs predicate, sets into result (pick by predicate)
+accept	modules/island/auth/oidc.ts	g4i	stringStartsWithCheck	string starts with check | zod 'starts_with' string format check with prefix
+accept	modules/island/auth/oidc.ts	g7e	parseSignDisplayOptions	parse sign display options | parses 'sign-auto'/'sign-accounting' into signDisplay/currencySign sign display options
+accept	modules/island/auth/oidc.ts	gGe	ensureDoubleQuoted	ensure double quoted | ensure string wrapped in double quotes if not already quoted
+accept	modules/island/auth/oidc.ts	gI	schemaHasTransform	schema has transform | walks zod schema, returns true on 'transform'/'pipe' (schema has transform)
+accept	modules/island/auth/oidc.ts	gOt	mergeModuleNamespaces	merge module namespaces | merge module namespaces: copies property descriptors, freeze with toStringTag 'Module'
+accept	modules/island/auth/oidc.ts	gS	getSchemaMethodLiteral	get schema method literal | returns schema method literal; throws 'Schema is missing a method literal'
+accept	modules/island/auth/oidc.ts	hAr	toStringOrEmpty	to string or empty | returns empty string when nullish else lodash toString
+accept	modules/island/auth/oidc.ts	hTi	stringPrefixCheck	string prefix check | zod 'starts_with' string format check with prefix
+accept	modules/island/auth/oidc.ts	hXi	stackSet	stack set | lodash stack set: upgrades listCache to MapCache past threshold
+accept	modules/island/auth/oidc.ts	i9i	hashClear	hash clear | lodash hash clear: resets __data__ and size to 0
+accept	modules/island/auth/oidc.ts	iEr	invokeKeyCallback	invoke key callback | invoke key callback: KiA.get(key) called with value
+accept	modules/island/auth/oidc.ts	iJA	getWindowIfAlive	get window if alive | get window if alive: returns Qs unless destroyed else null
+accept	modules/island/auth/oidc.ts	jRe	numberLessThanCheck	number less than check | zod 'less_than' number check, inclusive false
+accept	modules/island/auth/oidc.ts	jUr	buildUrlSearchParams	build url search params | builds URLSearchParams via visitor, base64-encodes buffers (url search params)
+accept	modules/island/auth/oidc.ts	k7i	isPrototype	is prototype | lodash isPrototype: compares value to its constructor prototype
+accept	modules/island/auth/oidc.ts	k9i	listCacheSet	list cache set | lodash listCache set: assoc-array push or replace by index
+accept	modules/island/auth/oidc.ts	kcr	assignIfChanged	assign if changed | assign if changed: sets A[e]=t only when value differs or key missing
+accept	modules/island/auth/oidc.ts	kdt	isKnownVmError	is known vm error | matches known vm/hypervisor error regexes used by classifyVmError
+accept	modules/island/auth/oidc.ts	lAr	memoizeWithCap	memoize with cap | lodash memoize with cap: clears cache at cap size
+accept	modules/island/auth/oidc.ts	lDi	matchesIpVersion	matches ip version | tests v4/v6 ip address regex (matches ip version)
+accept	modules/island/auth/oidc.ts	lGe	isStringValueRecord	is string value record | object non-array with all string values (string value record)
+accept	modules/island/auth/oidc.ts	lKr	extractNestedErrorMessage	extract nested error message | returns .message or nested .error.message (extract nested error message)
+accept	modules/island/auth/oidc.ts	lXi	stackClear	stack clear | lodash stack clear: resets __data__ to listCache, size 0
+accept	modules/island/auth/oidc.ts	mAr	toKeyString	to key string | converts to string key, '-0' for negative zero, passes strings/symbols
+accept	modules/island/auth/oidc.ts	mI	toEsmNamespace	to esm namespace | builds esm Module namespace (toStringTag 'Module'), copies props, sets default
+accept	modules/island/auth/oidc.ts	mQA	getPrimaryDisplay	get primary display | get primary display: returns screen display with workArea
+accept	modules/island/auth/oidc.ts	wBt	stringSchemaToJsonSchema	string schema to json schema | builds string json schema from zod checks (minLength, format email/uri/uuid)
+accept	git/read-config.ts	RLr	createGitConfigReader	create git config reader | factory returns a cached reader function (.cache) for git read-config
+accept	git/read-config.ts	TLr	readGitConfigFile	read git config file | reads git config file via join(.git, config)/join(config) readFileSync utf-8, returns content
+accept	git/read-config.ts	yLr	initGitConfig	init git config | nt(() => ...) init thunk in git read-config module
+accept	git/repo-state-init.ts	QLr	initRepoState	init repo state | nt(() => ...) init thunk in repo-state-init; builds repo state map/store
+accept	git/repo-state-init.ts	uU	repoStateMap	repo state map | uU = new Map() in repo-state-init thunk; repo state map
+accept	security/secret-detection-patterns.ts	pTr	initSecretDetectionPatterns	init secret detection patterns | nt(() => ...) init thunk building secret detection regex patterns
+accept	security/secret-detection-patterns.ts	LDt	SECRET_DETECTION_PATTERNS	secret detection patterns | array of {id,source,confidence} secret detection patterns (aws/github/anthropic-api-key, jwt, private-key)
+accept	runtime/services-init.ts	kSt	initServices	init services | services-init aggregator wires execa async-local-storage debug-config anthropic-sdk hard-fail-state
+accept	runtime/services-init.ts	mHA	MILLISECONDS_PER_SECOND	milliseconds per second | milliseconds per second value 1e3=1000; used in timeout 10 * yHA * mHA
+accept	runtime/services-init.ts	yHA	SECONDS_PER_MINUTE	seconds per minute | seconds per minute value 60; used in timeout 10 * yHA * mHA
+accept	modules/island/agent/session-error-classification.ts	YZi	safeToString	safe to string | safe to string: calls PZi toString then A+'' fallback, returns '' for null
+accept	modules/island/agent/session-error-classification.ts	Zqi	createDurationCheck	create duration check | create zod duration string_format check (format 'duration')
+accept	modules/island/agent/session-error-classification.ts	Z4i	duration	duration | zod duration string format check (format 'duration')
+accept	modules/island/agent/session-error-classification.ts	ZMi	formatErrorTree	format error tree | format zod issues into nested _errors tree (invalid_union/invalid_key/path)
+accept	modules/island/agent/session-error-classification.ts	ZYi	insertListNode	insert list node | insert node into linked list: new node, fixes head/tail/prev/next, length++
+accept	modules/island/agent/session-error-classification.ts	Zj	createCustomIssue	create custom issue | create zod custom issue object: code 'custom', message, input, inst
+accept	modules/island/agent/session-error-classification.ts	_9i	listCacheGet	list cache get | lodash list cache get: this.__data__ assoc lookup, returns stored value
+accept	modules/island/agent/session-error-classification.ts	_Ji	hasMatchingHeader	has matching header | check if headers (Headers/array/object) contain any matching name from list, case-insensitive
+accept	modules/island/agent/session-error-classification.ts	aT	prependIssuePath	prepend issue path | prepend path segment to each zod issue.path via unshift
+accept	modules/island/agent/session-error-classification.ts	_Xi	assignValue	assign value | lodash assignValue: assign value to A[e] unless equal existing own property
+accept	modules/island/agent/session-error-classification.ts	_nr	ipv4	ipv4 | zod ipv4 string format check (format 'ipv4')
+accept	modules/island/agent/session-error-classification.ts	a4i	createIncludesCheck	create includes check | create zod string_format check with format 'includes' and includes value
+accept	modules/island/agent/session-error-classification.ts	cWA	createIpv4Check	create ipv4 check | create zod ipv4 string_format check (format 'ipv4')
+accept	modules/island/agent/session-error-classification.ts	g7A	checkFileAccessConsent	check file access consent | check file access consent via dialog 'File Access Request'; records user approval, throws USER_DENIED
+accept	modules/island/auth/sso.ts	aUi	clearPathCache	clear path cache | uCA.clearAll(); uCA is the path cache (cf deleteCachedPath)
+accept	modules/island/auth/sso.ts	blr	readConfigFileOrNull	read config file or null | reads and JSON-parses config file, returns object or null
+accept	modules/island/auth/sso.ts	bnr	jwt	jwt | zod jwt string-format check builder, format:'jwt'
+accept	modules/island/auth/sso.ts	cFi	clearAllCaches	clear all caches | SCA.clear() and DCA.clearAll() clear all caches
+accept	modules/island/auth/sso.ts	cVr	computeRemainingSeconds	compute remaining seconds | Math.max(0, round(A - e/1000)) computes remaining seconds
+accept	modules/island/auth/sso.ts	cYt	normalizePathSeparator	normalize path separator | replaces platform path separator with target separator
+accept	modules/island/auth/sso.ts	cdt	isChicagoForceEnabled	is chicago force enabled | returns false; chicago force-enable override consumed by isChicagoFlagEnabled
+accept	modules/island/auth/sso.ts	clr	flatRest	flat rest | lodash flatRest: overRest with flatten + setToString
+accept	modules/island/auth/sso.ts	cnr	getSchemaDescription	get schema description | returns schema .description, used by describeSchemaFields
+accept	modules/island/auth/sso.ts	dGi	parseJsonAndValidate	parse json and validate | JSON.parse then schema parse/validate (parse json and validate)
+accept	modules/island/auth/sso.ts	dUi	clearCaches	clear caches | fCA.clear() and QCA.clearAll() clear caches
+accept	modules/island/auth/sso.ts	dWA	jwtStringCheck	jwt string check | builds zod string check with format:'jwt' (jwt string check)
+accept	modules/island/auth/sso.ts	djr	sliceBeforeDelimiter	slice before delimiter | returns substring before delimiter jrA (slice before delimiter)
+accept	modules/island/auth/sso.ts	e9i	getNative	get native | lodash getNative: returns value if native function else undefined
+accept	modules/island/auth/sso.ts	fGi	isElectronProcess	is electron process | checks 'type' in process (electron process.type)
+accept	modules/island/auth/sso.ts	fPt	createValueMatcher	create value matcher | create value matcher: returns fn input===A?e:t
+accept	modules/island/auth/sso.ts	fUi	buildSsoDiscoveryUrl	build sso discovery url | appends discovery path to base; builds sso discovery url for fetchSsoDiscovery
+accept	modules/island/auth/sso.ts	nqt	getMcpServerEntry	get mcp server entry | Mv.get(key) mcp server entry; result has serverInfo
+accept	modules/island/auth/sso.ts	vlr	getConfigFilePath	get config file path | joins base dir with config filename; config file path read by blr
+accept	modules/island/auth/sso.ts	zB	getFsModule	get fs module | returns fs module (readSync/readFileSync used)
+accept	modules/island/agent/tool-permissions.ts	HOr	getCurrentActivityState	get current activity state | get current activity state from map keyed by async-context (activityCallback/heartbeatTimer)
+accept	modules/island/agent/tool-permissions.ts	IXr	isWindowWebContents	is window web contents | check if given webContents belongs to the live window
+accept	modules/island/agent/tool-permissions.ts	Ilr	isIterateeCall	is iteratee call | lodash isIterateeCall guard: value is an iteratee call arg, checks index/key and eq
+accept	modules/island/agent/tool-permissions.ts	IoA	buildMetricValueMap	build metric value map | build map of metric name to {value, unit} from telemetry attributes
+accept	modules/island/agent/tool-permissions.ts	JSr	stripExistingJsonScriptTag	strip existing json script tag | strip existing json script tag via regex before re-inject (used in injectJsonScriptIntoHtml)
+accept	modules/island/agent/tool-permissions.ts	oZe	isKnownExtensionType	is known extension type | check extension type is known via set; used in isInstalledExtensionInfo
+accept	util/validators.ts	Lyt	tryParseJson	try parse json | wraps JSON.parse in try/catch, returns undefined on parse failure
+accept	util/validators.ts	Akr	hasUriScheme	has uri scheme | tests regex /^[a-z][a-z0-9+.-]*:/i matching a uri scheme prefix
+accept	util/validators.ts	E0	VERSION	version | '0.94.0' semantic version string literal
+accept	util/validators.ts	tkr	delay	delay | returns promise resolved via setTimeout after given ms, a delay/sleep
+accept	runtime/well-formed-string.ts	adA	initWellFormedString	init well formed string | well formed string polyfill init; String.prototype.isWellFormed/toWellFormed
