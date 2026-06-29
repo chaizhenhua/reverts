@@ -55,3 +55,39 @@ which reproduces in the original app too.
 For a full visual launch, use real Electron 41.6.1 with a display (see the
 real-Electron recipe in the project memory); this smoke is the deterministic,
 headless, CI-friendly proxy.
+
+## Real launch (no mocks) — `brand-launch.sh`
+
+`brand-launch.sh <generated-app> <source-Claude.app> <electron-runtime> [secs]`
+runs the REAL recovered code under real Electron 41.6.1 with the real natives
+(`@ant/*`, `node-pty`, `ws` from the decompile's `assets/`) and real runtime
+packages — zero mocks. Validated: the app boots, **creates a real window**, and
+the renderer loads **https://claude.ai/login** (real growthbook feature-flag
+fetch, hCaptcha). This is the authoritative GUI validation.
+
+### Icon mechanism (why the dock icon was wrong, and the fix)
+
+Root cause is an **asset-extraction gap, in two layers**:
+
+1. The decompiler imports the app's **asar** (code + node_modules) but NOT the
+   surrounding **`.app/Contents/Resources` shell files** — `electron.icns` (the
+   dock icon) and `TrayIconTemplate*.png` (loaded at runtime via
+   `getResourcesDir()` → `process.resourcesPath`). They sit OUTSIDE the asar and
+   are referenced by dynamic path, so static asar-only import never captured
+   them: `assets/` has zero icon files.
+2. The recovered code has **no `app.dock.setIcon`** call, so the macOS dock icon
+   is purely **bundle-driven** (`Info.plist CFBundleIconFile`). A bare
+   `electron .` can therefore never show the Claude icon.
+
+`brand-launch.sh` is the mechanism fix at the packaging layer: it (a) stages the
+shell resources (`electron.icns` + tray pngs + locale files) from the source
+`.app`, and (b) wraps the recovered app in a branded `.app`
+(`CFBundleName=Claude`, `CFBundleIconFile=electron` → Claude's `electron.icns`),
+so the **dock icon is correct** and the tray icon image resolves.
+
+**Durable upstream fix:** extend `import-unpacked` to capture the source bundle's
+`Contents/Resources` shell assets (icons, tray, locales, favicon) into the
+generated output's `assets/` at the resources-dir path. The tray *menu* labels
+(`formatIntlMessage`) need the app's own i18n message catalog — the same
+shell-resource class, a separate file — and are staged by the same fix.
+
