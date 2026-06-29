@@ -89,6 +89,38 @@ Source-unit roles assigned during inventory: `main`, `preload`, `renderer`,
 [electron-artifact-model.md](references/electron-artifact-model.md#role-heuristics)
 for the role-assignment heuristics.
 
+### App-shell resources (icons, tray, locales) — required for a correct icon
+
+The main process loads brand/shell resources by `process.resourcesPath`-relative
+path (e.g. `getResourcesDir()`), and the macOS **dock icon is bundle-driven**
+(`Info.plist CFBundleIconFile` → `Contents/Resources/electron.icns`) — the
+recovered code has no `app.dock.setIcon`. These files live in
+`Contents/Resources` **alongside `app/`**, NOT inside the asar:
+`electron.icns`, `TrayIconTemplate*.png`, `Tray-Win32*.ico`, the `*.lproj` /
+`locales/` translation catalogs, and `ion-dist/favicon.ico`.
+
+The collector's `artifact_root` IS `Contents/Resources`, so running it on the
+**full `.app`** (not on `Contents/Resources/app`) captures these as `asset`
+source units. They MUST then survive import → generate so the output is
+self-contained. Two consequences:
+
+1. **Collect from the bundle, not the code dir.** Point the collector at the
+   `.app` / `Contents/Resources`. Pointing it at `Contents/Resources/app` drops
+   every shell asset (the icon is then wrong: a bare launch shows Electron's
+   default icon and the tray icon fails to load).
+2. **Branded launch.** Because the dock icon is bundle-driven, a faithful launch
+   must wrap the generated output in a branded `.app`
+   (`CFBundleName`, `CFBundleIconFile=electron` → the staged `electron.icns`).
+   Use [`decompile-eval/gui-boot-smoke/brand-launch.sh`](../../decompile-eval/gui-boot-smoke/brand-launch.sh),
+   which stages the shell resources and packages + launches under real Electron.
+
+> KNOWN GAP to reconcile: the collector emits a `schema_version:1` /
+> `artifact_root` manifest, but `reverts-cli import` requires
+> `reverts.import_evidence.v1` (`source_root` + `sources`/`assets`/
+> `native_assets`). Until the producer emits the import schema (carrying the
+> shell `asset` units), shell resources do not reach the generated `assets/`, and
+> the icon must be supplied at the branded-launch step above.
+
 ## Collector Command
 
 Run the bundled script from the repository root:
