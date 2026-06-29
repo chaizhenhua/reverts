@@ -604,13 +604,14 @@ pub fn generate_project_from_prepared_with_options(
     mark_timing!("validate_plan");
     let mut outcome = emit_validated_project(&validated_plan).map_err(PipelineError::Emit)?;
     mark_timing!("emit");
-    // Collapse dead wire-name aliases in island-cluster exports. The
+    // Collapse island-cluster export wire aliases in lockstep. The
     // `Semantic as wire` alias text only exists now (the emitter just applied the
     // binding renames), and the planner's wire pass never reaches synthetic
-    // clusters. Only the provably-safe subset (wire name imported by no file, on a
-    // cluster nothing namespace-imports/re-exports) collapses; the downstream
-    // parse / relative-import / dangling-named-import audits gate the result.
-    island_wire_collapse::collapse_dead_island_wire_aliases(&mut outcome.project.files);
+    // clusters. Drops the export alias to the semantic name and repoints every
+    // importer at it (preserving each importer's local binding), gated by
+    // per-cluster name uniqueness + no namespace/re-export consumer; the
+    // downstream parse / relative-import / dangling-named-import audits gate it.
+    island_wire_collapse::collapse_island_wire_aliases(&mut outcome.project.files);
     mark_timing!("collapse_island_wire_aliases");
     for finding in outcome.findings {
         audit.push(finding);
