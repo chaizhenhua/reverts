@@ -3386,6 +3386,22 @@ fn project_writer_emits_modern_layout_under_source_root() {
         !root.join("README.md").exists(),
         "README.md must not be generated — the skill writes it"
     );
+
+    // Conditional-`@ts-nocheck` refiner ships with the modern layout so the
+    // project can drop the blanket suppression from files that type-check clean.
+    let refiner =
+        fs::read_to_string(root.join("scripts/refine-nocheck.mjs")).expect("refine-nocheck.mjs");
+    assert!(refiner.contains("@ts-nocheck"));
+    assert!(refiner.contains("tsc"));
+    assert!(
+        refiner.contains("maxBuffer"),
+        "tsc diagnostics exceed the 1MB default; the refiner must raise maxBuffer \
+         or a truncated capture drops @ts-nocheck from files that still error"
+    );
+    assert!(
+        package_json.contains("\"refine:nocheck\""),
+        "package.json wires the refiner script"
+    );
 }
 
 #[test]

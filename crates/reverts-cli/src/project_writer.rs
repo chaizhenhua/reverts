@@ -162,8 +162,103 @@ fn write_typescript_project_scaffold(
         let copy_assets = typescript_copy_assets_script(assets);
         write_project_file(output, "scripts/copy-assets.mjs", copy_assets.as_str())?;
     }
+    // Conditional-`@ts-nocheck` refiner: the generator emits `// @ts-nocheck` on
+    // every file (it cannot run tsc), but ~44% of files type-check cleanly. This
+    // project-local tool drops the suppression from clean files so they become
+    // real, checked TypeScript, keeping it only where tsc still reports errors.
+    // Only meaningful for the modern source-root layout (it has the scoped
+    // tsconfig the script type-checks against).
+    if source_root.is_some() {
+        write_project_file(output, "scripts/refine-nocheck.mjs", REFINE_NOCHECK_SCRIPT)?;
+    }
     Ok(())
 }
+
+/// Project-local tool that drops `// @ts-nocheck` from files that type-check
+/// cleanly and keeps it only on files tsc still flags. Idempotent: it strips the
+/// suppression from every file, runs `tsc --noEmit`, then re-adds it solely to
+/// the files that reported an error (preserving a leading shebang line).
+const REFINE_NOCHECK_SCRIPT: &str = r#"#!/usr/bin/env node
+// Drop `// @ts-nocheck` from files that type-check cleanly; keep it only where
+// tsc still reports errors. Idempotent. Run after `npm install`.
+import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const NOCHECK = '// @ts-nocheck';
+const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const srcRoot = join(projectRoot, 'src');
+
+function collect(dir, out) {
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    const st = statSync(full);
+    if (st.isDirectory()) collect(full, out);
+    else if (full.endsWith('.ts') || full.endsWith('.tsx')) out.push(full);
+  }
+  return out;
+}
+
+// Remove a standalone `// @ts-nocheck` line; returns [stripped, hadIt].
+function strip(text) {
+  const lines = text.split('\n');
+  const idx = lines.findIndex((l) => l.trim() === NOCHECK);
+  if (idx === -1) return [text, false];
+  lines.splice(idx, 1);
+  return [lines.join('\n'), true];
+}
+
+// Add `// @ts-nocheck` after a leading shebang, else at the very top.
+function addNoCheck(text) {
+  if (text.split('\n').some((l) => l.trim() === NOCHECK)) return text;
+  const lines = text.split('\n');
+  const at = lines[0]?.startsWith('#!') ? 1 : 0;
+  lines.splice(at, 0, NOCHECK);
+  return lines.join('\n');
+}
+
+const files = collect(srcRoot, []);
+let had = 0;
+for (const f of files) {
+  const [stripped, hadIt] = strip(readFileSync(f, 'utf8'));
+  if (hadIt) { had += 1; writeFileSync(f, stripped); }
+}
+
+let tscOut = '';
+try {
+  // tsc exits 0 with no diagnostics; large projects emit megabytes of errors, so
+  // raise maxBuffer well past the 1 MB default (a truncated capture would miss
+  // error files and wrongly drop their @ts-nocheck).
+  execFileSync('npx', ['tsc', '--noEmit', '-p', 'tsconfig.json'], {
+    cwd: projectRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 256 * 1024 * 1024,
+  });
+} catch (e) {
+  tscOut = `${e.stdout || ''}${e.stderr || ''}`;
+}
+
+// Files tsc flagged, as absolute paths. Diagnostic lines look like
+// `src/foo.ts(12,3): error TS1234: ...`.
+const flagged = new Set();
+for (const m of tscOut.matchAll(/^(\S+?\.tsx?)\(\d+,\d+\): error /gm)) {
+  flagged.add(join(projectRoot, m[1]));
+}
+
+let kept = 0;
+for (const f of flagged) {
+  try {
+    writeFileSync(f, addNoCheck(readFileSync(f, 'utf8')));
+    kept += 1;
+  } catch {}
+}
+
+const cleaned = files.length - kept;
+console.log(
+  `refine-nocheck: ${files.length} files; @ts-nocheck kept on ${kept} (still error), ` +
+    `dropped from ${cleaned} clean files (was on ${had}).`,
+);
+"#;
 
 /// Modern base tsconfig: `NodeNext` resolution (the recovered code runs on Node
 /// ESM and uses explicit `.js` import specifiers, which `bundler` resolution
@@ -325,6 +420,12 @@ fn typescript_package_json(
         "check".to_string(),
         serde_json::Value::String("tsc --noEmit -p tsconfig.json".to_string()),
     );
+    if source_root.is_some() {
+        scripts.insert(
+            "refine:nocheck".to_string(),
+            serde_json::Value::String("node ./scripts/refine-nocheck.mjs".to_string()),
+        );
+    }
     scripts.insert(
         "build".to_string(),
         serde_json::Value::String(if has_assets {
