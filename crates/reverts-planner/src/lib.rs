@@ -12,6 +12,7 @@ mod compute_modules;
 mod dead_export_prune;
 mod destructure_writes;
 mod eager_safe_analysis;
+mod entrypoint_island_barrel;
 mod export_completion;
 mod external_package_adapter_emit;
 mod identifiers;

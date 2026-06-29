@@ -125,6 +125,13 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     // longer merge — sweep the whole body text to drop any duplicate export name.
     crate::export_completion::dedupe_redundant_named_exports(&mut state.plan);
     tick!("dedupe_redundant_named_exports");
+    // Collapse the entrypoint-island re-export hub: repoint every consumer's
+    // `import { … } from 'modules/entrypoint.js'` at the file that owns each
+    // binding, so the hub stops being a star-topology barrel. Runs after the
+    // import/export-completion passes (final settled graph) so the binding-owner
+    // index sees every owner's exports. See docs/barrel-direct-routing-plan.md.
+    crate::entrypoint_island_barrel::reroute_entrypoint_island_barrel(&mut state.plan);
+    tick!("reroute_entrypoint_island_barrel");
     // Final readability step: for exported bindings whose semantic name is
     // provably safe to expose project-wide, flag their renames so the emitter
     // also renames the public import/export wire name (dropping the alias). Runs

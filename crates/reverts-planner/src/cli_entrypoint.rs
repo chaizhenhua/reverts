@@ -1221,6 +1221,10 @@ fn emit_island_clusters(
             }
             let mut chunk_file = PlannedFile::new(chunk_path.clone());
             chunk_file.unmodularized_recovered_code = true;
+            // Eager-ordered: this chunk holds order-sensitive eager statements the
+            // entry loads in source order, so the barrel-reroute index excludes it
+            // (a direct consumer import could run its body out of order).
+            chunk_file.eager_ordered_chunk = true;
             chunk_file.push_source(chunk_source);
             for binding in locals {
                 chunk_file.add_binding(PlannedBinding::new(

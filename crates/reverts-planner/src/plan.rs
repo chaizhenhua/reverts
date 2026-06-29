@@ -213,6 +213,14 @@ pub struct PlannedFile {
     /// marker — never by comparing output paths — so their declarations enter
     /// the naming universe even though no `ModuleId` exists for them.
     pub unmodularized_recovered_code: bool,
+    /// True for an eager-ordered chunk file: a chain-split fragment of the
+    /// entrypoint island's EAGER body whose top-level statements have
+    /// evaluation-order side effects and are loaded by the entry in source
+    /// order. Unlike a (side-effect-free) function/class/const cluster, a
+    /// consumer importing a chunk binding DIRECTLY could run the chunk's eager
+    /// statements out of order, so the entrypoint-island barrel reroute excludes
+    /// these files from the binding-owner index — their bindings stay on the hub.
+    pub eager_ordered_chunk: bool,
 }
 
 /// A request to rename the `param_index`-th formal parameter of the function
@@ -238,6 +246,7 @@ impl PlannedFile {
             body: Vec::new(),
             compiler_preservation: CompilerPreservationDecision::default(),
             unmodularized_recovered_code: false,
+            eager_ordered_chunk: false,
         }
     }
 
