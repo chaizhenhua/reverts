@@ -91,3 +91,13 @@ generated output's `assets/` at the resources-dir path. The tray *menu* labels
 (`formatIntlMessage`) need the app's own i18n message catalog — the same
 shell-resource class, a separate file — and are staged by the same fix.
 
+**macOS icon cache — re-signing is required.** Even with the correct `icns` +
+`CFBundleIconFile`, macOS caches dock/Finder icons by **code signature**, so
+editing `Info.plist`/`icns` on the already-signed Electron runtime bundle leaves
+the OLD Electron icon cached — the icon "doesn't load". `brand-launch.sh`
+therefore re-signs the branded bundle ad-hoc (`codesign --force --deep --sign -`,
+after removing the inherited signature), bumps its mtime, and re-registers it with
+`lsregister`. Without this the staged Claude `electron.icns` is present but not
+shown. (NOTE: a bare `electron .` / the unbranded Electron runtime always shows
+Electron's own icon — that path is for boot smoke, not icon validation.)
+

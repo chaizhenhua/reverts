@@ -48,6 +48,16 @@ PB=/usr/libexec/PlistBuddy; PLIST="$OUT/Contents/Info.plist"
 "$PB" -c "Set :CFBundleIconFile electron" "$PLIST" 2>/dev/null || "$PB" -c "Add :CFBundleIconFile string electron" "$PLIST"
 "$PB" -c "Set :CFBundleIdentifier com.anthropic.claudefordesktop.real" "$PLIST" 2>/dev/null || true
 
+# macOS caches dock/Finder icons by code signature + bundle id. Editing
+# Info.plist/icns on an already-signed Electron.app leaves the OLD (Electron)
+# icon cached, so the change appears to "not load". Re-sign ad-hoc so the new
+# signature invalidates the cache, bump mtime, and reset the icon services cache.
+codesign --remove-signature "$OUT" >/dev/null 2>&1 || true
+codesign --force --deep --sign - "$OUT" >/dev/null 2>&1 || true
+touch "$OUT"
+/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
+  -f "$OUT" >/dev/null 2>&1 || true
+
 echo "branded: $OUT (icon=$("$PB" -c 'Print :CFBundleIconFile' "$PLIST"), name=$("$PB" -c 'Print :CFBundleName' "$PLIST"))"
 rm -rf /tmp/claude-real-data; mkdir -p /tmp/claude-real-data
 "$OUT/Contents/MacOS/Electron" --no-sandbox --user-data-dir=/tmp/claude-real-data > /tmp/brand-app.log 2>&1 &
