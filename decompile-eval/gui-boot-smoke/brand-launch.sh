@@ -57,6 +57,9 @@ codesign --force --deep --sign - "$OUT" >/dev/null 2>&1 || true
 touch "$OUT"
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
   -f "$OUT" >/dev/null 2>&1 || true
+# The Dock caches running-app icons; reload it so the freshly-signed icon shows.
+# (No sudo needed — this restarts only the current user's Dock.)
+killall Dock >/dev/null 2>&1 || true
 
 echo "branded: $OUT (icon=$("$PB" -c 'Print :CFBundleIconFile' "$PLIST"), name=$("$PB" -c 'Print :CFBundleName' "$PLIST"))"
 rm -rf /tmp/claude-real-data; mkdir -p /tmp/claude-real-data
