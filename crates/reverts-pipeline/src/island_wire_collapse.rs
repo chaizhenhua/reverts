@@ -19,10 +19,20 @@
 //! export side can never duplicate a name, and on the import side the local
 //! binding is preserved, so two clusters exporting the same `Local` resolve to
 //! distinct local bindings at any shared consumer. Dead aliases (no importer) are
-//! the zero-importer case of the same rewrite. Consumer BODIES keep the wire
-//! name; renaming those too needs the emitter's scope-aware path and is left to a
-//! follow-up. Namespace/re-export consumers reference the export name directly and
-//! cannot be kept in lockstep, so their clusters are excluded.
+//! the zero-importer case of the same rewrite. Namespace/re-export consumers
+//! reference the export name directly and cannot be kept in lockstep, so their
+//! clusters are excluded.
+//!
+//! Pass 3 then renames each consumer's LOCAL binding from the wire name to the
+//! real (imported) name, scope-awarely, by re-running the emitter's renamer on the
+//! file — so `import { Real as wire }` collapses to `import { Real }` and the
+//! consumer BODY reads `Real` instead of the minified wire name. This is provably
+//! safe: only the local binding + its references change; the IMPORTED name is
+//! unchanged, so the cross-file export contract cannot break (a colliding rename
+//! is skipped by the renamer, leaving a harmless alias). The real name is taken
+//! from the import alias the emitter already recovered (the esbuild export name),
+//! NOT the binding-naming channel — the two can disagree, and the export name is
+//! the one the cluster actually exports.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -58,6 +68,107 @@ pub(crate) fn collapse_island_wire_aliases(files: &mut [EmittedFile]) {
         }
         file.source = rewrite_importers(&file.source, &file.path, &relocations, &island_paths);
     }
+
+    // Pass 3: rename consumer LOCAL bindings from the wire name to the real
+    // (imported) name, scope-awarely, so consumer bodies read the semantic name
+    // and the import alias collapses (`import { Real as wire }` → `import { Real }`).
+    // Provably safe: only the local binding + its body references change; the
+    // IMPORTED name is unchanged, so the cross-file export contract cannot break
+    // (a colliding rename is skipped by the emitter, leaving a harmless alias).
+    for file in files.iter_mut() {
+        let renames = consumer_local_renames(&file.path, &file.source, &island_paths);
+        if renames.is_empty() {
+            continue;
+        }
+        if let Some(rewritten) = rename_locals_scope_aware(&file.path, &file.source, &renames) {
+            file.source = rewritten;
+        }
+    }
+}
+
+/// `(wire_local, real_imported)` pairs for this file's `import { Real as wire }`
+/// specifiers from island clusters, where `Real` is a readable identifier and the
+/// local is the minified wire name (so renaming the local to `Real` is a win).
+fn consumer_local_renames(
+    from_path: &str,
+    source: &str,
+    island_paths: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let Some((names, spec_part)) = trimmed
+            .strip_prefix("import { ")
+            .and_then(|rest| rest.split_once(" } from "))
+        else {
+            continue;
+        };
+        let Some(spec) = unquote_trailing(spec_part) else {
+            continue;
+        };
+        if resolve_island_target(from_path, &spec, island_paths).is_none() {
+            continue;
+        }
+        for raw in names.split(',') {
+            let item = raw.trim();
+            let Some((imported, local)) = item.split_once(" as ") else {
+                continue;
+            };
+            let (imported, local) = (imported.trim(), local.trim());
+            if imported != local && is_readable_name(imported) {
+                out.push((local.to_string(), imported.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// A recovered (non-minified) export name: length >= 4 with a 3+ lowercase run —
+/// distinguishes `openClaudeSupportArticle` from wire names like `$7A` / `qPe`.
+fn is_readable_name(name: &str) -> bool {
+    if name.len() < 4 {
+        return false;
+    }
+    let mut run = 0;
+    for c in name.chars() {
+        if c.is_ascii_lowercase() {
+            run += 1;
+            if run >= 3 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+/// Re-run the emitter's scope-aware renamer over `source`, renaming each
+/// `wire -> real` local. Returns None if the file no longer parses (left as-is).
+fn rename_locals_scope_aware(
+    path: &str,
+    source: &str,
+    renames: &[(String, String)],
+) -> Option<String> {
+    let generated: Vec<reverts_js::GeneratedRename> = renames
+        .iter()
+        .map(|(wire, real)| reverts_js::GeneratedRename::new_all_scopes(wire.clone(), real.clone()))
+        .collect();
+    let p = std::path::Path::new(path);
+    reverts_js::format_source_with_module_items_request(reverts_js::FormatSourceRequest {
+        body_source: source,
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &generated,
+        function_param_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: false,
+        path_hint: Some(p),
+        importer_path: Some(p),
+        goal: reverts_js::ParseGoal::TypeScript,
+        lowering: reverts_js::CompilerLowering::None,
+    })
+    .ok()
 }
 
 /// Rewrite a cluster's `export { … };` clauses, dropping ` as wire` for each
@@ -302,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn consumed_alias_relocates_in_lockstep() {
+    fn consumed_alias_relocates_and_consumer_body_renames() {
         let mut files = vec![
             f(
                 "modules/island/auth/oauth.ts",
@@ -310,33 +421,24 @@ mod tests {
             ),
             f(
                 "modules/island/agent/x.ts",
-                "import { TFA } from '../auth/oauth.js';",
+                "import { TFA } from '../auth/oauth.js';\nfunction g() { return new TFA(); }\nexport { g };",
             ),
         ];
         collapse_island_wire_aliases(&mut files);
+        // Export collapses to the semantic name.
         assert_eq!(files[0].source, "export { InvalidRequestError };");
-        assert_eq!(
-            files[1].source,
-            "import { InvalidRequestError as TFA } from '../auth/oauth.js';"
+        // Consumer import collapses to bare + the BODY reads the semantic name
+        // (Pass 3 scope-aware rename); the wire name `TFA` is gone entirely.
+        assert!(
+            files[1].source.contains("import { InvalidRequestError }"),
+            "import collapsed: {}",
+            files[1].source
         );
-    }
-
-    #[test]
-    fn preserves_consumer_local_alias() {
-        let mut files = vec![
-            f(
-                "modules/island/auth/oauth.ts",
-                "export { InvalidRequestError as TFA };",
-            ),
-            f(
-                "modules/island/agent/x.ts",
-                "import { TFA as err } from '../auth/oauth.js';",
-            ),
-        ];
-        collapse_island_wire_aliases(&mut files);
-        assert_eq!(
-            files[1].source,
-            "import { InvalidRequestError as err } from '../auth/oauth.js';"
+        assert!(
+            files[1].source.contains("new InvalidRequestError()")
+                && !files[1].source.contains("TFA"),
+            "body renamed, no wire name remains: {}",
+            files[1].source
         );
     }
 
