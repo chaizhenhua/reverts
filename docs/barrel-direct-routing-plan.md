@@ -125,3 +125,29 @@ The remaining bulk needs one of:
 
 Phase 1 (this pass + `BindingOwnerIndex` + `eager_ordered_chunk` marker) is the
 correct foundation both build on.
+
+## Phase 2 investigation result — NOT pursued (negative result)
+
+Scoped the eager-chunk bulk: it is dominated by **inlined `zod`, present ~8×**
+(`zod-checks-{net,email,e164,guid,string,base64,int,date}` etc., ~2300 lines each,
+~18k duplicated lines total). Key measurement: the export-name sets of those big
+files are **0% overlapping** (215 / 179 / 203 / … names, fully disjoint). esbuild
+minifies each inlining point independently, so the copies are **alpha-equivalent**
+(same zod source) but carry **completely different minified names**.
+
+That blocks every collapse path at the same root:
+
+- **Dedup (option 2)** — the copies are name-disjoint, so merging needs AST
+  alpha-equivalence clone detection across files plus a safe merge-with-rename
+  (route all consumers to one canonical copy). Research-grade, high risk.
+- **Eval-order routing (option 1)** — would enable direct routing but does not
+  remove the ~18k duplicated lines; wrong lever.
+- **Externalisation** — already disproven for inlined tree-shaken vendor (no
+  barrel unit, 0 island anchors); the vendor match-and-externalise experiment
+  fixed the ceiling at 8 packages.
+
+**Decision:** the barrel cannot be meaningfully collapsed without a new
+cross-file alpha-equivalence clone-detection-and-merge capability, which is out of
+scope. Phase 1 (safe direct-routing of side-effect-free, unique-owner bindings)
+stands as the achievable win; Phase 2 is shelved unless alpha-equivalent vendor
+dedup is prioritised as its own feature.
