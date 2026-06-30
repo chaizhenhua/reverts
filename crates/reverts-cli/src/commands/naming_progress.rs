@@ -88,6 +88,12 @@ pub struct NamingProgressReport {
     pub totals: TierBreakdown,
     pub global_api_surface: TierCoverage,
     pub internal_module_surface: TierCoverage,
+    /// Exported (public-surface) symbols of NON-externalized vendored third-party
+    /// modules/clusters — excluded from the first-party `totals`/`public_surface`
+    /// gate, tracked separately. For inlined, tree-shaken vendor this is the USED
+    /// public surface (only used code is inlined). A naming gap here is reported,
+    /// not a ship blocker.
+    pub vendor_public_surface: TierCoverage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,9 +217,16 @@ fn package_attribution_is_source_preserved_package_ownership(
         || (reason.contains("external import specifier") && reason.contains("vendored instead"))
 }
 
-/// Path evidence that a module is vendored third-party source.
-fn is_vendored_path(path: &str) -> bool {
-    path.contains("node_modules/") || path.starts_with("node_modules")
+/// Path evidence that a module is vendored third-party source. Matches both a
+/// literal `node_modules` segment and the flattened `vendor/` location that
+/// recovered third-party modules emit at (agent `vendor/<pkg>` overrides + the
+/// node_modules→`vendor/` reroute). The agent reserves `vendor/` for third party,
+/// so a first-party module never lands there.
+pub(crate) fn is_vendored_path(path: &str) -> bool {
+    path.contains("node_modules/")
+        || path.starts_with("node_modules")
+        || path.starts_with("vendor/")
+        || path.contains("/vendor/")
 }
 
 /// First-party module set (after path/classification/emission exclusion) plus
@@ -222,6 +235,9 @@ fn is_vendored_path(path: &str) -> bool {
 /// reconstruction, so the graph supplies them reliably to classify tiers.
 pub(crate) struct EmittedUniverse {
     pub first_party: BTreeSet<u32>,
+    /// Vendored third-party module ids (path-classified `vendor/` / node_modules),
+    /// the complement used to score the separate vendor public-surface metric.
+    pub vendor: BTreeSet<u32>,
     pub exported_by_module: BTreeMap<u32, BTreeSet<String>>,
     pub imported_by_count: BTreeMap<u32, usize>,
     pub imports_count: BTreeMap<u32, usize>,
@@ -233,6 +249,17 @@ pub(crate) fn emitted_universe(
 ) -> EmittedUniverse {
     let model = program.model();
     let first_party_ids = first_party_module_ids(model.input(), excluded);
+    // Vendored modules: path-classified third-party (vendor/ or node_modules) that
+    // are not in the first-party set. Scored by the separate vendor metric.
+    let vendor: BTreeSet<u32> = model
+        .input()
+        .modules
+        .iter()
+        .filter(|module| {
+            !first_party_ids.contains(&module.id) && is_vendored_path(&module.semantic_path)
+        })
+        .map(|module| module.id.0)
+        .collect();
     let graph = model.graph();
     let mut first_party = BTreeSet::new();
     let mut exported_by_module: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
@@ -262,6 +289,7 @@ pub(crate) fn emitted_universe(
     }
     EmittedUniverse {
         first_party,
+        vendor,
         exported_by_module,
         imported_by_count: imported_by
             .into_iter()
@@ -283,7 +311,12 @@ pub(crate) fn emitted_universe(
 /// the matcher could not externalize; they are excluded from the first-party
 /// naming denominator exactly like a `module-classify`d third-party module.
 pub(crate) fn is_third_party_island_path(file_path: &str) -> bool {
-    file_path.contains("/island/vendor/") || file_path.starts_with("island/vendor/")
+    // Flattened layout: third-party clusters land at `vendor/…`. The legacy
+    // `…/island/vendor/…` forms are kept for pre-flatten databases.
+    file_path.starts_with("vendor/")
+        || file_path.contains("/vendor/")
+        || file_path.contains("/island/vendor/")
+        || file_path.starts_with("island/vendor/")
 }
 
 pub(crate) fn classify_emitted_entry(
@@ -439,7 +472,36 @@ pub(crate) fn compute_naming_progress(
         totals: tier_breakdown(&all_symbols),
         global_api_surface: surface_coverage(&global_surface),
         internal_module_surface: surface_coverage(&internal_surface),
+        vendor_public_surface: vendor_public_surface_coverage(symbol_index, universe),
     }
+}
+
+/// Coverage of the exported (public-surface) symbols of vendored third-party
+/// modules/clusters — the set `classify_emitted_entry` excludes from the
+/// first-party universe. A vendor symbol is in scope when it is exported and its
+/// module/cluster is vendored (a `vendor/` module OR a third-party island path).
+fn vendor_public_surface_coverage(
+    symbol_index: &[SymbolIndexEntry],
+    universe: &EmittedUniverse,
+) -> TierCoverage {
+    let mut coverage = TierCoverage::default();
+    for entry in symbol_index {
+        if entry.dead || !entry.exported {
+            continue;
+        }
+        let is_vendor = match entry.module_id {
+            Some(module_id) => universe.vendor.contains(&module_id.0),
+            None => is_third_party_island_path(&entry.file_path),
+        };
+        if !is_vendor {
+            continue;
+        }
+        coverage.universe += 1;
+        if entry.semantic_named {
+            coverage.named += 1;
+        }
+    }
+    coverage
 }
 
 pub fn naming_progress_from_sqlite(
@@ -602,6 +664,7 @@ pub fn naming_progress_json(report: &NamingProgressReport, target: NamingProgres
         "workload": {
             "global_api_surface": coverage_json(report.global_api_surface),
             "internal_module_surface": coverage_json(report.internal_module_surface),
+            "vendor_public_surface": coverage_json(report.vendor_public_surface),
             "module_scope_symbols": coverage_json(report.totals.full),
         },
         "modules": report.modules.iter().map(|module| {
@@ -829,6 +892,7 @@ mod tests {
         }
         super::EmittedUniverse {
             first_party: first_party.iter().copied().collect(),
+            vendor: BTreeSet::new(),
             exported_by_module,
             imported_by_count: BTreeMap::new(),
             imports_count: BTreeMap::new(),
@@ -897,6 +961,35 @@ mod tests {
         assert!(!is_third_party_island_path(
             "src/modules/vendoring-ui/panel.ts"
         ));
+    }
+
+    #[test]
+    fn vendor_public_surface_metric_counts_exported_vendor_symbols() {
+        let universe = universe(&[1], &[(1, "firstPartyApi")]);
+        // First-party exported symbol (counts toward the mandatory gate).
+        let mut fp = entry(1, "firstPartyApi", "firstPartyApi", false, true);
+        fp.exported = true;
+        // Flattened vendor cluster: one named export, one minified-unnamed export.
+        let mut v_named = entry(0, "deflate", "deflate", false, true);
+        v_named.module_id = None;
+        v_named.file_path = "vendor/fflate.ts".to_string();
+        v_named.exported = true;
+        let mut v_unnamed = entry(0, "OTr", "OTr", false, false);
+        v_unnamed.module_id = None;
+        v_unnamed.file_path = "vendor/fflate.ts".to_string();
+        v_unnamed.exported = true;
+        // A vendor NON-exported (internal) symbol must NOT count toward the metric.
+        let mut v_internal = entry(0, "qPe", "qPe", false, false);
+        v_internal.module_id = None;
+        v_internal.file_path = "vendor/fflate.ts".to_string();
+
+        let report = compute_naming_progress(1, &[fp, v_named, v_unnamed, v_internal], &universe);
+        // Separate vendor metric: 2 exported vendor symbols, 1 named.
+        assert_eq!(report.vendor_public_surface.universe, 2);
+        assert_eq!(report.vendor_public_surface.named, 1);
+        // The mandatory first-party gate EXCLUDES vendor — only firstPartyApi.
+        assert_eq!(report.totals.public_surface.universe, 1);
+        assert_eq!(report.totals.public_surface.named, 1);
     }
 
     #[test]
