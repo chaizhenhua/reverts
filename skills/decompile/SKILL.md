@@ -109,11 +109,11 @@ Playwright-backed UI interaction checks for browser or extension outputs.
   first-party code USES (e.g. `export { OTr, cdA }`). Name those exported symbols
   via the agent naming channel — source-fingerprint matching does NOT work for
   inlined, tree-shaken third-party (it won't match the published source), so use
-  usage/property-based evidence instead. (Coverage note: `naming-progress` today
-  EXCLUDES vendored paths from the first-party `public_surface` universe — see
-  `first_party_module_ids` / `is_vendored_path` — so naming these does not move
-  that gate; surfacing used-vendor public surface as its own tracked metric is a
-  planned `naming-progress` extension.)
+  usage/property-based evidence instead. `naming-progress` reports these under a
+  separate `vendor_public_surface` metric (the exported symbols of vendored
+  modules/clusters): they are EXCLUDED from the mandatory first-party
+  `public_surface` gate — naming vendor is not required to ship — but the gap is
+  tracked there so it stays visible.
 
 Reference docs, loaded only when needed: [analysis patterns](references/analysis-patterns.md), [submit format](references/submit-format.md), [sub-agent templates](references/sub-agent-templates.md), [init-shim classification](references/init-shim-classification.md), [post-output audits](references/post-output-audits.md), and [guardrails](references/guardrails.md).
 
