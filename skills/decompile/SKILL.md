@@ -83,6 +83,37 @@ Playwright-backed UI interaction checks for browser or extension outputs.
   globals, constructor/state fields, internal helpers, locals last.
 - Do not rename bundler/runtime helpers into fake business terms just to
   remove warnings.
+- **Path & directory conventions (the final tree is organized source, not a
+  process dump).** When choosing a module path or a cluster `SEMANTIC_PATH`:
+  - **Root-relative, flat.** Paths are relative to the source root and land as
+    peers of the recovered feature directories. Do NOT prefix with `modules/`,
+    `island/`, or `modules/island/` — those process prefixes are dropped by the
+    generator; a path that includes them just gets stripped.
+  - **Reuse existing directories; avoid near-duplicates.** Before introducing a
+    directory, check the paths already assigned (other accepted module/cluster
+    names) and reuse the matching one. Do not create near-duplicate siblings that
+    differ only by singular/plural or a minor variant — e.g. pick ONE of
+    `session/` vs `sessions/`, `extension/` vs `extensions/`, `stream/` vs
+    `streaming/`, `util/` vs `utils/`. Two genuinely different domains may keep
+    distinct names (e.g. `auth/` vs `oauth/`); use judgment.
+  - **Group vendored packages by package name, not scattered.** A non-externalized
+    third-party package's modules go under one `vendor/<package>/<submodule>`
+    directory (e.g. `vendor/cross-spawn/enoent`, `vendor/cross-spawn/shebang-regex`),
+    NOT flat `vendor/cross-spawn-enoent`, `vendor/cross-spawn-shebang-regex`. One
+    directory per package keeps vendor from fragmenting into dozens of loose files.
+  - The generator seeds a GLOBAL collision registry from all already-assigned
+    paths and numeric-suffixes exact clashes (`git/git-operations-2.ts`), but it
+    cannot judge semantic near-duplicates or package grouping — that is your call.
+- **Non-externalized vendor public surface is in scope for naming.** A vendored
+  package that could not be externalized still has a minified public surface that
+  first-party code USES (e.g. `export { OTr, cdA }`). Name those exported symbols
+  via the agent naming channel — source-fingerprint matching does NOT work for
+  inlined, tree-shaken third-party (it won't match the published source), so use
+  usage/property-based evidence instead. (Coverage note: `naming-progress` today
+  EXCLUDES vendored paths from the first-party `public_surface` universe — see
+  `first_party_module_ids` / `is_vendored_path` — so naming these does not move
+  that gate; surfacing used-vendor public surface as its own tracked metric is a
+  planned `naming-progress` extension.)
 
 Reference docs, loaded only when needed: [analysis patterns](references/analysis-patterns.md), [submit format](references/submit-format.md), [sub-agent templates](references/sub-agent-templates.md), [init-shim classification](references/init-shim-classification.md), [post-output audits](references/post-output-audits.md), and [guardrails](references/guardrails.md).
 
