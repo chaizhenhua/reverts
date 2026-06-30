@@ -34,12 +34,17 @@ rm -rf "$OUT"; cp -R "$ERUNTIME" "$OUT"
 rm -rf "$OUT/Contents/Resources/app"; mkdir -p "$OUT/Contents/Resources/app"
 cp -R "$APP/main.bundle.mjs" "$APP/package.json" "$APP/node_modules" "$OUT/Contents/Resources/app/" 2>/dev/null
 
-# Stage shell resources (icons + tray) that the main process loads by path.
-cp "$SRCAPP/Contents/Resources/electron.icns" "$OUT/Contents/Resources/electron.icns"
-cp "$SRCAPP/Contents/Resources/"TrayIconTemplate*.png "$OUT/Contents/Resources/" 2>/dev/null || true
-# Locale/translation files (the tray menu + UI strings need these — same gap).
-cp -R "$SRCAPP/Contents/Resources/"*.lproj "$OUT/Contents/Resources/" 2>/dev/null || true
-cp -R "$SRCAPP/Contents/Resources/locales" "$OUT/Contents/Resources/" 2>/dev/null || true
+# Stage shell resources (icons + tray + locales) that the main process loads by
+# path. Prefer the SELF-CONTAINED `<output>/resources/` produced by
+# `generate --shell-resources` (the upstream fix); fall back to the source .app.
+SHELL_SRC="$SRCAPP/Contents/Resources"
+[ -d "$APP/resources" ] && SHELL_SRC="$APP/resources"
+cp "$SHELL_SRC/electron.icns" "$OUT/Contents/Resources/electron.icns" 2>/dev/null || \
+  cp "$SRCAPP/Contents/Resources/electron.icns" "$OUT/Contents/Resources/electron.icns"
+cp "$SHELL_SRC/"TrayIconTemplate*.png "$OUT/Contents/Resources/" 2>/dev/null || true
+cp -R "$SHELL_SRC/"*.lproj "$OUT/Contents/Resources/" 2>/dev/null || true
+cp -R "$SHELL_SRC/locales" "$OUT/Contents/Resources/" 2>/dev/null || true
+cp -R "$SHELL_SRC/i18n" "$OUT/Contents/Resources/app/resources/i18n" 2>/dev/null || true
 
 # Brand the bundle so the dock shows Claude + its icon.
 PB=/usr/libexec/PlistBuddy; PLIST="$OUT/Contents/Info.plist"

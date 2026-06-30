@@ -40,6 +40,15 @@ pub struct GenerateProjectV2Args {
     /// so the source tree stays clean. Omit it for the flat legacy layout.
     #[arg(long)]
     pub source_root: Option<String>,
+    /// Stage app-shell resources (the dock icon `electron.icns`, tray images,
+    /// i18n message catalogs, locales) from this source `.app` (or its
+    /// `Contents/Resources`) into `<output>/resources/`, so the generated project
+    /// is self-contained for packaging. These files live OUTSIDE the asar and are
+    /// referenced by `process.resourcesPath` / `Info.plist CFBundleIconFile`, so
+    /// the asar-only import never captures them — without this the packaged app
+    /// shows Electron's default icon and the tray menu hits missing translations.
+    #[arg(long)]
+    pub shell_resources: Option<PathBuf>,
 }
 
 impl GenerateProjectV2Args {
@@ -157,6 +166,14 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         source_root,
     )?;
     mark_timing!("write_project");
+    if let Some(shell_src) = args.shell_resources.as_deref() {
+        let staged = stage_shell_resources(shell_src, &args.output)?;
+        eprintln!(
+            "staged {staged} app-shell resource(s) into {}/resources",
+            args.output.display()
+        );
+        mark_timing!("stage_shell_resources");
+    }
     // Pipeline metadata is not part of the published source tree: in the modern
     // (source-root) layout it lives in a `.reverts/` sidecar; the flat layout
     // keeps it at the output root for backward compatibility.
@@ -1156,12 +1173,156 @@ fn vendor_module_path(package: &str, subpath: &str) -> String {
     format!("{}.ts", parts.join("/"))
 }
 
+/// Copy app-shell resources (the dock icon, tray images, i18n/locale catalogs)
+/// from a source `.app` (or its `Contents/Resources`) into `<output>/resources/`.
+/// These files live outside the asar and are loaded by `process.resourcesPath` /
+/// referenced by `Info.plist`, so the asar-only import never captures them; staging
+/// them makes the generated project self-contained for packaging.
+fn stage_shell_resources(
+    src: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<usize, CliRunError> {
+    let resources = if src.join("Contents/Resources").is_dir() {
+        src.join("Contents/Resources")
+    } else {
+        src.to_path_buf()
+    };
+    let dest = output.join("resources");
+    let mut staged = 0usize;
+    let entries = std::fs::read_dir(&resources).map_err(|source| CliRunError::WriteOutput {
+        path: resources.clone(),
+        source,
+    })?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !is_shell_resource(name) {
+            continue;
+        }
+        let target = dest.join(name);
+        if path.is_dir() {
+            staged += copy_dir_recursive(&path, &target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| CliRunError::WriteOutput {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            std::fs::copy(&path, &target).map_err(|source| CliRunError::WriteOutput {
+                path: target.clone(),
+                source,
+            })?;
+            staged += 1;
+        }
+    }
+    Ok(staged)
+}
+
+/// App-shell resource names: the dock icon, tray images, the app's i18n catalogs,
+/// and platform locale bundles.
+fn is_shell_resource(name: &str) -> bool {
+    name == "electron.icns"
+        || name == "icon.icns"
+        || name.starts_with("TrayIcon")
+        || name.starts_with("Tray-Win32")
+        || name == "i18n"
+        || name == "locales"
+        || name.ends_with(".lproj")
+        || name == "favicon.ico"
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> Result<usize, CliRunError> {
+    std::fs::create_dir_all(dest).map_err(|source| CliRunError::WriteOutput {
+        path: dest.to_path_buf(),
+        source,
+    })?;
+    let mut count = 0;
+    let entries = std::fs::read_dir(src).map_err(|source| CliRunError::WriteOutput {
+        path: src.to_path_buf(),
+        source,
+    })?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let target = dest.join(entry.file_name());
+        if path.is_dir() {
+            count += copy_dir_recursive(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target).map_err(|source| CliRunError::WriteOutput {
+                path: target.clone(),
+                source,
+            })?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 pub(crate) use crate::project_writer::write_accepted_project;
 
 #[cfg(test)]
 pub(crate) use crate::project_writer::{
     checked_output_path, write_emitted_project, write_emitted_project_with_source_root,
 };
+
+#[cfg(test)]
+mod shell_resource_tests {
+    use super::stage_shell_resources;
+    use std::fs;
+
+    #[test]
+    fn stages_icon_tray_and_i18n_from_app_resources() {
+        let tmp = std::env::temp_dir().join(format!("reverts-shell-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let res = tmp.join("Claude.app/Contents/Resources");
+        fs::create_dir_all(res.join("i18n")).unwrap();
+        fs::create_dir_all(res.join("en.lproj")).unwrap();
+        fs::write(res.join("electron.icns"), b"ICNS-bytes").unwrap();
+        fs::write(res.join("TrayIconTemplate.png"), b"png").unwrap();
+        fs::write(res.join("i18n/en-US.json"), b"{}").unwrap();
+        fs::write(res.join("en.lproj/InfoPlist.strings"), b"x").unwrap();
+        // A non-shell file must NOT be staged.
+        fs::write(res.join("app.asar"), b"code").unwrap();
+
+        let output = tmp.join("out");
+        let staged = stage_shell_resources(&tmp.join("Claude.app"), &output).unwrap();
+
+        assert!(output.join("resources/electron.icns").is_file());
+        assert!(output.join("resources/TrayIconTemplate.png").is_file());
+        assert!(output.join("resources/i18n/en-US.json").is_file());
+        assert!(
+            output
+                .join("resources/en.lproj/InfoPlist.strings")
+                .is_file()
+        );
+        assert!(
+            !output.join("resources/app.asar").exists(),
+            "non-shell file excluded"
+        );
+        assert_eq!(
+            fs::read(output.join("resources/electron.icns")).unwrap(),
+            b"ICNS-bytes"
+        );
+        assert_eq!(staged, 4, "icns + tray + i18n file + lproj file");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn accepts_a_resources_dir_directly() {
+        let tmp = std::env::temp_dir().join(format!("reverts-shell-test2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let res = tmp.join("Resources");
+        fs::create_dir_all(&res).unwrap();
+        fs::write(res.join("electron.icns"), b"i").unwrap();
+        let output = tmp.join("out");
+        let staged = stage_shell_resources(&res, &output).unwrap();
+        assert!(output.join("resources/electron.icns").is_file());
+        assert_eq!(staged, 1);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+}
 
 #[cfg(test)]
 mod tests {
