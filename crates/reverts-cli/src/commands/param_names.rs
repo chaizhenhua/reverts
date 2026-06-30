@@ -3,7 +3,23 @@
 //! Consumed by `generate` (via `semantic_function_param_names`) and applied by
 //! the emitter's function-param pass before emission. Batch-only: the agent
 //! naming workflow produces a TSV of accepts.
+//!
+//! Two things make agent batches land without an external pre-processing script:
+//!
+//! - Name resolution. The param matcher locates a function by its ORIGINAL
+//!   (pre-rename) name, because parameter transfer runs before name-scope renames
+//!   rewrite the binding. Agents read the EMITTED source and naturally refer to a
+//!   function/class by its readable name. So the container part of the key (the
+//!   class for `Class.method`, or the whole name for a top-level function) is
+//!   resolved back to its original through `semantic_binding_names` for that file.
+//!   A name that was never renamed resolves to itself; one that maps to several
+//!   originals is ambiguous and skipped.
+//!
+//! - Lenient batches. With `--lenient`, rows that fail the naming gate, resolve
+//!   ambiguously, or duplicate an earlier row are skipped and counted rather than
+//!   aborting the whole batch — the right default for noisy bulk agent output.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -30,6 +46,10 @@ pub struct ParamNamesArgs {
     pub evidence: Option<String>,
     #[arg(long)]
     pub batch: PathBuf,
+    /// Skip (and count) rows that fail the gate, resolve ambiguously, or
+    /// duplicate, instead of aborting the whole batch.
+    #[arg(long)]
+    pub lenient: bool,
 }
 
 impl ParamNamesArgs {
@@ -53,23 +73,35 @@ struct ParamNameSpec {
     evidence: Option<String>,
 }
 
+#[derive(Default)]
+struct RunOutcome {
+    requested: usize,
+    written: usize,
+    skipped: usize,
+}
+
 pub(crate) fn run(args: ParamNamesArgs) -> Result<(), CliRunError> {
-    let (requested, written) = param_names_from_sqlite(&args)?;
+    let outcome = param_names_from_sqlite(&args)?;
+    let skipped = if outcome.skipped > 0 {
+        format!(" ({} skipped)", outcome.skipped)
+    } else {
+        String::new()
+    };
     if args.apply {
         println!(
-            "updated function-parameter names for project {}: {written} change(s) written",
-            args.project_id
+            "updated function-parameter names for project {}: {} change(s) written{skipped}",
+            args.project_id, outcome.written
         );
     } else {
         println!(
-            "dry-run: would update {requested} function-parameter name(s) for project {}; pass --apply to persist",
-            args.project_id
+            "dry-run: {} function-parameter name(s) would apply for project {}{skipped}; pass --apply to persist",
+            outcome.requested, args.project_id
         );
     }
     Ok(())
 }
 
-fn param_names_from_sqlite(args: &ParamNamesArgs) -> Result<(usize, usize), CliRunError> {
+fn param_names_from_sqlite(args: &ParamNamesArgs) -> Result<RunOutcome, CliRunError> {
     let flags = if args.apply {
         OpenFlags::SQLITE_OPEN_READ_WRITE
     } else {
@@ -83,16 +115,38 @@ fn param_names_from_sqlite(args: &ParamNamesArgs) -> Result<(usize, usize), CliR
     ensure_project_exists(&connection, args.project_id)?;
 
     let specs = parse_batch(args.batch.as_path())?;
-    for spec in &specs {
+    let resolver = ContainerResolver::load(&connection, args.project_id)?;
+
+    let mut outcome = RunOutcome::default();
+    let mut seen = BTreeSet::<(String, String, u32)>::new();
+    let mut resolved = Vec::<ParamNameSpec>::new();
+    for spec in specs {
         if spec.file_path.trim().is_empty()
             || spec.function_name.trim().is_empty()
             || spec.semantic_name.trim().is_empty()
         {
+            // A blank key field is a malformed batch, not a low-confidence name:
+            // fail hard even under --lenient.
             return Err(CliRunError::ParamNames(
                 "file_path, function_name, and semantic_name must be non-empty".to_string(),
             ));
         }
-        validate_name_acceptance(
+        // Resolve the readable container in the key back to its original name so
+        // the matcher (which sees pre-rename names) can locate the function.
+        let key = match resolver.resolve_key(&spec.file_path, &spec.function_name) {
+            ResolvedKey::Key(key) => key,
+            ResolvedKey::Ambiguous => {
+                if args.lenient {
+                    outcome.skipped += 1;
+                    continue;
+                }
+                return Err(CliRunError::ParamNames(format!(
+                    "function key {} in {} resolves to multiple original names; disambiguate or use --lenient",
+                    spec.function_name, spec.file_path
+                )));
+            }
+        };
+        if let Err(error) = validate_name_acceptance(
             // Parameters have no minified "original" to gate on, so pass an empty
             // original: that keeps `semantic != original`, which is what makes the
             // vocabulary gate actually run (it is skipped for unchanged names).
@@ -101,17 +155,30 @@ fn param_names_from_sqlite(args: &ParamNamesArgs) -> Result<(usize, usize), CliR
             args.origin.as_str(),
             spec.evidence.as_deref().or(args.evidence.as_deref()),
             NamingGateMode::LocalBinding,
-        )
-        .map_err(|error| CliRunError::ParamNames(error.message()))?;
+        ) {
+            if args.lenient {
+                outcome.skipped += 1;
+                continue;
+            }
+            return Err(CliRunError::ParamNames(error.message()));
+        }
+        if !seen.insert((spec.file_path.clone(), key.clone(), spec.param_index)) {
+            outcome.skipped += 1;
+            continue;
+        }
+        resolved.push(ParamNameSpec {
+            function_name: key,
+            ..spec
+        });
     }
 
+    outcome.requested = resolved.len();
     if !args.apply {
-        return Ok((specs.len(), 0));
+        return Ok(outcome);
     }
     ensure_table(&connection)?;
-    let mut written = 0usize;
-    for spec in &specs {
-        written += connection
+    for spec in &resolved {
+        outcome.written += connection
             .execute(
                 r"
                 INSERT INTO semantic_function_param_names (
@@ -136,7 +203,86 @@ fn param_names_from_sqlite(args: &ParamNamesArgs) -> Result<(usize, usize), CliR
             )
             .map_err(|source| CliRunError::ParamNames(source.to_string()))?;
     }
-    Ok((specs.len(), written))
+    Ok(outcome)
+}
+
+/// Resolves the readable container portion of a function key to its original
+/// (pre-rename) name, per file. Keyed by (normalized file path, readable name).
+struct ContainerResolver {
+    by_file_name: BTreeMap<(String, String), BTreeSet<String>>,
+}
+
+enum ResolvedKey {
+    Key(String),
+    Ambiguous,
+}
+
+impl ContainerResolver {
+    fn load(connection: &Connection, project_id: u32) -> Result<Self, CliRunError> {
+        let mut by_file_name = BTreeMap::<(String, String), BTreeSet<String>>::new();
+        if !table_exists(connection, "semantic_binding_names")? {
+            return Ok(Self { by_file_name });
+        }
+        let mut statement = connection
+            .prepare(
+                r"
+                SELECT file_path, semantic_name, original_name
+                FROM semantic_binding_names
+                WHERE project_id = ?1 AND accepted = 1
+                ",
+            )
+            .map_err(|source| CliRunError::ParamNames(source.to_string()))?;
+        let rows = statement
+            .query_map(params![i64::from(project_id)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|source| CliRunError::ParamNames(source.to_string()))?;
+        for row in rows {
+            let (file_path, semantic, original) =
+                row.map_err(|source| CliRunError::ParamNames(source.to_string()))?;
+            by_file_name
+                .entry((normalize_island_path(&file_path), semantic))
+                .or_default()
+                .insert(original);
+        }
+        Ok(Self { by_file_name })
+    }
+
+    /// Resolve the container (text before the first `.`, or the whole key for a
+    /// top-level function) from readable to original. A never-renamed container
+    /// resolves to itself; one mapping to several originals is ambiguous.
+    fn resolve_key(&self, file_path: &str, key: &str) -> ResolvedKey {
+        let file = normalize_island_path(file_path);
+        let (container, member) = match key.split_once('.') {
+            Some((container, member)) => (container, Some(member)),
+            None => (key, None),
+        };
+        let original = match self.by_file_name.get(&(file, container.to_string())) {
+            None => container.to_string(),
+            Some(originals) if originals.len() == 1 => {
+                originals.iter().next().cloned().unwrap_or_default()
+            }
+            Some(_) => return ResolvedKey::Ambiguous,
+        };
+        ResolvedKey::Key(match member {
+            Some(member) => format!("{original}.{member}"),
+            None => original,
+        })
+    }
+}
+
+/// Drop the island process-prefix so binding-name paths and emitted/agent paths
+/// (e.g. `auth/oauth.ts`) compare equal; tolerates the doubled-prefix artifact.
+fn normalize_island_path(path: &str) -> String {
+    let mut rest = path;
+    while let Some(stripped) = rest.strip_prefix("modules/island/") {
+        rest = stripped;
+    }
+    rest.to_string()
 }
 
 fn parse_batch(path: &std::path::Path) -> Result<Vec<ParamNameSpec>, CliRunError> {
@@ -196,6 +342,18 @@ fn ensure_project_exists(connection: &Connection, project_id: u32) -> Result<(),
     Ok(())
 }
 
+fn table_exists(connection: &Connection, name: &str) -> Result<bool, CliRunError> {
+    let found: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|source| CliRunError::ParamNames(source.to_string()))?;
+    Ok(found.is_some())
+}
+
 fn ensure_table(connection: &Connection) -> Result<(), CliRunError> {
     connection
         .execute_batch(
@@ -235,7 +393,32 @@ mod tests {
             .expect("schema");
     }
 
-    fn args(db: &std::path::Path, batch: &std::path::Path, apply: bool) -> ParamNamesArgs {
+    fn seed_binding(db: &std::path::Path, file: &str, original: &str, semantic: &str) {
+        let connection = Connection::open(db).expect("open db");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE IF NOT EXISTS semantic_binding_names (
+                    project_id INTEGER NOT NULL, file_path TEXT NOT NULL,
+                    original_name TEXT NOT NULL, binding_index INTEGER,
+                    binding_key TEXT NOT NULL, semantic_name TEXT NOT NULL,
+                    origin TEXT NOT NULL, evidence TEXT,
+                    accepted INTEGER NOT NULL DEFAULT 1
+                );
+                ",
+            )
+            .expect("binding schema");
+        connection
+            .execute(
+                "INSERT INTO semantic_binding_names \
+                 (project_id, file_path, original_name, binding_key, semantic_name, origin, accepted) \
+                 VALUES (1, ?1, ?2, ?2, ?3, 'agent', 1)",
+                params![file, original, semantic],
+            )
+            .expect("insert binding");
+    }
+
+    fn args(db: &std::path::Path, batch: &std::path::Path, apply: bool, lenient: bool) -> ParamNamesArgs {
         ParamNamesArgs {
             input: db.to_path_buf(),
             project_id: 1,
@@ -243,7 +426,21 @@ mod tests {
             origin: "agent".to_string(),
             evidence: None,
             batch: batch.to_path_buf(),
+            lenient,
         }
+    }
+
+    fn stored_name(db: &std::path::Path, function: &str, index: i64) -> Option<String> {
+        let connection = Connection::open(db).expect("reopen");
+        connection
+            .query_row(
+                "SELECT semantic_name FROM semantic_function_param_names \
+                 WHERE function_name = ?1 AND param_index = ?2",
+                params![function, index],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query")
     }
 
     #[test]
@@ -258,21 +455,80 @@ mod tests {
         )
         .expect("write batch");
 
-        let (requested, written) =
-            param_names_from_sqlite(&args(&db, &batch, true)).expect("apply");
-        assert_eq!(requested, 1);
-        assert_eq!(written, 1);
+        let outcome = param_names_from_sqlite(&args(&db, &batch, true, false)).expect("apply");
+        assert_eq!(outcome.requested, 1);
+        assert_eq!(outcome.written, 1);
+        assert_eq!(stored_name(&db, "handleRequest", 0).as_deref(), Some("requestOptions"));
+    }
 
-        let connection = Connection::open(&db).expect("reopen");
-        let name: String = connection
-            .query_row(
-                "SELECT semantic_name FROM semantic_function_param_names \
-                 WHERE function_name = 'handleRequest' AND param_index = 0",
-                [],
-                |row| row.get(0),
-            )
-            .expect("row");
-        assert_eq!(name, "requestOptions");
+    #[test]
+    fn resolves_readable_class_to_original_for_method_key() {
+        let temp = tempdir().expect("temp dir");
+        let db = temp.path().join("project.sqlite");
+        create_db(&db);
+        // Class BatchQueue was renamed from minified gPe.
+        seed_binding(&db, "batch-queue.ts", "gPe", "BatchQueue");
+        let batch = temp.path().join("batch.tsv");
+        fs::write(
+            &batch,
+            "accept\tbatch-queue.ts\tBatchQueue.enqueue\t0\titems\titems appended to the queue\n",
+        )
+        .expect("write batch");
+
+        let outcome = param_names_from_sqlite(&args(&db, &batch, true, false)).expect("apply");
+        assert_eq!(outcome.written, 1);
+        // Stored under the ORIGINAL class name so the matcher can locate it.
+        assert_eq!(stored_name(&db, "gPe.enqueue", 0).as_deref(), Some("items"));
+        assert!(stored_name(&db, "BatchQueue.enqueue", 0).is_none());
+    }
+
+    #[test]
+    fn never_renamed_container_resolves_to_itself() {
+        let temp = tempdir().expect("temp dir");
+        let db = temp.path().join("project.sqlite");
+        create_db(&db);
+        let batch = temp.path().join("batch.tsv");
+        fs::write(
+            &batch,
+            "accept\tutil.ts\tparseConfig\t0\tsource\tsource text to parse\n",
+        )
+        .expect("write batch");
+
+        let outcome = param_names_from_sqlite(&args(&db, &batch, true, false)).expect("apply");
+        assert_eq!(outcome.written, 1);
+        assert_eq!(stored_name(&db, "parseConfig", 0).as_deref(), Some("source"));
+    }
+
+    #[test]
+    fn lenient_skips_ungated_and_duplicate_rows() {
+        let temp = tempdir().expect("temp dir");
+        let db = temp.path().join("project.sqlite");
+        create_db(&db);
+        let batch = temp.path().join("batch.tsv");
+        fs::write(
+            &batch,
+            // row 1 ok; row 2 fails gate (zebra unsupported); row 3 duplicates row 1.
+            "accept\ta.ts\tf\t0\tsource\tsource text\n\
+             accept\ta.ts\tg\t0\tzebraThing\tunsupported evidence\n\
+             accept\ta.ts\tf\t0\tsource\tsource text again\n",
+        )
+        .expect("write batch");
+
+        let outcome = param_names_from_sqlite(&args(&db, &batch, true, true)).expect("apply");
+        assert_eq!(outcome.written, 1);
+        assert_eq!(outcome.skipped, 2);
+    }
+
+    #[test]
+    fn strict_mode_rejects_ungated_row() {
+        let temp = tempdir().expect("temp dir");
+        let db = temp.path().join("project.sqlite");
+        create_db(&db);
+        let batch = temp.path().join("batch.tsv");
+        fs::write(&batch, "accept\ta.ts\tf\t0\tzebraQuokka\tno support\n").expect("write batch");
+
+        let result = param_names_from_sqlite(&args(&db, &batch, true, false));
+        assert!(matches!(result, Err(CliRunError::ParamNames(_))));
     }
 
     #[test]
@@ -281,33 +537,11 @@ mod tests {
         let db = temp.path().join("project.sqlite");
         create_db(&db);
         let batch = temp.path().join("batch.tsv");
-        fs::write(
-            &batch,
-            "accept\tsession/manager.ts\thandleRequest\t0\trequestOptions\trequest options\n",
-        )
-        .expect("write batch");
+        fs::write(&batch, "accept\ta.ts\tf\t0\tsource\tsource text\n").expect("write batch");
 
-        let (requested, written) =
-            param_names_from_sqlite(&args(&db, &batch, false)).expect("dry run");
-        assert_eq!(requested, 1);
-        assert_eq!(written, 0);
-    }
-
-    #[test]
-    fn rejects_name_unsupported_by_evidence() {
-        let temp = tempdir().expect("temp dir");
-        let db = temp.path().join("project.sqlite");
-        create_db(&db);
-        let batch = temp.path().join("batch.tsv");
-        // "zebra" is neither in the vocabulary nor in the evidence.
-        fs::write(
-            &batch,
-            "accept\tsession/manager.ts\thandleRequest\t0\tzebraQuokka\trequest options\n",
-        )
-        .expect("write batch");
-
-        let result = param_names_from_sqlite(&args(&db, &batch, true));
-        assert!(matches!(result, Err(CliRunError::ParamNames(_))));
+        let outcome = param_names_from_sqlite(&args(&db, &batch, false, false)).expect("dry run");
+        assert_eq!(outcome.requested, 1);
+        assert_eq!(outcome.written, 0);
     }
 
     #[test]
@@ -316,9 +550,9 @@ mod tests {
         let db = temp.path().join("project.sqlite");
         create_db(&db);
         let batch = temp.path().join("batch.tsv");
-        fs::write(&batch, "accept\tsession/manager.ts\thandleRequest\n").expect("write batch");
+        fs::write(&batch, "accept\ta.ts\tf\n").expect("write batch");
 
-        let result = param_names_from_sqlite(&args(&db, &batch, true));
+        let result = param_names_from_sqlite(&args(&db, &batch, true, false));
         assert!(matches!(result, Err(CliRunError::ParamNames(_))));
     }
 }
