@@ -1201,7 +1201,14 @@ fn stage_shell_resources(
         if !is_shell_resource(name) {
             continue;
         }
-        let target = dest.join(name);
+        // The main process opens locale catalogs at `<resourcesPath>/i18n/<locale>.json`,
+        // but the source app keeps them at the Resources ROOT — route them into the
+        // expected `i18n/` subdir so the fallback-locale load resolves.
+        let target = if path.is_file() && is_locale_json(name) {
+            dest.join("i18n").join(name)
+        } else {
+            dest.join(name)
+        };
         if path.is_dir() {
             staged += copy_dir_recursive(&path, &target)?;
         } else {
@@ -1221,8 +1228,10 @@ fn stage_shell_resources(
     Ok(staged)
 }
 
-/// App-shell resource names: the dock icon, tray images, the app's i18n catalogs,
-/// and platform locale bundles.
+/// App-shell resource names: the dock icon, tray images, the app's i18n catalogs
+/// (the `i18n/` dir, the top-level `<locale>.json` message files the main process
+/// loads from `<resourcesPath>/i18n/`, and the renderer's `ion-dist/` which holds
+/// `i18n/`), and platform locale bundles. Excludes the asar and code dirs.
 fn is_shell_resource(name: &str) -> bool {
     name == "electron.icns"
         || name == "icon.icns"
@@ -1230,8 +1239,27 @@ fn is_shell_resource(name: &str) -> bool {
         || name.starts_with("Tray-Win32")
         || name == "i18n"
         || name == "locales"
+        || name == "ion-dist"
         || name.ends_with(".lproj")
         || name == "favicon.ico"
+        || is_locale_json(name)
+}
+
+/// A top-level locale message catalog like `en-US.json` / `zh-Hans.json` — the
+/// fallback the main process opens at `<resourcesPath>/i18n/<locale>.json`.
+fn is_locale_json(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".json") else {
+        return false;
+    };
+    // `xx` or `xx-YY` / `xx-Hans` BCP-47-ish tags: 2+ letters, optional `-suffix`.
+    let (lang, region) = stem
+        .split_once('-')
+        .map_or((stem, None), |(l, r)| (l, Some(r)));
+    // ISO 639 language codes are 2-3 letters — this excludes words like `package`.
+    let lang_ok = (2..=3).contains(&lang.len()) && lang.chars().all(|c| c.is_ascii_alphabetic());
+    let region_ok =
+        region.is_none_or(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_alphanumeric()));
+    lang_ok && region_ok
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> Result<usize, CliRunError> {
@@ -1269,8 +1297,38 @@ pub(crate) use crate::project_writer::{
 
 #[cfg(test)]
 mod shell_resource_tests {
-    use super::stage_shell_resources;
+    use super::{is_locale_json, is_shell_resource, stage_shell_resources};
     use std::fs;
+
+    #[test]
+    fn classifies_locale_json_and_shell_names() {
+        assert!(is_locale_json("en-US.json"));
+        assert!(is_locale_json("zh-Hans.json"));
+        assert!(is_locale_json("fr.json"));
+        assert!(!is_locale_json("package.json"));
+        assert!(!is_locale_json("x.json"));
+        assert!(is_shell_resource("electron.icns"));
+        assert!(is_shell_resource("ion-dist"));
+        assert!(is_shell_resource("en-US.json"));
+        assert!(!is_shell_resource("app.asar"));
+        assert!(!is_shell_resource("package.json"));
+    }
+
+    #[test]
+    fn routes_top_level_locale_json_into_i18n_subdir() {
+        let tmp = std::env::temp_dir().join(format!("reverts-shell-i18n-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let res = tmp.join("Resources");
+        fs::create_dir_all(&res).unwrap();
+        fs::write(res.join("en-US.json"), b"{}").unwrap();
+        fs::write(res.join("electron.icns"), b"i").unwrap();
+        let output = tmp.join("out");
+        stage_shell_resources(&res, &output).unwrap();
+        // The fallback loader opens <resources>/i18n/en-US.json.
+        assert!(output.join("resources/i18n/en-US.json").is_file());
+        assert!(output.join("resources/electron.icns").is_file());
+        let _ = fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn stages_icon_tray_and_i18n_from_app_resources() {

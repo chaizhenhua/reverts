@@ -39,12 +39,19 @@ cp -R "$APP/main.bundle.mjs" "$APP/package.json" "$APP/node_modules" "$OUT/Conte
 # `generate --shell-resources` (the upstream fix); fall back to the source .app.
 SHELL_SRC="$SRCAPP/Contents/Resources"
 [ -d "$APP/resources" ] && SHELL_SRC="$APP/resources"
+# The dock icon is read from the bundle's `Contents/Resources` (capital R, per
+# Info.plist CFBundleIconFile).
 cp "$SHELL_SRC/electron.icns" "$OUT/Contents/Resources/electron.icns" 2>/dev/null || \
   cp "$SRCAPP/Contents/Resources/electron.icns" "$OUT/Contents/Resources/electron.icns"
 cp "$SHELL_SRC/"TrayIconTemplate*.png "$OUT/Contents/Resources/" 2>/dev/null || true
 cp -R "$SHELL_SRC/"*.lproj "$OUT/Contents/Resources/" 2>/dev/null || true
 cp -R "$SHELL_SRC/locales" "$OUT/Contents/Resources/" 2>/dev/null || true
-cp -R "$SHELL_SRC/i18n" "$OUT/Contents/Resources/app/resources/i18n" 2>/dev/null || true
+# But the app's runtime `getResourcesDir()` (process.resourcesPath-based) resolves
+# to LOWERCASE `Contents/resources` in this unpackaged layout — the tray menu /
+# i18n fallback opens `Contents/resources/i18n/en-US.json`. Mirror the whole
+# staged resources tree there.
+mkdir -p "$OUT/Contents/resources"
+cp -R "$SHELL_SRC/." "$OUT/Contents/resources/" 2>/dev/null || true
 
 # Brand the bundle so the dock shows Claude + its icon.
 PB=/usr/libexec/PlistBuddy; PLIST="$OUT/Contents/Info.plist"
