@@ -5,6 +5,7 @@
 //! and are exposed as `pub(crate)`.
 
 pub(crate) mod binding_names;
+pub(crate) mod param_names;
 pub(crate) mod cluster_names;
 pub(crate) mod coverage_ledger;
 pub(crate) mod extract_assets;

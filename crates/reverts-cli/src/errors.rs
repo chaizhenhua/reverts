@@ -725,6 +725,7 @@ pub enum CliRunError {
     IdentifierInventory(String),
     GenerateProject(String),
     BindingNames(String),
+    ParamNames(String),
     ModuleNames(String),
     ClusterNames(String),
     IslandPackageCandidates(String),
@@ -790,6 +791,9 @@ impl CliRunError {
             Self::SymbolNames(_) => {
                 "next: symbol-name spec rejected. Verify the DB module id space (symbol-names is module_id-keyed) \
                  and the accept/batch format; `symbol-names --list` shows current names, `--help` the usage."
+            }
+            Self::ParamNames(_) => {
+                "next: param-name spec rejected. Rows are accept<TAB>FILE<TAB>FUNCTION<TAB>PARAM_INDEX<TAB>SEMANTIC<TAB>[EVIDENCE]; every name word must be in the evidence or the technical vocabulary."
             }
             Self::BindingNames(_) => {
                 "next: binding-name spec rejected. binding-names is file-path-keyed (island bindings). Check the \
@@ -857,6 +861,7 @@ impl fmt::Display for CliRunError {
             }
             Self::GenerateProject(message) => write!(formatter, "generate: {message}"),
             Self::BindingNames(message) => write!(formatter, "binding-names: {message}"),
+            Self::ParamNames(message) => write!(formatter, "param-names: {message}"),
             Self::ModuleNames(message) => write!(formatter, "module-names: {message}"),
             Self::ClusterNames(message) => write!(formatter, "cluster-names: {message}"),
             Self::IslandPackageCandidates(message) => {
@@ -909,6 +914,7 @@ impl Error for CliRunError {
             | Self::CoverageLedger(_)
             | Self::GenerateProject(_)
             | Self::BindingNames(_)
+            | Self::ParamNames(_)
             | Self::ModuleNames(_)
             | Self::ClusterNames(_)
             | Self::IslandPackageCandidates(_)

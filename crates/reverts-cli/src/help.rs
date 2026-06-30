@@ -23,6 +23,7 @@ pub enum HelpTopic {
     IdentifierInventory,
     RuntimeInventory,
     BindingNames,
+    ParamNames,
     ReferenceSourceNames,
     OwnershipSourceNames,
     SymbolNames,
@@ -57,6 +58,7 @@ pub const COVERAGE_LEDGER_COMMAND: &str = "coverage-ledger";
 pub const IDENTIFIER_INVENTORY_COMMAND: &str = "identifier-inventory";
 pub const RUNTIME_INVENTORY_COMMAND: &str = "runtime-inventory";
 pub const BINDING_NAMES_COMMAND: &str = "binding-names";
+pub const PARAM_NAMES_COMMAND: &str = "param-names";
 pub const REFERENCE_SOURCE_NAMES_COMMAND: &str = "reference-source-names";
 pub const OWNERSHIP_SOURCE_NAMES_COMMAND: &str = "ownership-source-names";
 pub const SYMBOL_NAMES_COMMAND: &str = "symbol-names";
@@ -143,6 +145,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: BINDING_NAMES_COMMAND,
         topic: HelpTopic::BindingNames,
         summary: "Accept generated-output local binding semantic names",
+    },
+    CommandSpec {
+        name: PARAM_NAMES_COMMAND,
+        topic: HelpTopic::ParamNames,
+        summary: "Accept generated-output function parameter semantic names",
     },
     CommandSpec {
         name: REFERENCE_SOURCE_NAMES_COMMAND,
@@ -280,6 +287,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         }
         HelpTopic::BindingNames => {
             "reverts-cli binding-names\n\nUSAGE:\n    reverts-cli binding-names --input <DB> --project-id <ID> (--list | --accept <FILE:ORIGINAL=SEMANTIC>... | --batch <TSV>) [--origin <SOURCE>] [--evidence <TEXT>] [--apply]\n\nOPTIONS:\n    --input <DB>           SQLite input database\n    --project-id <ID>      Project id to update\n    --list                 List accepted generated-output binding names\n    --accept <SPEC>        Accept one binding name; format FILE_PATH:ORIGINAL_NAME=SEMANTIC_NAME or FILE_PATH:ORIGINAL_NAME#BINDING_INDEX=SEMANTIC_NAME\n    --batch <TSV>          TSV rows: accept<TAB>FILE_PATH<TAB>ORIGINAL_NAME<TAB>SEMANTIC_NAME<TAB>[EVIDENCE] or accept<TAB>FILE_PATH<TAB>ORIGINAL_NAME<TAB>BINDING_INDEX<TAB>SEMANTIC_NAME<TAB>[EVIDENCE]\n    --origin <SOURCE>      Name source label, default: agent\n    --evidence <TEXT>      Evidence for names from automated origins; required for origin=agent/llm/model/etc.\n    --apply                Persist changes; without it, dry-run validation only"
+        }
+        HelpTopic::ParamNames => {
+            "reverts-cli param-names\n\nUSAGE:\n    reverts-cli param-names --input <DB> --project-id <ID> --batch <TSV> [--origin <SOURCE>] [--evidence <TEXT>] [--apply]\n\nOPTIONS:\n    --input <DB>           SQLite input database\n    --project-id <ID>      Project id to update\n    --batch <TSV>          TSV rows: accept<TAB>FILE_PATH<TAB>FUNCTION_NAME<TAB>PARAM_INDEX<TAB>SEMANTIC_NAME<TAB>[EVIDENCE]\n    --origin <SOURCE>      Name source label, default: agent\n    --evidence <TEXT>      Fallback evidence for names from automated origins; required for origin=agent/llm/model/etc.\n    --apply                Persist changes; without it, dry-run validation only"
         }
         HelpTopic::ReferenceSourceNames => {
             "reverts-cli reference-source-names\n\nUSAGE:\n    reverts-cli reference-source-names --input <DB> --project-id <ID> --reference-source-root <DIR> --reference-version <VERSION> [--apply] [--min-tier high|medium] [--origin-prefix source] [--module-only] [--summary-json <FILE>] [--diagnostics-json <FILE>]\n\nOPTIONS:\n    --input <DB>                    SQLite input database\n    --project-id <ID>               Positive project id\n    --reference-source-root <DIR>   Root of the historical first-party source tree to match against\n    --reference-version <VERSION>   Version label stored with accepted names (e.g. 2.1.76)\n    --apply                         Persist accepted names; without it, dry-run only\n    --min-tier high|medium          Minimum match tier to auto-accept (default: high)\n    --origin-prefix source          Prefix stored in the origin field of accepted names (default: source)\n    --module-only                   Fast module-name matching from bundle-extracted input; skips path overrides and generated-output binding propagation\n    --summary-json <FILE>           Write a machine-readable module match summary

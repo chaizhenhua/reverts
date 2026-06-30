@@ -126,6 +126,7 @@ pub enum CliCommand {
     FullInventory(FullInventoryArgs),
     RuntimeInventory(RuntimeInventoryArgs),
     BindingNames(BindingNamesArgs),
+    ParamNames(commands::param_names::ParamNamesArgs),
     ReferenceSourceNames(commands::reference_source_names::ReferenceSourceNamesArgs),
     OwnershipSourceNames(commands::ownership_source_names::OwnershipSourceNamesArgs),
     SymbolNames(SymbolNamesArgs),
@@ -246,6 +247,8 @@ enum ClapCommand {
     RuntimeInventory(RuntimeInventoryArgs),
     #[command(name = "binding-names", disable_help_flag = true)]
     BindingNames(BindingNamesArgs),
+    #[command(name = "param-names", disable_help_flag = true)]
+    ParamNames(commands::param_names::ParamNamesArgs),
     #[command(name = "reference-source-names", disable_help_flag = true)]
     ReferenceSourceNames(commands::reference_source_names::ReferenceSourceNamesArgs),
     #[command(name = "ownership-source-names", disable_help_flag = true)]
@@ -302,6 +305,7 @@ impl ClapCli {
             Some(ClapCommand::BindingNames(args)) => {
                 CliCommand::BindingNames(commands::binding_names::validate_args(args)?)
             }
+            Some(ClapCommand::ParamNames(args)) => CliCommand::ParamNames(args),
             Some(ClapCommand::ReferenceSourceNames(args)) => CliCommand::ReferenceSourceNames(args),
             Some(ClapCommand::OwnershipSourceNames(args)) => CliCommand::OwnershipSourceNames(args),
             Some(ClapCommand::SymbolNames(args)) => {
@@ -407,6 +411,7 @@ fn normalize_command(args: Vec<String>) -> Vec<String> {
     let flat2 = match (head, sub) {
         ("name", Some("symbols")) => Some("symbol-names"),
         ("name", Some("bindings")) => Some("binding-names"),
+        ("name", Some("params")) => Some("param-names"),
         ("name", Some("modules")) => Some("module-names"),
         ("name", Some("clusters")) => Some("cluster-names"),
         ("name", Some("plan")) => Some("naming-plan"),
@@ -522,6 +527,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::FullInventory(args) => commands::full_inventory::run(args),
         CliCommand::RuntimeInventory(args) => commands::runtime_inventory::run(args),
         CliCommand::BindingNames(args) => commands::binding_names::run(args),
+        CliCommand::ParamNames(args) => commands::param_names::run(args),
         CliCommand::ReferenceSourceNames(args) => commands::reference_source_names::run(args),
         CliCommand::OwnershipSourceNames(args) => commands::ownership_source_names::run(args),
         CliCommand::SymbolNames(args) => commands::symbol_names::run(args),
