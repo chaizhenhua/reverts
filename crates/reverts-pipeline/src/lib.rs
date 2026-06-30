@@ -1,5 +1,6 @@
 mod assets;
 mod audit;
+mod canonicalize_require_namespaces;
 mod flatten_modules_residue;
 mod island_wire_collapse;
 mod output_paths;
@@ -624,6 +625,11 @@ pub fn generate_project_from_prepared_with_options(
     // repoints importers, and renames consumer bodies off the wire name; gated by
     // per-file name uniqueness + no namespace/re-export consumer. The downstream
     // parse / relative-import / dangling-named-import audits gate the result.
+    // Canonicalize minified module-namespace bindings (`const zA = require('node:fs')`
+    // → `nodeFs`) before the wire collapse, so the renamed exports propagate to
+    // every consumer through it.
+    canonicalize_require_namespaces::canonicalize_require_namespaces(&mut pre_accept.project.files);
+    mark_timing!("canonicalize_require_namespaces");
     island_wire_collapse::collapse_island_wire_aliases(&mut pre_accept.project.files);
     mark_timing!("collapse_island_wire_aliases");
     // Flatten the residual `modules/` process-prefix files (entrypoint hub +
