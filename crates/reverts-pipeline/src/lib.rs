@@ -722,6 +722,15 @@ pub fn generate_project_from_prepared_with_options(
     })
 }
 
+/// Normalize a stored binding-name `file_path` to the planner's emitted layout.
+/// Island clusters are now flattened to the source root (no `modules/island/`
+/// process prefix), but accepted binding names recorded under the old layout still
+/// carry it; stripping it re-syncs the `(file_path, original_name)` key so those
+/// names apply. Real-module paths (no prefix) pass through unchanged.
+fn normalized_binding_file_path(path: &str) -> &str {
+    path.strip_prefix("modules/island/").unwrap_or(path)
+}
+
 fn apply_local_binding_renames(
     plan: &mut reverts_planner::EmitPlan,
     renames: &[LocalBindingRename],
@@ -732,12 +741,13 @@ fn apply_local_binding_renames(
     let mut by_path = std::collections::BTreeMap::<&str, Vec<&LocalBindingRename>>::new();
     for rename in renames {
         by_path
-            .entry(rename.file_path.as_str())
+            .entry(normalized_binding_file_path(rename.file_path.as_str()))
             .or_default()
             .push(rename);
     }
     for file in &mut plan.files {
-        let Some(file_renames) = by_path.get(file.path.as_str()) else {
+        let Some(file_renames) = by_path.get(normalized_binding_file_path(file.path.as_str()))
+        else {
             continue;
         };
         for rename in file_renames {
@@ -763,12 +773,13 @@ fn apply_function_param_renames_to_plan(
     let mut by_path = std::collections::BTreeMap::<&str, Vec<&FunctionParamRenameRow>>::new();
     for rename in renames {
         by_path
-            .entry(rename.file_path.as_str())
+            .entry(normalized_binding_file_path(rename.file_path.as_str()))
             .or_default()
             .push(rename);
     }
     for file in &mut plan.files {
-        let Some(file_renames) = by_path.get(file.path.as_str()) else {
+        let Some(file_renames) = by_path.get(normalized_binding_file_path(file.path.as_str()))
+        else {
             continue;
         };
         for rename in file_renames {
