@@ -6020,7 +6020,7 @@ fn cli_match_packages_then_generate_project_uses_written_attribution() {
     ])
     .expect("generation should consume persisted attribution");
 
-    let generated_source = fs::read_to_string(output_dir.join("modules/1-entry.ts"))
+    let generated_source = fs::read_to_string(output_dir.join("1-entry.ts"))
         .expect("generated entry should be written");
     assert!(generated_source.contains("import { add } from 'pkg/add';"));
     assert!(generated_source.contains("export const total = add(1, 2);"));
@@ -6090,12 +6090,12 @@ fn cli_extract_assets_then_generate_project_materializes_assets() {
     ])
     .expect("generation should consume persisted asset");
 
-    let generated_source = fs::read_to_string(output_dir.join("modules/1-src/index.ts"))
+    let generated_source = fs::read_to_string(output_dir.join("1-src/index.ts"))
         .expect("generated entry should be written");
     assert!(generated_source.contains("require('./addon.node')"));
     assert!(!generated_source.contains("/$bunfs/root/addon.node"));
     assert_eq!(
-        fs::read(output_dir.join("modules/1-src/addon.node")).expect("asset should be written"),
+        fs::read(output_dir.join("1-src/addon.node")).expect("asset should be written"),
         b"native"
     );
     assert!(
@@ -6181,7 +6181,7 @@ fn cli_extract_assets_can_materialize_bun_embedded_native_asset() {
     .expect("generation should consume persisted embedded asset");
 
     assert_eq!(
-        fs::read(output_dir.join("modules/1-src/native.node"))
+        fs::read(output_dir.join("1-src/native.node"))
             .expect("embedded asset should be written"),
         native_bytes
     );
@@ -6282,15 +6282,15 @@ fn cli_extract_assets_accepts_multiple_roots_for_bun_and_vendor_assets() {
     .expect("generation should consume persisted multi-root assets");
 
     assert_eq!(
-        fs::read(output_dir.join("modules/1-src/native.node")).expect("native asset"),
+        fs::read(output_dir.join("1-src/native.node")).expect("native asset"),
         native_bytes
     );
     assert_eq!(
-        fs::read(output_dir.join("modules/1-src/vendor/ripgrep/x64-linux/rg")).expect("rg asset"),
+        fs::read(output_dir.join("1-src/vendor/ripgrep/x64-linux/rg")).expect("rg asset"),
         b"rg-binary"
     );
     let generated_source =
-        fs::read_to_string(output_dir.join("modules/1-src/index.ts")).expect("generated source");
+        fs::read_to_string(output_dir.join("1-src/index.ts")).expect("generated source");
     assert!(generated_source.contains("POL.fileURLToPath(import.meta.url)"));
     assert!(!generated_source.contains("/home/runner/work/app"));
     let connection = Connection::open(database_path).expect("reopen fixture database");

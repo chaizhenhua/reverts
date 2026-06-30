@@ -24,12 +24,26 @@ use std::collections::BTreeMap;
 
 use reverts_emitter::EmittedFile;
 
+use crate::EmittedAsset;
+
 const MODULES_PREFIX: &str = "modules/";
 
 /// Flatten residual `modules/` files to semantic paths in place, returning the
 /// `old path -> new path` remap so callers can keep plan-derived metadata
-/// (`unmodularized_code_paths`, etc.) consistent with the emitted file paths.
-pub(crate) fn flatten_modules_residue(files: &mut [EmittedFile]) -> BTreeMap<String, String> {
+/// (`module_output_paths`, `unmodularized_code_paths`, etc.) consistent with the
+/// emitted file paths.
+///
+/// Emitted assets (`require('./addon.node')` targets etc.) live in the same
+/// directory as their owning module file, and the `require(...)` specifiers that
+/// point at them are NOT rewritten here (only `import`/`export` specifiers are).
+/// So an asset must move in lockstep with its module: when `modules/x/m.ts`
+/// flattens to `x/m.ts`, the sibling `modules/x/a.node` must become `x/a.node`
+/// or the relative `./a.node` would dangle. We apply the same prefix-strip rule
+/// to asset paths, sharing the `taken` collision set with the file remap.
+pub(crate) fn flatten_modules_residue(
+    files: &mut [EmittedFile],
+    assets: &mut [EmittedAsset],
+) -> BTreeMap<String, String> {
     // 1. Build the path remap (old emitted path -> new semantic path).
     let mut remap = BTreeMap::<String, String>::new();
     let existing: std::collections::BTreeSet<String> =
@@ -41,6 +55,16 @@ pub(crate) fn flatten_modules_residue(files: &mut [EmittedFile]) -> BTreeMap<Str
         }
         let new_path = remapped_path(&file.path, &mut taken);
         remap.insert(file.path.clone(), new_path);
+    }
+    // Move assets in lockstep with their module directory (records the mapping in
+    // `remap` too, so callers can follow asset paths through the same table).
+    for asset in assets.iter_mut() {
+        if !asset.path.starts_with(MODULES_PREFIX) {
+            continue;
+        }
+        let new_path = remapped_path(&asset.path, &mut taken);
+        remap.insert(asset.path.clone(), new_path.clone());
+        asset.path = new_path;
     }
     if remap.is_empty() {
         return remap;
@@ -288,7 +312,7 @@ mod tests {
                 "import { a } from '../modules/entrypoint.js';",
             ),
         ];
-        flatten_modules_residue(&mut files);
+        flatten_modules_residue(&mut files, &mut []);
         assert_eq!(files[0].path, "entrypoint.ts");
         // auth/oauth.ts (depth 2) → entrypoint.ts (root) = ../entrypoint.js
         assert_eq!(
@@ -307,7 +331,7 @@ mod tests {
                 "import { h } from './runtime/source-1-helpers.js';",
             ),
         ];
-        flatten_modules_residue(&mut files);
+        flatten_modules_residue(&mut files, &mut []);
         assert_eq!(files[0].path, "runtime/_helpers/source-1-helpers.ts");
         assert_eq!(files[1].path, "entrypoint.ts");
         // entrypoint.ts (root) → runtime/_helpers/source-1-helpers.ts
@@ -332,7 +356,7 @@ mod tests {
             ),
             f("auth/oauth.ts", "export { x };"),
         ];
-        flatten_modules_residue(&mut files);
+        flatten_modules_residue(&mut files, &mut []);
         assert_eq!(files[0].path, "entrypoint.ts");
         // After the hub moves to root, the same target is `./auth/oauth.js`.
         assert!(
@@ -345,8 +369,38 @@ mod tests {
     #[test]
     fn leaves_non_modules_files_untouched() {
         let mut files = vec![f("auth/oauth.ts", "import { y } from '../git/ops.js';")];
-        flatten_modules_residue(&mut files);
+        flatten_modules_residue(&mut files, &mut []);
         assert_eq!(files[0].path, "auth/oauth.ts");
         assert_eq!(files[0].source, "import { y } from '../git/ops.js';");
+    }
+
+    #[test]
+    fn moves_assets_in_lockstep_with_their_module() {
+        // The module file flattens; its sibling asset (referenced by a non-rewritten
+        // `require('./addon.node')`) must move to the same new directory so the
+        // relative specifier still resolves.
+        let mut files = vec![f(
+            "modules/1-src/index.ts",
+            "const a = require('./addon.node'); export { a };",
+        )];
+        let mut assets = vec![EmittedAsset {
+            path: "modules/1-src/addon.node".to_string(),
+            bytes: b"native".to_vec(),
+            executable: false,
+        }];
+        let remap = flatten_modules_residue(&mut files, &mut assets);
+        assert_eq!(files[0].path, "1-src/index.ts");
+        assert_eq!(assets[0].path, "1-src/addon.node");
+        // The require specifier is intentionally untouched, so `./addon.node`
+        // resolves to `1-src/addon.node` — exactly where the asset now lives.
+        assert!(
+            files[0].source.contains("require('./addon.node')"),
+            "{}",
+            files[0].source
+        );
+        assert_eq!(
+            remap.get("modules/1-src/addon.node").map(String::as_str),
+            Some("1-src/addon.node")
+        );
     }
 }

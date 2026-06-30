@@ -552,7 +552,7 @@ pub fn generate_project_from_prepared_with_options(
     let mut runtime_dependencies = collect_runtime_dependencies(input);
     extend_runtime_dependencies_with_island_externalizations(&mut runtime_dependencies, &program);
     let asset_references = collect_required_asset_references(input);
-    let assets = collect_emitted_assets(input, &asset_references);
+    let mut assets = collect_emitted_assets(input, &asset_references);
     let source_mirror_assets = collect_source_mirror_assets(input);
     audit.extend(audit_required_sources(&program));
     audit.extend(audit_required_assets(input, &asset_references));
@@ -637,9 +637,25 @@ pub fn generate_project_from_prepared_with_options(
     // relative specifiers. Runs post-emit so the planner's unit-test fixtures
     // (which encode the old layout) are untouched; the downstream structural audit
     // gates the recomputed specifiers.
-    let modules_residue_remap =
-        flatten_modules_residue::flatten_modules_residue(&mut pre_accept.project.files);
+    let modules_residue_remap = flatten_modules_residue::flatten_modules_residue(
+        &mut pre_accept.project.files,
+        &mut assets,
+    );
     mark_timing!("flatten_modules_residue");
+    // Move module output paths into the same flattened frame so the relative-import
+    // audit and symbol index compute against the emitted (post-flatten) paths, not
+    // the planner's `modules/` paths — otherwise the audit would compare a flattened
+    // importer against a `modules/`-framed asset and false-flag (or miss) a dangle.
+    let module_output_paths = module_output_paths
+        .into_iter()
+        .map(|(module_id, path)| {
+            let new_path = modules_residue_remap
+                .get(&path)
+                .cloned()
+                .unwrap_or(path);
+            (module_id, new_path)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let emitted_project = pre_accept.project.clone();
     let pre_accept_report = pre_accept.report.clone();
     mark_timing!("pre_accept");
@@ -1217,7 +1233,7 @@ mod tests {
 
         assert!(run.audit.is_clean());
         assert_eq!(run.assets.len(), 1);
-        assert_eq!(run.assets[0].path, "modules/1-app/vendor/rg");
+        assert_eq!(run.assets[0].path, "1-app/vendor/rg");
         assert_eq!(run.assets[0].bytes, b"rg-binary");
         assert!(run.assets[0].executable);
     }
@@ -1336,9 +1352,9 @@ mod tests {
 
         assert!(run.audit.is_clean());
         assert_eq!(run.assets.len(), 2);
-        assert_eq!(run.assets[0].path, "modules/1-app/addon.node");
+        assert_eq!(run.assets[0].path, "1-app/addon.node");
         assert_eq!(run.assets[0].bytes, b"native");
-        assert_eq!(run.assets[1].path, "modules/1-app/unused.node");
+        assert_eq!(run.assets[1].path, "1-app/unused.node");
         assert_eq!(run.assets[1].bytes, b"unused");
     }
 
