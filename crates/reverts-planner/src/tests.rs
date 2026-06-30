@@ -88,7 +88,9 @@ fn module_output_path_normalizes_virtual_bundle_ids_to_typescript_modules() {
     let path = super::module_output_path(&enriched, ModuleId(55))
         .expect("fixture module should have an output path");
 
-    assert_eq!(path, "modules/55-esbuild-H0.ts");
+    // A virtual bundle id (no recovered safe path, not a node_modules path) lands
+    // in the neutral `unresolved/` bucket keyed by module id — not under `modules/`.
+    assert_eq!(path, "unresolved/55-esbuild-H0.ts");
 }
 
 #[test]
@@ -96,8 +98,8 @@ fn module_output_path_reroutes_node_modules_paths_off_the_special_directory() {
     // Preserved-layout bundles (Electron) keep `node_modules/<pkg>/...` paths.
     // An emitted source/adapter file under a literal `node_modules` directory
     // never compiles (tsc skips it) and its consumers' relative imports dangle,
-    // so the path must be rerouted under `modules/` with the special segment
-    // neutralized — never reintroducing a `node_modules` directory.
+    // so the path is rerouted to a clean `vendor/<subpath-after-node_modules>`
+    // location — package-rooted, never reintroducing a `node_modules` directory.
     let path = super::normalized_module_output_path(
         ModuleId(43),
         "Contents/Resources/app/node_modules/ws/lib/event-target.ts",
@@ -107,9 +109,9 @@ fn module_output_path_reroutes_node_modules_paths_off_the_special_directory() {
         !path.split('/').any(|segment| segment == "node_modules"),
         "rerouted path must not contain a node_modules directory segment: {path}"
     );
-    assert!(
-        path.starts_with("modules/43-"),
-        "node_modules path should reroute under modules/: {path}"
+    assert_eq!(
+        path, "vendor/ws/lib/event-target.ts",
+        "node_modules path should reroute under vendor/ by package subpath: {path}"
     );
     assert!(path.ends_with(".ts"), "{path}");
 }

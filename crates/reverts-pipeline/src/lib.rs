@@ -1667,8 +1667,11 @@ mod tests {
         let source = run.project.files[0].source.as_str();
         assert!(source.contains("import { map } from 'lodash/map';"));
         assert!(source.contains("console.log(map);"));
-        assert!(source.contains("export { map as $F1 };"));
-        assert!(!source.contains("console.log($F1);"));
+        // The export's minified wire name `$F1` collapses too: the wire-alias pass
+        // now runs on every file (islands are flattened, so there is no longer a
+        // `modules/island/` gate) and drops a dead `map as $F1` export to `map`.
+        assert!(source.contains("export { map };"));
+        assert!(!source.contains("$F1"));
     }
 
     #[test]

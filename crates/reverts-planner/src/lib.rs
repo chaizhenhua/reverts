@@ -8013,10 +8013,30 @@ pub(crate) fn normalized_module_output_path(module_id: ModuleId, raw_path: &str)
     if is_safe_typescript_module_path(raw_path) {
         return raw_path.to_string();
     }
-    let slug = output_path_slug(&neutralize_node_modules_segments(strip_source_extension(
-        raw_path,
-    )));
-    format!("modules/{}-{slug}.ts", module_id.0)
+    let stripped = strip_source_extension(raw_path);
+    // A vendored module whose path runs through a `node_modules` segment routes to
+    // `vendor/<subpath-after-node_modules>` — a clean, package-rooted location
+    // (e.g. `vendor/ws/lib/constants.ts`) instead of a `modules/<id>-…` process
+    // bucket. The subpath is naturally unique per file.
+    if let Some(subpath) = node_modules_subpath(stripped) {
+        return format!("vendor/{}.ts", output_path_slug(&subpath));
+    }
+    // Any other module without a recovered safe path lands in a neutral
+    // `unresolved/` bucket (not `modules/`), keyed by id so it stays unique.
+    let slug = output_path_slug(&neutralize_node_modules_segments(stripped));
+    format!("unresolved/{}-{slug}.ts", module_id.0)
+}
+
+/// The path tail after the LAST `node_modules` segment, e.g.
+/// `app/node_modules/ws/lib/constants` → `ws/lib/constants`. `None` if the path
+/// has no `node_modules` segment or nothing follows it.
+fn node_modules_subpath(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let idx = parts
+        .iter()
+        .rposition(|segment| *segment == "node_modules")?;
+    let sub = parts[idx + 1..].join("/");
+    (!sub.is_empty()).then_some(sub)
 }
 
 fn is_safe_typescript_module_path(path: &str) -> bool {
