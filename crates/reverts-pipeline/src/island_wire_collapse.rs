@@ -1,4 +1,5 @@
-//! Collapse wire-name aliases in island-cluster exports (post-emit, lockstep).
+//! Collapse wire-name export aliases (post-emit, lockstep) for island clusters
+//! AND the entrypoint hub barrel.
 //!
 //! Island clusters emit `export { semanticLocal as wireName };` at their file
 //! boundary so cross-file links keep using the minified wire name. The planner's
@@ -6,6 +7,13 @@
 //! island clusters — ~99% of the alias "wall" — keep them. The alias text only
 //! exists after the emitter applies the binding renames, so this runs on the
 //! emitted project, not the plan.
+//!
+//! The same shape covers `modules/entrypoint.ts`, the star-topology re-export hub
+//! that ~hundreds of files import from by wire name. Unlike clusters it exports
+//! BARE wire names (`export { $FA }`) at this stage; its real names are recovered
+//! only when Pass 3 re-emits it (after a round repoints its own imports from
+//! collapsed islands), so the collapse iterates to a fixpoint: round 1 collapses
+//! islands and recovers the hub's `Real as wire` exports; round 2 collapses those.
 //!
 //! For each cluster export `semanticLocal as wireName` whose `semanticLocal` is
 //! unique within that cluster's export clause and whose cluster is not
@@ -39,15 +47,51 @@ use std::collections::{BTreeMap, BTreeSet};
 use reverts_emitter::EmittedFile;
 
 const ISLAND_DIR: &str = "modules/island/";
+/// The star-topology re-export hub. It carries `export { Real as wire };` lines
+/// (its top imports already bind `Real` from each owner), and ~hundreds of files
+/// import bindings from it by wire name — the exact same shape as a cluster, so
+/// it collapses through the identical mechanism.
+const ENTRYPOINT_HUB: &str = "modules/entrypoint.ts";
+
+/// A file whose `export { Local as wire };` aliases this pass collapses: every
+/// island cluster plus the entrypoint hub barrel.
+fn is_collapsible_exporter(path: &str) -> bool {
+    path.starts_with(ISLAND_DIR) || path == ENTRYPOINT_HUB
+}
 
 pub(crate) fn collapse_island_wire_aliases(files: &mut [EmittedFile]) {
     let namespace_consumed = namespace_consumed_islands(files);
+    let island_paths = island_path_index(files);
 
-    // Pass 1: choose relocatable aliases and rewrite each cluster's export clause.
-    // relocations: (cluster_path, wireName) -> semanticLocal
+    // Iterate to a fixpoint. A single round cannot fully collapse the entrypoint
+    // hub: at round start the hub still exports bare wire names; only AFTER a round
+    // repoints the hub's own imports from collapsed islands (Pass 2) and re-emits
+    // the hub (Pass 3) do its `export { $wire }` lines recover to `Real as $wire`.
+    // The next round's Pass 1 then sees and collapses them. Two rounds suffice in
+    // practice (islands → hub); the cap is a safety bound.
+    let mut total = 0usize;
+    for _ in 0..3 {
+        let round = collapse_round(files, &namespace_consumed, &island_paths);
+        total += round;
+        if round == 0 {
+            break;
+        }
+    }
+    let _ = total;
+}
+
+/// One collapse round (Pass 1 export-alias drop → Pass 2 importer repoint → Pass 3
+/// scope-aware consumer body rename). Returns the number of export aliases
+/// relocated this round (0 means a fixpoint was reached).
+fn collapse_round(
+    files: &mut [EmittedFile],
+    namespace_consumed: &BTreeSet<String>,
+    island_paths: &BTreeMap<String, String>,
+) -> usize {
+    // Pass 1: drop each `Local as wire` export to `Local`, recording the relocation.
     let mut relocations = BTreeMap::<(String, String), String>::new();
     for file in files.iter_mut() {
-        if !file.path.starts_with(ISLAND_DIR) || namespace_consumed.contains(&file.path) {
+        if !is_collapsible_exporter(&file.path) || namespace_consumed.contains(&file.path) {
             continue;
         }
         if !file.source.contains("export {") {
@@ -56,17 +100,16 @@ pub(crate) fn collapse_island_wire_aliases(files: &mut [EmittedFile]) {
         file.source = rewrite_cluster_exports(&file.source, &file.path, &mut relocations);
     }
     if relocations.is_empty() {
-        return;
+        return 0;
     }
 
-    // Pass 2: repoint every importer of a relocated wire at the cluster's new
+    // Pass 2: repoint every importer of a relocated wire at the exporter's new
     // (semantic) export name, preserving the importer's local binding.
-    let island_paths = island_path_index(files);
     for file in files.iter_mut() {
         if !file.source.contains("import {") {
             continue;
         }
-        file.source = rewrite_importers(&file.source, &file.path, &relocations, &island_paths);
+        file.source = rewrite_importers(&file.source, &file.path, &relocations, island_paths);
     }
 
     // Pass 3: rename consumer LOCAL bindings from the wire name to the real
@@ -75,8 +118,10 @@ pub(crate) fn collapse_island_wire_aliases(files: &mut [EmittedFile]) {
     // Provably safe: only the local binding + its body references change; the
     // IMPORTED name is unchanged, so the cross-file export contract cannot break
     // (a colliding rename is skipped by the emitter, leaving a harmless alias).
+    // This re-emit ALSO recovers the hub's own bare-wire exports to `Real as wire`
+    // (the late readability hint), which the next round's Pass 1 then collapses.
     for file in files.iter_mut() {
-        let renames = consumer_local_renames(&file.path, &file.source, &island_paths);
+        let renames = consumer_local_renames(&file.path, &file.source, island_paths);
         if renames.is_empty() {
             continue;
         }
@@ -84,6 +129,7 @@ pub(crate) fn collapse_island_wire_aliases(files: &mut [EmittedFile]) {
             file.source = rewritten;
         }
     }
+    relocations.len()
 }
 
 /// `(wire_local, real_imported)` pairs for this file's `import { Real as wire }`
@@ -171,7 +217,7 @@ fn rename_locals_scope_aware(
     .ok()
 }
 
-/// Rewrite a cluster's `export { … };` clauses, dropping ` as wire` for each
+/// Rewrite an exporter's `export { … };` clauses, dropping ` as wire` for each
 /// alias whose local is unique in the clause; record `(path, wire) -> local`.
 fn rewrite_cluster_exports(
     source: &str,
@@ -301,10 +347,13 @@ fn rewrite_importers(
     out.join("\n")
 }
 
+/// Extension-stripped path -> emitted path, for every file whose exports this pass
+/// may collapse (island clusters + the entrypoint hub), so a relative import
+/// specifier can be resolved back to its exporting file.
 fn island_path_index(files: &[EmittedFile]) -> BTreeMap<String, String> {
     files
         .iter()
-        .filter(|f| f.path.starts_with(ISLAND_DIR))
+        .filter(|f| is_collapsible_exporter(&f.path))
         .map(|f| (strip_ts_ext(&f.path), f.path.clone()))
         .collect()
 }
@@ -400,6 +449,38 @@ mod tests {
             path: path.to_string(),
             source: source.to_string(),
         }
+    }
+
+    #[test]
+    fn entrypoint_hub_alias_collapses_and_consumer_renames() {
+        // The hub re-exports a binding (bound from an owner at its top) under a
+        // wire name; a consumer imports it from the hub by wire name.
+        let mut files = vec![
+            f(
+                "modules/entrypoint.ts",
+                "import { eventSourceOnEventField } from './island/net/sse.js';\nexport { eventSourceOnEventField as $FA };",
+            ),
+            f(
+                "modules/island/feature/x.ts",
+                "import { $FA } from '../../entrypoint.js';\nfunction h() { return $FA(); }\nexport { h };",
+            ),
+        ];
+        collapse_island_wire_aliases(&mut files);
+        // Hub export collapses to the real name.
+        assert!(
+            files[0]
+                .source
+                .contains("export { eventSourceOnEventField };"),
+            "hub export collapsed: {}",
+            files[0].source
+        );
+        // Consumer body now reads the real name; the wire name is gone.
+        assert!(
+            files[1].source.contains("eventSourceOnEventField()")
+                && !files[1].source.contains("$FA"),
+            "consumer body renamed, wire name gone: {}",
+            files[1].source
+        );
     }
 
     #[test]

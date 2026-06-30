@@ -602,21 +602,12 @@ pub fn generate_project_from_prepared_with_options(
     let module_output_paths = module_output_paths(&program);
     let validated_plan = plan.clone().validate().map_err(PipelineError::Plan)?;
     mark_timing!("validate_plan");
-    let mut outcome = emit_validated_project(&validated_plan).map_err(PipelineError::Emit)?;
+    let outcome = emit_validated_project(&validated_plan).map_err(PipelineError::Emit)?;
     mark_timing!("emit");
-    // Collapse island-cluster export wire aliases in lockstep. The
-    // `Semantic as wire` alias text only exists now (the emitter just applied the
-    // binding renames), and the planner's wire pass never reaches synthetic
-    // clusters. Drops the export alias to the semantic name and repoints every
-    // importer at it (preserving each importer's local binding), gated by
-    // per-cluster name uniqueness + no namespace/re-export consumer; the
-    // downstream parse / relative-import / dangling-named-import audits gate it.
-    island_wire_collapse::collapse_island_wire_aliases(&mut outcome.project.files);
-    mark_timing!("collapse_island_wire_aliases");
     for finding in outcome.findings {
         audit.push(finding);
     }
-    let pre_accept = pre_accept::apply_pre_accept_transforms(
+    let mut pre_accept = pre_accept::apply_pre_accept_transforms(
         outcome.project,
         &pre_accept::PreAcceptContext {
             input,
@@ -624,6 +615,16 @@ pub fn generate_project_from_prepared_with_options(
             module_output_paths: &module_output_paths,
         },
     );
+    // Collapse export wire aliases in lockstep for island clusters AND the
+    // entrypoint hub barrel. Runs AFTER pre_accept because that re-format is what
+    // recovers the hub's `Local as wire` export names (from its import aliases) —
+    // at emit the hub still exports bare wire names, so collapsing earlier would
+    // see nothing on the hub. Drops each `Local as wire` export to `Local`,
+    // repoints importers, and renames consumer bodies off the wire name; gated by
+    // per-file name uniqueness + no namespace/re-export consumer. The downstream
+    // parse / relative-import / dangling-named-import audits gate the result.
+    island_wire_collapse::collapse_island_wire_aliases(&mut pre_accept.project.files);
+    mark_timing!("collapse_island_wire_aliases");
     let emitted_project = pre_accept.project.clone();
     let pre_accept_report = pre_accept.report.clone();
     mark_timing!("pre_accept");
