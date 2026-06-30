@@ -1,5 +1,6 @@
 mod assets;
 mod audit;
+mod flatten_modules_residue;
 mod island_wire_collapse;
 mod output_paths;
 mod pre_accept;
@@ -625,6 +626,14 @@ pub fn generate_project_from_prepared_with_options(
     // parse / relative-import / dangling-named-import audits gate the result.
     island_wire_collapse::collapse_island_wire_aliases(&mut pre_accept.project.files);
     mark_timing!("collapse_island_wire_aliases");
+    // Flatten the residual `modules/` process-prefix files (entrypoint hub +
+    // runtime helpers) to semantic source-root paths, recomputing importers'
+    // relative specifiers. Runs post-emit so the planner's unit-test fixtures
+    // (which encode the old layout) are untouched; the downstream structural audit
+    // gates the recomputed specifiers.
+    let modules_residue_remap =
+        flatten_modules_residue::flatten_modules_residue(&mut pre_accept.project.files);
+    mark_timing!("flatten_modules_residue");
     let emitted_project = pre_accept.project.clone();
     let pre_accept_report = pre_accept.report.clone();
     mark_timing!("pre_accept");
@@ -675,7 +684,15 @@ pub fn generate_project_from_prepared_with_options(
         .files
         .iter()
         .filter(|file| file.unmodularized_recovered_code)
-        .map(|file| file.path.clone())
+        // Map through the residue flatten so these plan paths match the emitted
+        // file paths (e.g. `modules/entrypoint.ts` → `entrypoint.ts`) that the
+        // symbol index is keyed on.
+        .map(|file| {
+            modules_residue_remap
+                .get(&file.path)
+                .cloned()
+                .unwrap_or_else(|| file.path.clone())
+        })
         .collect::<std::collections::BTreeSet<_>>();
     let symbol_index = build_symbol_index(
         &program,
@@ -1988,7 +2005,8 @@ mod tests {
             .project
             .files
             .iter()
-            .find(|file| file.path == "modules/entry.ts")
+            // `modules/entry.ts` is flattened to `entry.ts` by the residue pass.
+            .find(|file| file.path == "entry.ts")
             .expect("entry file should be emitted");
         assert!(!entry.source.contains("$wrap7"));
         assert!(!entry.source.contains("_lazy9"));
@@ -2007,7 +2025,7 @@ mod tests {
             run.project
                 .files
                 .iter()
-                .all(|file| file.path != "modules/runtime/source-1-helpers.ts")
+                .all(|file| file.path != "runtime/_helpers/source-1-helpers.ts")
         );
     }
 
