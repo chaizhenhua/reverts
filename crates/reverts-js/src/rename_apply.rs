@@ -4,9 +4,9 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     AstBuilder, Visit, VisitMut,
     ast::{
-        BindingIdentifier, BindingPatternKind, ExportNamedDeclaration, Expression,
-        FormalParameters, Function, IdentifierReference, ImportDeclaration,
-        ImportDeclarationSpecifier, Program, VariableDeclarator,
+        BindingIdentifier, BindingPatternKind, Class, ClassElement, ExportNamedDeclaration,
+        Expression, FormalParameters, Function, IdentifierReference, ImportDeclaration,
+        ImportDeclarationSpecifier, MethodDefinitionKind, PropertyKey, Program, VariableDeclarator,
     },
 };
 use oxc_semantic::SemanticBuilder;
@@ -579,9 +579,11 @@ struct LocatedFunction {
 }
 
 /// Resolves function names the way the matcher's `function_names` does for the
-/// two dominant first-party forms — `function NAME(params){}` and
-/// `const NAME = function/arrow(params)` — recording each requested function's
-/// parameter symbols. A name seen more than once is marked ambiguous and skipped.
+/// dominant first-party forms — `function NAME(params){}`,
+/// `const NAME = function/arrow(params)`, and class methods addressed by the
+/// class-qualified key `Class.method` (incl. `Class.constructor`) — recording
+/// each requested function's parameter symbols. A name seen more than once is
+/// marked ambiguous and skipped.
 struct FunctionParamLocator<'r> {
     wanted: &'r BTreeMap<&'r str, BTreeMap<u32, &'r str>>,
     functions: BTreeMap<String, LocatedFunction>,
@@ -631,6 +633,56 @@ impl<'a, 'r> Visit<'a> for FunctionParamLocator<'r> {
             self.record(id.name.as_str(), params, used);
         }
         oxc_ast::visit::walk::walk_variable_declarator(self, declarator);
+    }
+
+    fn visit_class(&mut self, class: &Class<'a>) {
+        // Class methods are addressed by the class-qualified key `Class.method`
+        // (and `Class.constructor`), so two classes in one file with same-named
+        // methods don't collide into "ambiguous". Anonymous classes and computed
+        // method keys have no stable key and are skipped. `record` itself fast-
+        // rejects keys not in `wanted`, but we pre-check before collecting used
+        // names to avoid that walk on every method.
+        if let Some(class_name) = class.id.as_ref().map(|id| id.name.as_str()) {
+            for element in &class.body.body {
+                let ClassElement::MethodDefinition(method) = element else {
+                    continue;
+                };
+                if method.computed {
+                    continue;
+                }
+                let Some(method_name) = property_key_name(&method.key) else {
+                    continue;
+                };
+                // Getters/setters share their accessor name with each other and
+                // with a same-named field; their parameter shape (0/1) is not a
+                // useful naming target, so skip them.
+                if matches!(
+                    method.kind,
+                    MethodDefinitionKind::Get | MethodDefinitionKind::Set
+                ) {
+                    continue;
+                }
+                let qualified = format!("{class_name}.{method_name}");
+                if !self.wanted.contains_key(qualified.as_str()) {
+                    continue;
+                }
+                let used = collect_used_identifier_names(|collector| {
+                    collector.visit_function(&method.value, ScopeFlags::empty());
+                });
+                self.record(qualified.as_str(), &method.value.params, used);
+            }
+        }
+        oxc_ast::visit::walk::walk_class(self, class);
+    }
+}
+
+/// The static text of a non-computed property key (`identifier`, `"string"`),
+/// or `None` for computed / private keys.
+fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
+    match key {
+        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
+        PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
+        _ => None,
     }
 }
 
@@ -956,6 +1008,53 @@ mod function_param_rename_tests {
         assert!(out.contains("function g(q)"), "got: {out}");
         assert!(out.contains("function g(K)"), "got: {out}");
         assert!(!out.contains("value"), "got: {out}");
+    }
+
+    #[test]
+    fn renames_class_method_params_via_qualified_key() {
+        let out = run(
+            "class BatchQueue { enqueue(e) { this.pending.push(e); } }",
+            &[rename("BatchQueue.enqueue", 0, "items")],
+        );
+        assert!(out.contains("enqueue(items)"), "got: {out}");
+        assert!(out.contains("this.pending.push(items)"), "got: {out}");
+    }
+
+    #[test]
+    fn renames_constructor_param_via_qualified_key() {
+        let out = run(
+            "class BatchQueue { constructor(e) { this.config = e; } }",
+            &[rename("BatchQueue.constructor", 0, "config")],
+        );
+        assert!(out.contains("constructor(config)"), "got: {out}");
+        assert!(out.contains("this.config = config"), "got: {out}");
+    }
+
+    #[test]
+    fn same_method_name_in_two_classes_does_not_collide() {
+        // Both classes have `run`; the class-qualified key keeps them distinct, so
+        // each renames independently rather than being marked ambiguous.
+        let out = run(
+            "class A { run(e) { return e; } } class B { run(e) { return e + 1; } }",
+            &[
+                rename("A.run", 0, "value"),
+                rename("B.run", 0, "count"),
+            ],
+        );
+        assert!(out.contains("run(value)"), "A not renamed: {out}");
+        assert!(out.contains("run(count)"), "B not renamed: {out}");
+    }
+
+    #[test]
+    fn skips_bare_method_name_without_class_qualifier() {
+        // A bare `enqueue` key must not match a class method — only the qualified
+        // `Class.enqueue` form addresses methods.
+        let out = run(
+            "class BatchQueue { enqueue(e) { return e; } }",
+            &[rename("enqueue", 0, "items")],
+        );
+        assert!(out.contains("enqueue(e)"), "bare key wrongly matched: {out}");
+        assert!(!out.contains("items"), "got: {out}");
     }
 
     #[test]
