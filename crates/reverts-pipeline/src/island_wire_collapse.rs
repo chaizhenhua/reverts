@@ -46,19 +46,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_emitter::EmittedFile;
 
-const ISLAND_DIR: &str = "modules/island/";
-/// The star-topology re-export hub. It carries `export { Real as wire };` lines
-/// (its top imports already bind `Real` from each owner), and ~hundreds of files
-/// import bindings from it by wire name — the exact same shape as a cluster, so
-/// it collapses through the identical mechanism.
-const ENTRYPOINT_HUB: &str = "modules/entrypoint.ts";
-
-/// A file whose `export { Local as wire };` aliases this pass collapses: every
-/// island cluster plus the entrypoint hub barrel.
-fn is_collapsible_exporter(path: &str) -> bool {
-    path.starts_with(ISLAND_DIR) || path == ENTRYPOINT_HUB
-}
-
 pub(crate) fn collapse_island_wire_aliases(files: &mut [EmittedFile]) {
     let namespace_consumed = namespace_consumed_islands(files);
     let island_paths = island_path_index(files);
@@ -89,9 +76,14 @@ fn collapse_round(
     island_paths: &BTreeMap<String, String>,
 ) -> usize {
     // Pass 1: drop each `Local as wire` export to `Local`, recording the relocation.
+    // Runs on EVERY file now that islands are flattened to the source root (no
+    // `modules/island/` prefix to gate on). This is safe: rewrite_cluster_exports
+    // only collapses aliases whose EXPORTED name is a minified wire token (not a
+    // readable identifier), so an intentional real-module `export { foo as bar }`
+    // (bar readable) is preserved, while `export { foo as $FA }` collapses.
     let mut relocations = BTreeMap::<(String, String), String>::new();
     for file in files.iter_mut() {
-        if !is_collapsible_exporter(&file.path) || namespace_consumed.contains(&file.path) {
+        if namespace_consumed.contains(&file.path) {
             continue;
         }
         if !file.source.contains("export {") {
@@ -262,7 +254,15 @@ fn rewrite_cluster_exports(
         let rebuilt = entries
             .iter()
             .map(|(local, wire)| match wire {
-                Some(wire) if export_name_count.get(local).copied().unwrap_or(0) == 1 => {
+                // Collapse only when the exported name is a minified WIRE token
+                // (not a readable identifier): drop `foo as $FA` → `foo`, but keep
+                // an intentional `foo as bar` (bar readable) so a real module's
+                // deliberate public API name survives. Also requires the local to
+                // be unique in the clause so the drop can't duplicate a name.
+                Some(wire)
+                    if !is_readable_name(wire)
+                        && export_name_count.get(local).copied().unwrap_or(0) == 1 =>
+                {
                     changed = true;
                     relocations.insert(
                         (cluster_path.to_string(), (*wire).to_string()),
@@ -347,13 +347,13 @@ fn rewrite_importers(
     out.join("\n")
 }
 
-/// Extension-stripped path -> emitted path, for every file whose exports this pass
-/// may collapse (island clusters + the entrypoint hub), so a relative import
-/// specifier can be resolved back to its exporting file.
+/// Extension-stripped path -> emitted path, for EVERY file, so a relative import
+/// specifier can be resolved back to its exporting file. (Islands are now flat at
+/// the source root, so there is no exporter-prefix to filter on; any file may be
+/// an exporter whose wire aliases collapse.)
 fn island_path_index(files: &[EmittedFile]) -> BTreeMap<String, String> {
     files
         .iter()
-        .filter(|f| is_collapsible_exporter(&f.path))
         .map(|f| (strip_ts_ext(&f.path), f.path.clone()))
         .collect()
 }
@@ -576,9 +576,23 @@ mod tests {
     }
 
     #[test]
-    fn leaves_non_island_untouched() {
-        let mut files = vec![f("auth/oauth-constants.ts", "export { X as Y };")];
+    fn preserves_intentional_readable_alias_anywhere() {
+        // After flattening, the pass runs on ALL files (no `modules/island/` gate).
+        // A real-module export under a READABLE alias is a deliberate public name
+        // and must be preserved; only minified wire aliases collapse.
+        let mut files = vec![f(
+            "auth/oauth-constants.ts",
+            "export { internalToken as publicToken };",
+        )];
         collapse_island_wire_aliases(&mut files);
-        assert_eq!(files[0].source, "export { X as Y };");
+        assert_eq!(files[0].source, "export { internalToken as publicToken };");
+    }
+
+    #[test]
+    fn collapses_wire_alias_regardless_of_path() {
+        // A wire alias on a now-flattened (non-`modules/island/`) path still collapses.
+        let mut files = vec![f("auth/oauth.ts", "export { resolveToken as qPe };")];
+        collapse_island_wire_aliases(&mut files);
+        assert_eq!(files[0].source, "export { resolveToken };");
     }
 }

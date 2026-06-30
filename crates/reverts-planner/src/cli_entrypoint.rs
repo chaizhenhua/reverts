@@ -346,27 +346,32 @@ pub(crate) fn emit_entrypoint_island(
 /// uses `mechanical_cluster_path`, keyed by content fingerprint, so the name is
 /// stable across regenerates.
 fn island_cluster_path(cluster_id: usize) -> String {
-    format!("modules/island/cluster-{cluster_id}.ts")
+    format!("clusters/cluster-{cluster_id}.ts")
 }
 
 /// Stable mechanical path for an unnamed island cluster, keyed by its **content
 /// fingerprint** so it does NOT renumber across regenerates (unlike the legacy
 /// sequential `cluster-<id>` form). Binding names keyed to this path therefore
 /// survive a regenerate without re-homing. A cluster with an accepted
-/// `cluster-names` override emits at its semantic path instead.
+/// `cluster-names` override emits at its semantic path instead. Unnamed clusters
+/// land in a dedicated top-level `clusters/` bucket (honest: unclassified) — not
+/// nested under a `modules/island/` process prefix.
 fn mechanical_cluster_path(fingerprint: &str) -> String {
-    format!("modules/island/cluster-{fingerprint}.ts")
+    format!("clusters/cluster-{fingerprint}.ts")
 }
 
 /// Emit path for a cluster with an accepted semantic `cluster-names` override.
-/// The override is a relative path UNDER `modules/island/` (e.g.
-/// `telemetry/opentelemetry-instrumentation`); each segment is sanitized to a
-/// safe path component and a numeric suffix breaks any collision so two clusters
-/// never map to the same file. `used` accumulates the paths already taken.
+/// The override is a SOURCE-ROOT-relative path (e.g.
+/// `telemetry/opentelemetry-instrumentation`), a peer of the recovered real-module
+/// directories — island clusters are NOT segregated under a `modules/island/`
+/// process prefix. Each segment is sanitized to a safe path component and a
+/// numeric suffix breaks any collision (against islands AND already-emitted real
+/// module files, since `used` is seeded globally) so two files never map to one
+/// path.
 fn semantic_island_cluster_path(semantic: &str, used: &mut BTreeSet<String>) -> String {
-    // The override is RELATIVE to `modules/island/`. Some accepted names were
-    // recorded with a redundant leading `modules/island/` (or `island/`); strip
-    // it so the cluster does not nest under a doubled `modules/island/...` path.
+    // Accepted names are root-relative. Some were recorded with a redundant
+    // leading `modules/island/` (or `island/`) prefix from the legacy layout;
+    // strip it so the cluster lands flat at the root, not under a stale prefix.
     let mut normalized = semantic.trim().trim_matches('/');
     loop {
         let next = normalized
@@ -394,12 +399,12 @@ fn semantic_island_cluster_path(semantic: &str, used: &mut BTreeSet<String>) -> 
     } else {
         cleaned
     };
-    let mut candidate = format!("modules/island/{base}.ts");
+    let mut candidate = format!("{base}.ts");
     if used.insert(candidate.clone()) {
         return candidate;
     }
     for suffix in 2.. {
-        candidate = format!("modules/island/{base}-{suffix}.ts");
+        candidate = format!("{base}-{suffix}.ts");
         if used.insert(candidate.clone()) {
             return candidate;
         }
@@ -918,7 +923,13 @@ fn emit_island_clusters(
         })
         .collect();
     let mut cluster_paths: BTreeMap<usize, String> = BTreeMap::new();
-    let mut used_cluster_paths: BTreeSet<String> = BTreeSet::new();
+    // Seed the collision registry with EVERY already-planned file path (real
+    // modules emitted by PlanModulesPass, runtime helpers, the hub). Island
+    // clusters now land flat at the source root, peers of those files, so a
+    // semantic cluster name that matches an existing path (e.g. `git/git-operations`)
+    // must take a numeric suffix instead of silently overwriting it.
+    let mut used_cluster_paths: BTreeSet<String> =
+        plan.files.iter().map(|file| file.path.clone()).collect();
     for group in &clusters {
         let fingerprint = cluster_fingerprints.get(&group.cluster_id);
         let path = fingerprint
@@ -1595,7 +1606,7 @@ mod tests {
         );
         assert_eq!(
             mechanical_cluster_path(&fp),
-            format!("modules/island/cluster-{fp}.ts"),
+            format!("clusters/cluster-{fp}.ts"),
         );
         // Order-independent fingerprint → identical path for the same content.
         let fp2 = crate::island_split::cluster_fingerprint(
@@ -1615,22 +1626,19 @@ mod tests {
         // Nested path is preserved; unsafe characters collapse to `-`.
         assert_eq!(
             semantic_island_cluster_path("telemetry/open telemetry!", &mut used),
-            "modules/island/telemetry/open-telemetry.ts"
+            "telemetry/open-telemetry.ts"
         );
         // A second accept resolving to the same base gets a numeric suffix.
         assert_eq!(
             semantic_island_cluster_path("telemetry/open telemetry!", &mut used),
-            "modules/island/telemetry/open-telemetry-2.ts"
+            "telemetry/open-telemetry-2.ts"
         );
         // Leading/trailing slashes and empty segments are dropped; an all-garbage
         // name still yields a usable file.
-        assert_eq!(
-            semantic_island_cluster_path("/a//b/", &mut used),
-            "modules/island/a/b.ts"
-        );
+        assert_eq!(semantic_island_cluster_path("/a//b/", &mut used), "a/b.ts");
         assert_eq!(
             semantic_island_cluster_path("///", &mut used),
-            "modules/island/island-cluster.ts"
+            "island-cluster.ts"
         );
     }
 
@@ -1641,22 +1649,22 @@ mod tests {
         // nest under a doubled `modules/island/modules/island/...` path.
         assert_eq!(
             semantic_island_cluster_path("modules/island/vendor/node-forge", &mut used),
-            "modules/island/vendor/node-forge.ts"
+            "vendor/node-forge.ts"
         );
         // A bare `island/` prefix is stripped too.
         assert_eq!(
             semantic_island_cluster_path("island/telemetry/spans", &mut used),
-            "modules/island/telemetry/spans.ts"
+            "telemetry/spans.ts"
         );
         // Repeated/leading-slash prefixes collapse fully.
         assert_eq!(
             semantic_island_cluster_path("/modules/island/modules/island/auth/token", &mut used),
-            "modules/island/auth/token.ts"
+            "auth/token.ts"
         );
         // A correctly-relative name is unaffected.
         assert_eq!(
             semantic_island_cluster_path("plugins/local-plugins", &mut used),
-            "modules/island/plugins/local-plugins.ts"
+            "plugins/local-plugins.ts"
         );
     }
 
@@ -1721,7 +1729,7 @@ mod tests {
         // A name recorded with a trailing `.ts` must NOT double into `.ts.ts`.
         assert_eq!(
             super::semantic_island_cluster_path("account/active-org-resolver.ts", &mut used),
-            "modules/island/account/active-org-resolver.ts"
+            "account/active-org-resolver.ts"
         );
         // A redundant `modules/island/` prefix is still stripped (not nested).
         assert_eq!(
@@ -1729,17 +1737,17 @@ mod tests {
                 "modules/island/util/deferred-promise.ts",
                 &mut used
             ),
-            "modules/island/util/deferred-promise.ts"
+            "util/deferred-promise.ts"
         );
         // A clean name (no extension) is unchanged, and collisions get a numeric
         // suffix rather than re-doubling.
         assert_eq!(
             super::semantic_island_cluster_path("auth/oauth", &mut used),
-            "modules/island/auth/oauth.ts"
+            "auth/oauth.ts"
         );
         assert_eq!(
             super::semantic_island_cluster_path("auth/oauth.ts", &mut used),
-            "modules/island/auth/oauth-2.ts"
+            "auth/oauth-2.ts"
         );
     }
 }
