@@ -244,8 +244,8 @@ fn resolve(base_dir: &str, rel_stem: &str) -> String {
     segments.join("/")
 }
 
-/// Build a relative specifier from `from_dir` to `target` (extensionless),
-/// re-appending `ext` (e.g. `.js`).
+/// Build a relative specifier from `from_dir` (a directory) to `target` (a
+/// file path, extensionless), re-appending `ext` (e.g. `.js`).
 fn relative_specifier(from_dir: &str, target: &str, ext: &str) -> String {
     let from: Vec<&str> = if from_dir.is_empty() {
         Vec::new()
@@ -253,8 +253,15 @@ fn relative_specifier(from_dir: &str, target: &str, ext: &str) -> String {
         from_dir.split('/').collect()
     };
     let to: Vec<&str> = target.split('/').collect();
+    // The common-prefix walk compares DIRECTORY segments only. `target`'s last
+    // segment is its FILENAME, never a directory, so it must not be consumed as
+    // shared prefix — otherwise a file whose path string equals `from_dir` (e.g.
+    // importer dir `a/b/observable/` and sibling file `a/b/observable.ts`, both
+    // `a/b/observable`) would count as "same location" and yield `./` + ext
+    // (`./.js`) instead of stepping up to `../observable.js`.
+    let to_dir_len = to.len().saturating_sub(1);
     let mut common = 0;
-    while common < from.len() && common < to.len() && from[common] == to[common] {
+    while common < from.len() && common < to_dir_len && from[common] == to[common] {
         common += 1;
     }
     let ups = from.len() - common;
@@ -372,6 +379,34 @@ mod tests {
         flatten_modules_residue(&mut files, &mut []);
         assert_eq!(files[0].path, "auth/oauth.ts");
         assert_eq!(files[0].source, "import { y } from '../git/ops.js';");
+    }
+
+    #[test]
+    fn recomputes_import_to_sibling_file_sharing_a_directory_name() {
+        // A file `vendor/rxjs/observable.ts` (exports gEA) sits beside a directory
+        // `vendor/rxjs/observable/` containing `iif.ts` which imports gEA. The
+        // flatten pass rewrites every file's specifiers; the importer's dir string
+        // equals the target file's path string (`vendor/rxjs/observable`), which
+        // must resolve to `../observable.js`, NOT the degenerate `./.js`.
+        let mut files = vec![
+            f("modules/entrypoint.ts", "export { hub };"),
+            f("vendor/rxjs/observable.ts", "export function gEA() {}"),
+            f(
+                "vendor/rxjs/observable/iif.ts",
+                "import { gEA } from '../observable.js';\nvar A = gEA();",
+            ),
+        ];
+        flatten_modules_residue(&mut files, &mut []);
+        let iif = files
+            .iter()
+            .find(|file| file.path == "vendor/rxjs/observable/iif.ts")
+            .expect("iif file present");
+        assert!(
+            iif.source.contains("from '../observable.js'"),
+            "sibling import mangled: {}",
+            iif.source
+        );
+        assert!(!iif.source.contains("'./.js'"), "got: {}", iif.source);
     }
 
     #[test]
