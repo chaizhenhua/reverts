@@ -20,11 +20,19 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # 1. A no-top-level-await entry (the bundle must not mix require()+TLA).
-cat > "$APP/.__boot_entry.mjs" <<'EOF'
-import { zUt } from './src/modules/entrypoint.js';
+#    The boot entry is src/cli.ts, which awaits the recovered main from
+#    src/entrypoint.ts. The main's export name is a recovered symbol that can
+#    change across regenerations, so we resolve it dynamically: import the
+#    entrypoint namespace and invoke the boot function cli.ts calls (matched by
+#    reading which export cli.ts imports), falling back to the sole default-ish
+#    async export. `BOOT_EXPORT` can override it explicitly.
+BOOT_EXPORT="${BOOT_EXPORT:-$(sed -n "s/.*import { \([A-Za-z0-9_\$]*\) } from '\.\/entrypoint\.js'.*/\1/p" "$APP/src/cli.ts" | head -1)}"
+BOOT_EXPORT="${BOOT_EXPORT:-buildSvgSetupPromptForWidth}"
+cat > "$APP/.__boot_entry.mjs" <<EOF
+import { ${BOOT_EXPORT} as __boot } from './src/entrypoint.js';
 globalThis.__bootSmoke = globalThis.__bootSmoke || {};
 (async () => {
-  try { await zUt(); globalThis.__bootSmoke.zutResolved = true; }
+  try { await __boot(); globalThis.__bootSmoke.zutResolved = true; }
   catch (e) { globalThis.__bootSmoke.bootError = (e && (e.stack || String(e))) || 'x'; }
 })();
 EOF
